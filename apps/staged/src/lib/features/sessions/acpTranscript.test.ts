@@ -22,8 +22,10 @@ function message(
 }
 
 describe('buildAcpTranscriptGroups', () => {
-  it('shows a write_note call as its own "Saved note" row named after the note', () => {
-    const noteInput = { title: 'Plan' };
+  it('shows a write_note call as its own "Saved note" row, the verb alone', () => {
+    // The call's only argument is the suggested next steps: the note's title
+    // is in the draft file, so the row has no name beside its verb.
+    const noteInput = { suggested_next_steps: { suggestedNextCommitStep: 'Implement this plan' } };
     const visible = [
       message({
         id: 1,
@@ -45,7 +47,7 @@ describe('buildAcpTranscriptGroups', () => {
       message({
         id: 3,
         role: 'tool_call',
-        content: JSON.stringify({ name: 'staged: write note', input: noteInput }),
+        content: JSON.stringify({ name: 'staged: write note', input: {} }),
         acpEventKind: 'tool_call',
         acpToolCallId: 'tc-goose',
         acpToolStatus: 'in_progress',
@@ -58,12 +60,55 @@ describe('buildAcpTranscriptGroups', () => {
     if (group.type !== 'tools') throw new Error('expected a tool group');
     expect(group.items.map((item) => [item.verb, item.detail])).toEqual([
       ['Ran', 'ToolSearch'],
-      ['Saved note', 'Plan'],
-      ['Saving note', 'Plan'],
+      ['Saved note', ''],
+      ['Saving note', ''],
     ]);
     // Different verbs: the note rows never fold into a "Ran N commands" group.
     expect(groupRichToolsByVerb(group.items).map((verbGroup) => verbGroup.items.length)).toEqual([
       1, 1, 1,
+    ]);
+  });
+
+  it('names a write_note call recorded with a title after it', () => {
+    // A transcript from before the title moved into the draft file: the call
+    // passed the title, and its row still shows it.
+    const noteInput = { title: 'Plan' };
+    const visible = [
+      message({
+        id: 1,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'mcp__staged__write_note', input: noteInput }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-note',
+        acpToolStatus: 'completed',
+        acpRawInput: noteInput,
+      }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'staged: write note', input: noteInput }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-goose',
+        acpToolStatus: 'in_progress',
+      }),
+      message({
+        id: 3,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'mcp.staged.write_note', input: noteInput }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-codex',
+        acpToolStatus: 'failed',
+      }),
+    ];
+
+    const groups = buildAcpTranscriptGroups(visible, []);
+    expect(groups).toHaveLength(1);
+    const group = groups[0];
+    if (group.type !== 'tools') throw new Error('expected a tool group');
+    expect(group.items.map((item) => [item.verb, item.detail])).toEqual([
+      ['Saved note', 'Plan'],
+      ['Saving note', 'Plan'],
+      ['Note rejected', 'Plan'],
     ]);
   });
 
@@ -121,10 +166,7 @@ describe('buildAcpTranscriptGroups', () => {
       message({
         id: 1,
         role: 'tool_call',
-        content: JSON.stringify({
-          name: 'mcp__staged__write_note',
-          input: { title: 'Disconnect test note' },
-        }),
+        content: JSON.stringify({ name: 'mcp__staged__write_note', input: {} }),
         acpEventKind: 'tool_call',
         acpToolCallId: 'tc-1',
         acpToolStatus: 'in_progress',
@@ -148,7 +190,7 @@ describe('buildAcpTranscriptGroups', () => {
     expect(group.items[0]).toMatchObject({
       status: 'completed',
       verb: 'Saved note',
-      detail: 'Disconnect test note',
+      detail: '',
       statusTone: 'success',
     });
     // Finished like any other completed call: the footer shows no status
@@ -182,10 +224,7 @@ describe('buildAcpTranscriptGroups', () => {
       message({
         id: 2,
         role: 'tool_call',
-        content: JSON.stringify({
-          name: 'mcp__staged__write_note',
-          input: { title: 'First attempt' },
-        }),
+        content: JSON.stringify({ name: 'mcp__staged__write_note', input: {} }),
         acpEventKind: 'tool_call',
         acpToolCallId: 'tc-1',
         acpToolStatus: 'in_progress',
@@ -194,10 +233,7 @@ describe('buildAcpTranscriptGroups', () => {
       message({
         id: 4,
         role: 'tool_call',
-        content: JSON.stringify({
-          name: 'mcp__staged__write_note',
-          input: { title: 'Second attempt' },
-        }),
+        content: JSON.stringify({ name: 'mcp__staged__write_note', input: {} }),
         acpEventKind: 'tool_call',
         acpToolCallId: 'tc-2',
         acpToolStatus: 'in_progress',
@@ -208,9 +244,9 @@ describe('buildAcpTranscriptGroups', () => {
       sessionCompleted: true,
     });
     const tools = groups.flatMap((g) => (g.type === 'tools' ? g.items : []));
-    expect(tools.map((t) => [t.detail, t.verb, t.statusLabel])).toEqual([
-      ['First attempt', 'Note not saved', 'Interrupted'],
-      ['Second attempt', 'Saved note', 'Succeeded'],
+    expect(tools.map((t) => [t.key, t.verb, t.statusLabel])).toEqual([
+      ['tool:tc-1', 'Note not saved', 'Interrupted'],
+      ['tool:tc-2', 'Saved note', 'Succeeded'],
     ]);
   });
 

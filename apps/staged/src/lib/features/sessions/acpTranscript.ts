@@ -1,6 +1,6 @@
 import type { SessionMessage } from '../../types';
 import type { DisplayRootInput } from './pathDisplayRoots';
-import { writeNoteToolCall, writeNoteVerb } from './noteToolCall';
+import { writeNoteRowDetail, writeNoteToolCall, writeNoteVerb } from './noteToolCall';
 import { formatToolDisplay, parseToolCall, verbGroupSummary } from './sessionModalHelpers';
 import { deferredToolBody } from './toolCallBodies';
 
@@ -677,11 +677,12 @@ function richToolItem(
       ? 'completed'
       : recordedStatus;
   const pending = status === 'pending' || status === 'in_progress';
-  // The `write_note` row shows the note it saved, not a shell line. An
-  // interrupted call says so in its header, not just in its status dot.
+  // The `write_note` row says what became of the note, not a shell line; a
+  // call recorded with a title is named after it. An interrupted call says
+  // so in its header, not just in its status dot.
   const note = writeNoteToolCall(tool.call.content, tool.metadata.rawInput);
   const display = note
-    ? { verb: writeNoteVerb(status), detail: note.title }
+    ? { verb: writeNoteVerb(status), detail: writeNoteRowDetail(note) }
     : interrupted
       ? { verb: 'Interrupted', detail: formatToolDisplay(tool.call.content, displayRoots).detail }
       : formatToolDisplay(tool.call.content, displayRoots, pending);

@@ -60,7 +60,23 @@ const readline = require("readline");
 
 // Reported as `serverInfo.version` and stamped by tools into what they write
 // (`write_note`'s `meta.json` keeps it under its original `helperVersion` key).
-const SERVER_VERSION = 7;
+//
+// Version 8: `write_note` accepts a call without `title` and takes the title
+// from the draft's first line, and `meta.json` holds the title exactly as the
+// laptop stores it. The laptop reads the version to tell that from the title
+// of an earlier script, which it still normalizes itself
+// (`remote_staged_mcp::note_outbox::outbox_state`).
+//
+// Version 9: `title` is no longer an argument of `write_note`. The title is
+// always the draft's first line, and the tool's schema, description and
+// instructions say so. What a call writes into the outbox is unchanged.
+//
+// Version 10: the draft's title line ends at the first line ending of any
+// kind, a "\r" on its own included, where it ended only at a "\n" before. A
+// draft with CR-only line endings is split into title and body (it was
+// rejected as holding only the title line), and a title never holds a "\r".
+// The outbox format is unchanged.
+const SERVER_VERSION = 10;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -144,11 +160,16 @@ function removeIfPresent(filePath) {
 
 // write_note: publish the draft into the note outbox.
 //
-// The note body is the session's draft file, `draft.md` in the session
-// directory, which the agent writes with its own file tools (Staged seeds it
-// with the stored body for an amendment and leaves it absent for a fresh
-// note). A call reads the draft and replaces the session's note, atomically
-// (temp file + rename), in the session directory:
+// The note is the session's draft file, `draft.md` in the session directory,
+// which the agent writes with its own file tools (Staged seeds it with the
+// stored note for an amendment and leaves it absent for a fresh note). A
+// call reads the draft and replaces the session's note, atomically (temp
+// file + rename), in the session directory.
+//
+// The draft's first line is the note's title, a `# Title` heading, and the
+// rest is the body (`splitDraftTitle`). The title is not an argument. The
+// two are published apart: `meta.json` holds the title and `note.md` the
+// body without the title line:
 //
 //     draft.md   the agent's draft (the laptop seeds and clears it; this
 //                server only reads it)
@@ -156,6 +177,11 @@ function removeIfPresent(filePath) {
 //     meta.json  {"title", "suggestedNextSteps", "turn", "writtenAt", "helperVersion"}
 //     done       marker: the turn delivered a note. It holds the call's
 //                generation token, 32 hex characters, new on every call
+//
+// A `title` argument is still read, though the schema does not list it, for
+// a session resumed with the earlier instructions in its context: one that
+// agrees with the draft's title line is accepted and one that does not is
+// rejected (`staleTitleAgrees`).
 //
 // `done` is removed before a rewrite starts and recreated after both files
 // are in place, so the marker is absent for the whole of a rewrite. That
@@ -171,22 +197,20 @@ function removeIfPresent(filePath) {
 const WRITE_NOTE_DESCRIPTION =
   "Publish the note this session is producing. This call is the deliverable: " +
   "Staged stores the current contents of your note draft file (the path is in your instructions) " +
-  "as the note body, under the title you pass here, and does not read your assistant text. " +
-  "Write the whole note body into the draft file first; calling again republishes the file, " +
+  "as the note, and does not read your assistant text. The file's first line must be the note's " +
+  "title as a level-1 markdown heading (`# Title`), and everything below that line is the note " +
+  "body. Write the whole note into the draft file first. Calling again republishes the file, " +
   "and the last call of the turn wins. After the result says the note is saved, send a simple " +
   '"Done" message with no other text to end your turn, rather than summarising the work done. ' +
   "If the user asked you a question, answer it before making this call.";
 
 // Mirrors the schema rmcp derives from `WriteNoteParams`; the Rust test
 // `write_note_schema_matches_the_rust_tool_schema` checks property names and
-// required fields. There is no `body`: the body is the draft file.
+// required fields. There is no `body` and no `title`: both are the draft
+// file. Nothing is required.
 const WRITE_NOTE_INPUT_SCHEMA = {
   type: "object",
   properties: {
-    title: {
-      type: "string",
-      description: "The note title, shown as its heading. Plain text, no markdown, no leading `#`.",
-    },
     suggested_next_steps: {
       description:
         "What the user might want to do next. Keep both fields to a few words and use " +
@@ -203,7 +227,6 @@ const WRITE_NOTE_INPUT_SCHEMA = {
       ],
     },
   },
-  required: ["title"],
 };
 
 // The draft file name and the largest draft a call publishes; both match
@@ -268,8 +291,9 @@ function readUpTo(fd, limit) {
 /**
  * Read and validate the draft: a regular file, at most DRAFT_MAX_BYTES,
  * UTF-8, non-empty once a leading byte order mark and the surrounding
- * whitespace are removed. Returns `{ body }` or `{ error }` with the same
- * wording as `note_draft::DraftError::describe` on the laptop.
+ * whitespace are removed. Returns `{ draft }`, the whole draft with its
+ * title line, or `{ error }` with the same wording as
+ * `note_draft::DraftError::describe` on the laptop.
  *
  * Same steps, in the same order, as `note_draft::read_draft`. The file is
  * opened once and everything is asked of the descriptor, so the file that is
@@ -303,7 +327,7 @@ function readDraft(context) {
     if (!stat.isFile()) {
       return {
         error: draftRejection(
-          "`" + filePath + "` is not a regular file. The draft must be a plain file holding the note body"
+          "`" + filePath + "` is not a regular file. The draft must be a plain file holding the note"
         ),
       };
     }
@@ -319,8 +343,8 @@ function readDraft(context) {
         error: draftRejection(
           "the draft file `" +
             filePath +
-            "` does not exist. This file is your note: write the full note body (markdown, " +
-            "without the title) into it"
+            "` does not exist. This file is your note: write the full note into it as markdown, " +
+            "starting with the title as a `# ` heading on the first line"
         ),
       };
     }
@@ -353,17 +377,101 @@ function readDraft(context) {
   }
   // One leading U+FEFF is an encoding mark some editors write, not note text.
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  const body = rustTrim(text);
+  const draft = rustTrim(text);
+  if (draft.length === 0) {
+    return {
+      error: draftRejection(
+        "the draft file `" +
+          filePath +
+          "` is empty. Write the full note into it as markdown, starting with the title as a " +
+          "`# ` heading on the first line"
+      ),
+    };
+  }
+  return { draft: draft };
+}
+
+/**
+ * Split a draft that opens with its title into `{ title, body }`, or return
+ * `{ error }` with the wording of `DraftError::MissingTitle` and
+ * `DraftError::TitleOnly` on the laptop. `draft` is what `readDraft`
+ * returns, so its first line is the file's first non-blank line.
+ *
+ * The same rule as `note_draft::split_title`, which the laptop's handler
+ * applies to every call:
+ *
+ *   1. The first line is the text up to the first line ending, which is a
+ *      "\n", a "\r\n" or a "\r" on its own, as in CommonMark.
+ *   2. It must be one `#` followed by a space or a tab. The title is the rest
+ *      of the line, trimmed as Rust trims, and must not be empty.
+ *   3. The body is everything after that line ending, trimmed, and must not
+ *      be empty.
+ *
+ * Only that line is consumed: `##` is a section and never a title, the title
+ * text is kept as written (inline markdown, a `#` of its own and the
+ * whitespace inside it included), and a later `# Heading` is body text. A
+ * title never holds a "\r" or a "\n". U+2028 and the like do not end a line
+ * in markdown and are title text.
+ * `write_note_reads_the_same_drafts_on_both_transports` runs both
+ * implementations over the same drafts.
+ */
+function splitDraftTitle(context, draft) {
+  const filePath = draftPath(context);
+  const lineEnd = draft.search(/[\r\n]/);
+  const firstLine = lineEnd === -1 ? draft : draft.slice(0, lineEnd);
+  // A "\r\n" is one line ending, not two.
+  const lineEndLength = draft.startsWith("\r\n", lineEnd) ? 2 : 1;
+  const rest = lineEnd === -1 ? "" : draft.slice(lineEnd + lineEndLength);
+  const afterMarker = firstLine.charCodeAt(1);
+  const title =
+    firstLine.charCodeAt(0) === 0x23 && (afterMarker === 0x20 || afterMarker === 0x09)
+      ? rustTrim(firstLine.slice(1))
+      : "";
+  if (title.length === 0) {
+    return {
+      error: draftRejection(
+        "the draft file `" +
+          filePath +
+          "` does not start with the note's title. Its first non-blank line must be a " +
+          "level-1 markdown heading: `# ` followed by the title on one line (not `##`, not a " +
+          "line underlined with `===`, and nothing above it). Add that line at the top and " +
+          "leave the rest of the note below it"
+      ),
+    };
+  }
+  const body = rustTrim(rest);
   if (body.length === 0) {
     return {
       error: draftRejection(
         "the draft file `" +
           filePath +
-          "` is empty. Write the full note body (markdown, without the title) into it"
+          "` holds only the title line. Write the note body in markdown below the `# ` title line"
       ),
     };
   }
-  return { body: body };
+  return { title: title, body: body };
+}
+
+/**
+ * Whether a `title` argument passed under the earlier contract names the
+ * title the draft's first line holds (`headingTitle`, as `splitDraftTitle`
+ * returns it).
+ *
+ * The same rule as `stale_title_agrees` in `note_tool.rs` on the laptop: it
+ * agrees when it is a string that, trimmed as Rust trims, is the heading
+ * title as written, or is that title behind one `#` (the earlier contract
+ * stripped one leading `#` from the argument). Nothing more is stripped, so
+ * `## Plan` agrees with a draft that opens `# # Plan` and not with one that
+ * opens `# Plan`. Anything else, an empty string and a value that is not a
+ * string included, does not agree.
+ * `write_note_reads_the_same_drafts_on_both_transports` runs both
+ * implementations over the same calls.
+ */
+function staleTitleAgrees(argument, headingTitle) {
+  if (typeof argument !== "string") return false;
+  const trimmed = rustTrim(argument);
+  if (trimmed === headingTitle) return true;
+  return trimmed.charCodeAt(0) === 0x23 && rustTrim(trimmed.slice(1)) === headingTitle;
 }
 
 function cleanStep(value) {
@@ -419,31 +527,20 @@ function generationToken() {
   return crypto.randomBytes(16).toString("hex");
 }
 
-/** Validate the arguments, read the draft and write the note outbox. Returns {text, isError}. */
+/**
+ * Validate the arguments, read the draft and write the note outbox. Returns
+ * {text, isError}.
+ *
+ * The title is the draft's first line and the body is the rest
+ * (`splitDraftTitle`), as on the laptop's handler. A call that also passes
+ * the former `title` argument (anything but null) is accepted when the
+ * argument agrees with that line and rejected when it does not
+ * (`staleTitleAgrees`): ignoring it would silently drop a rename asked for
+ * by an agent whose context still holds the earlier instructions.
+ */
 function writeNote(context, args) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
     return { text: "write_note rejected: arguments must be an object.", isError: true };
-  }
-  let title = args.title;
-  if (typeof title !== "string") {
-    return {
-      text: "write_note rejected: `title` must be a string. Call it again with a non-empty one-line title.",
-      isError: true,
-    };
-  }
-  title = title.trim();
-  if (title.startsWith("#")) title = title.slice(1).trim();
-  if (title.length === 0) {
-    return {
-      text: "write_note rejected: `title` must not be empty. Call it again with a non-empty one-line title.",
-      isError: true,
-    };
-  }
-  if (title.indexOf("\n") !== -1) {
-    return {
-      text: "write_note rejected: `title` must be a single line. Call it again with a one-line title.",
-      isError: true,
-    };
   }
   let steps;
   try {
@@ -451,17 +548,42 @@ function writeNote(context, args) {
   } catch (error) {
     return { text: "write_note rejected: " + error.message + ".", isError: true };
   }
-  // The draft is read after the arguments are checked so a bad title never
-  // costs a file read, and before anything is written so a bad draft leaves
-  // the outbox exactly as it was.
-  const draft = readDraft(context);
-  if (draft.error) {
+  // The draft is read before anything is written, so a bad draft leaves the
+  // outbox exactly as it was.
+  const read = readDraft(context);
+  if (read.error) {
     log("write_note could not read the draft for session " + context.sessionId);
-    return { text: draft.error, isError: true };
+    return { text: read.error, isError: true };
   }
-  const body = draft.body;
+  // A draft with no title line, or nothing under it, is rejected like an
+  // unreadable one. This comes before the stale `title` check, as on the
+  // laptop, so such a call is told to add the line.
+  const split = splitDraftTitle(context, read.draft);
+  if (split.error) {
+    log("write_note found no title and body in the draft for session " + context.sessionId);
+    return { text: split.error, isError: true };
+  }
+  const title = split.title;
+  const body = split.body;
+  if (args.title !== undefined && args.title !== null && !staleTitleAgrees(args.title, title)) {
+    log("write_note was passed a title that differs from the draft's for session " + context.sessionId);
+    // Must stay word-for-word in step with `SubmissionError::StaleTitle` in
+    // `note_tool.rs` on the laptop.
+    return {
+      text:
+        "write_note rejected: `title` is no longer an argument. The note's title is the first " +
+        "line of the draft file `" +
+        draftPath(context) +
+        '`, currently "' +
+        title +
+        '", which differs from the `title` you passed. Edit that line if the title should ' +
+        "change, then call write_note again without `title`.",
+      isError: true,
+    };
+  }
 
   const directory = ensureSessionDir(context);
+  // `meta.json` holds the title as the laptop stores it: as written.
   const meta = {
     title: title,
     suggestedNextSteps: steps,
@@ -495,7 +617,8 @@ const WRITE_NOTE_TOOL = {
       "Your note draft file is `" +
       draftPath(context) +
       "`. This file is your note: write it, edit it, and when it is ready call write_note " +
-      "(title and suggested next steps) to publish it; your assistant text is not saved."
+      "(suggested next steps) to publish it; your assistant text is not saved. Its first line " +
+      "must be the note's title as a level-1 markdown heading (`# Title`)."
     );
   },
   failureText: function (error) {

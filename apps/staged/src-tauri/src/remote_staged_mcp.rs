@@ -522,7 +522,7 @@ mod tests {
 
         let init = &responses[0]["result"];
         assert_eq!(init["serverInfo"]["name"], SERVER_NAME);
-        assert_eq!(init["serverInfo"]["version"], "7");
+        assert_eq!(init["serverInfo"]["version"], "10");
         assert_eq!(init["capabilities"], serde_json::json!({"tools": {}}));
         // The instructions name the session's draft file by absolute path:
         // the one spelling of it an agent that expands neither `~` nor
@@ -531,8 +531,9 @@ mod tests {
             init["instructions"],
             format!(
                 "Your note draft file is `{}`. This file is your note: write it, edit it, and \
-                 when it is ready call write_note (title and suggested next steps) to publish \
-                 it; your assistant text is not saved.",
+                 when it is ready call write_note (suggested next steps) to publish it; your \
+                 assistant text is not saved. Its first line must be the note's title as a \
+                 level-1 markdown heading (`# Title`).",
                 home.path()
                     .join(".staged/sessions/sess-1/draft.md")
                     .display()

@@ -47,18 +47,28 @@ function message(
 const user = (id: number, content = 'Write the note') => message({ id, role: 'user', content });
 const assistant = (id: number, content: string) => message({ id, role: 'assistant', content });
 
-const NOTE_INPUT = { title: 'Plan' };
+/** The call's arguments: the suggested next steps only. The title is in the draft file. */
+const NOTE_INPUT: Record<string, unknown> = {
+  suggested_next_steps: { suggestedNextCommitStep: 'Implement this plan' },
+};
+/** The arguments of a call recorded before the title moved into the draft file. */
+const TITLED_NOTE_INPUT = { title: 'Plan', ...NOTE_INPUT };
 
 /** A `write_note` call row, in Claude Code's spelling unless `name` says otherwise. */
-function noteCall(id: number, status: ToolStatus = 'completed', name = 'mcp__staged__write_note') {
+function noteCall(
+  id: number,
+  status: ToolStatus = 'completed',
+  name = 'mcp__staged__write_note',
+  input = NOTE_INPUT
+) {
   return message({
     id,
     role: 'tool_call',
-    content: JSON.stringify({ name, input: NOTE_INPUT }),
+    content: JSON.stringify({ name, input }),
     acpEventKind: 'tool_call',
     acpToolCallId: `tc-${id}`,
     acpToolStatus: status,
-    acpRawInput: NOTE_INPUT,
+    acpRawInput: input,
   });
 }
 
@@ -89,6 +99,15 @@ describe('hiddenNoteDoneMessageIds', () => {
     ['Codex', 'mcp.staged.write_note'],
   ])('finds the call as %s names it', (_agent, name) => {
     expect(hiddenIds([user(1), noteCall(2, 'completed', name), assistant(3, 'Done')])).toEqual([3]);
+  });
+
+  it.each([
+    ['no arguments', {}],
+    ['a title, as recorded before the title moved into the draft file', TITLED_NOTE_INPUT],
+  ])('hides a bare Done after a saved call with %s', (_label, input) => {
+    const call = (status: ToolStatus) => noteCall(2, status, 'mcp__staged__write_note', input);
+    expect(hiddenIds([user(1), call('completed'), assistant(3, 'Done')])).toEqual([3]);
+    expect(hiddenIds([user(1), call('failed'), assistant(3, 'Done')])).toEqual([]);
   });
 
   it('finds a call whose row holds only the tool name', () => {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { writeNoteCallHasDetails } from '../noteToolCall';
   import type { ToolCallViewModel } from '../toolCallViewModel';
   import OutputSections from './OutputSections.svelte';
 
@@ -8,14 +9,16 @@
 
   let { viewModel }: Props = $props();
 
-  // The call carries the title and the suggested next steps; the body is the
-  // session's draft file, published into the stored note.
+  // The call carries the suggested next steps. The note itself, title and
+  // body, is the session's draft file, published into the stored note. A
+  // call recorded before the title moved into that file has a title too,
+  // and it is still shown.
   let note = $derived(viewModel.metadata.note);
   let hasSteps = $derived(!!(note?.suggestedNextCommitStep || note?.suggestedNextNoteStep));
 </script>
 
 <div class="tool-detail-stack">
-  {#if note && (note.title || hasSteps)}
+  {#if note && writeNoteCallHasDetails(note)}
     <div class="tool-command-panel tool-note-panel">
       {#if note.title}
         <div class="tool-note-title">{note.title}</div>

@@ -327,12 +327,12 @@ fn a_late_note_with_a_broken_diagram_settles_the_hold_stopped_row_and_keeps_the_
 
 /// Write `body` into the session's outbox under `home` as `write_note` does
 /// for the run whose turn id is `turn`, with the draft it was published
-/// from.
+/// from: the title line, then the body.
 fn publish(home: &std::path::Path, session_id: &str, turn: &str, body: &str) {
     let outbox = home.join(".staged/sessions").join(session_id);
     std::fs::create_dir_all(&outbox).unwrap();
     for (file, content) in [
-        ("draft.md", format!("{body}\n")),
+        ("draft.md", format!("# Plan\n\n{body}\n")),
         ("note.md", body.to_string()),
         (
             "meta.json",
@@ -404,12 +404,13 @@ fn a_note_the_sweep_turned_down_is_repaired_from_its_draft_by_the_resume() {
     }
     assert_eq!(
         std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
-        format!("{BROKEN}\n")
+        format!("# Plan\n\n{BROKEN}\n")
     );
     assert_eq!(store.get_note(&note_id).unwrap().unwrap().content, "");
 
     // The run opens with the repair request, which points at the block's
-    // line in the draft that is still there.
+    // line in the draft that is still there: line 3 of the body, which is
+    // line 5 of the file, so the prompt says where the count starts.
     let draft_path = outbox.join("draft.md").to_string_lossy().into_owned();
     let prompt = first_turn_prompt(
         "Continue.".to_string(),
@@ -420,7 +421,8 @@ fn a_note_the_sweep_turned_down_is_repaired_from_its_draft_by_the_resume() {
     for said in [
         "Continue.",
         draft_path.as_str(),
-        "starting at line 3 of the note body in that file",
+        "starting at line 3 of the note body in that file, counting from the first non-blank \
+         line after the `# ` title line",
         rejected.error.message.as_str(),
     ] {
         assert!(prompt.contains(said), "{said}: {prompt}");

@@ -12,27 +12,33 @@ use std::cell::RefCell;
 
 /// A stored note body as an earlier turn left it: it opens with a heading
 /// of its own, which is body text (the title is stored apart), and carries a
-/// media reference the amendment must not lose. The seed is this body
-/// verbatim.
+/// media reference the amendment must not lose. The seed is the stored
+/// title's line, a blank line, then this body verbatim.
 const STORED_NOTE: &str = "# Section\n\nFirst paragraph.\n\n![Shot](staged-media://abc123.png)\n";
-/// What `write_note` publishes from a draft seeded with [`STORED_NOTE`] and
-/// left untouched: the same text, trimmed.
+/// The title [`note_session`] stores its note under.
+const STORED_TITLE: &str = "Old title";
+/// The draft a run that amends [`STORED_NOTE`] starts with.
+const SEEDED_DRAFT: &str =
+    "# Old title\n\n# Section\n\nFirst paragraph.\n\n![Shot](staged-media://abc123.png)\n";
+/// The body `write_note` publishes from [`SEEDED_DRAFT`] left untouched:
+/// the stored body, trimmed, without the title line.
 const REPUBLISHED_BODY: &str =
     "# Section\n\nFirst paragraph.\n\n![Shot](staged-media://abc123.png)";
 
-/// A note session with a branch note or a project note holding `content`.
+/// A note session with a branch note or a project note titled
+/// [`STORED_TITLE`] and holding `content`.
 fn note_session(store: &Arc<Store>, project_note: bool, content: &str) -> String {
     let session = Session::new_running("write a note", std::path::Path::new("."));
     store.create_session(&session).unwrap();
     let project = Project::new("test/note-draft");
     store.create_project(&project).unwrap();
     if project_note {
-        let note = ProjectNote::new(&project.id, "Old title", content).with_session(&session.id);
+        let note = ProjectNote::new(&project.id, STORED_TITLE, content).with_session(&session.id);
         store.create_project_note(&note).unwrap();
     } else {
         let branch = Branch::new(&project.id, "notes", "main");
         store.create_branch(&branch).unwrap();
-        let note = Note::new(&branch.id, "Old title", content).with_session(&session.id);
+        let note = Note::new(&branch.id, STORED_TITLE, content).with_session(&session.id);
         store.create_note(&note).unwrap();
     }
     session.id
@@ -91,7 +97,7 @@ fn a_fresh_local_note_run_removes_a_stale_draft_and_creates_none() {
 }
 
 #[test]
-fn an_amending_local_note_run_seeds_the_draft_with_the_stored_body() {
+fn an_amending_local_note_run_seeds_the_draft_with_the_stored_title_and_body() {
     for project_note in [false, true] {
         let store = Arc::new(Store::in_memory().unwrap());
         let session_id = note_session(&store, project_note, STORED_NOTE);
@@ -101,39 +107,135 @@ fn an_amending_local_note_run_seeds_the_draft_with_the_stored_body() {
 
         prepare_local_note_draft_for_run(&store, &session_id, &draft);
 
-        // The stored body verbatim: its opening heading and the
-        // `staged-media://` reference included.
+        // The stored title as the first line, a blank line, then the stored
+        // body verbatim: its opening heading and the `staged-media://`
+        // reference included.
         assert_eq!(
             std::fs::read_to_string(&draft).unwrap(),
-            STORED_NOTE,
+            SEEDED_DRAFT,
             "project_note={project_note}"
         );
-        // What the seed holds is what `write_note` would publish unchanged.
+        // What the seed holds is what `write_note` would publish unchanged:
+        // the stored title and the stored body.
         assert_eq!(
-            crate::note_draft::read_draft(&draft).unwrap(),
-            REPUBLISHED_BODY
+            crate::note_draft::split_title(&crate::note_draft::read_draft(&draft).unwrap()),
+            Ok((STORED_TITLE.to_string(), REPUBLISHED_BODY.to_string()))
         );
     }
 }
 
-/// The stored body of the session's note, branch or project.
-fn stored_note_content(store: &Store, session_id: &str, project_note: bool) -> (String, String) {
+/// Both transports are seeded with the same text: the local draft file
+/// holds what a workstation's `draft.md` is sent, the stored title line
+/// above the stored body.
+#[test]
+fn an_amending_run_seeds_the_same_title_and_body_on_both_transports() {
+    for project_note in [false, true] {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session_id = note_session(&store, project_note, STORED_NOTE);
+        let dir = tempfile::tempdir().unwrap();
+        let draft = dir.path().join("staged-note-draft.md");
+
+        // Local: the file `write_note` reads.
+        prepare_local_note_draft_for_run(&store, &session_id, &draft);
+        let local = std::fs::read(&draft).unwrap();
+        assert_eq!(local, SEEDED_DRAFT.as_bytes());
+
+        // Remote: the bytes the run-start clear decodes into `draft.md`.
+        assert_eq!(
+            remote_note_draft_seed(&store, &session_id).as_deref(),
+            Some(local.as_slice()),
+            "project_note={project_note}"
+        );
+        let log = RefCell::new(Vec::new());
+        let exec = recording_exec("pending\n", &log);
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            &session_id,
+            &mut |_| panic!("nothing to ingest"),
+            &mut || remote_note_draft_seed(&store, &session_id),
+        )
+        .unwrap();
+        assert_eq!(recovery.draft, DraftSeed::Seeded);
+        assert_eq!(
+            log.borrow()[1],
+            clear_outbox_and_seed_script(&session_id, Some(&b64(SEEDED_DRAFT.as_bytes())))
+        );
+    }
+
+    // A fresh note is seeded on neither, whatever title its stub row has.
+    let store = Arc::new(Store::in_memory().unwrap());
+    let session_id = note_session(&store, false, "");
+    assert_eq!(stored_note_seed(&store, &session_id), None);
+    assert_eq!(remote_note_draft_seed(&store, &session_id), None);
+}
+
+/// The stored title, content and timestamp of the session's note, branch or
+/// project.
+fn stored_note_content(
+    store: &Store,
+    session_id: &str,
+    project_note: bool,
+) -> (String, String, i64) {
     if project_note {
         let note = store
             .get_project_note_by_session(session_id)
             .unwrap()
             .unwrap();
-        (note.title, note.content)
+        (note.title, note.content, note.updated_at)
     } else {
         let note = store.get_note_by_session(session_id).unwrap().unwrap();
-        (note.title, note.content)
+        (note.title, note.content, note.updated_at)
     }
 }
 
-/// Seed and publish agree that a heading at the top of the draft is body
-/// text: a stored body that opens with `# Section` goes through the seed,
-/// an untouched republish and the store, twice over, and comes back with
-/// the heading in place and the title the call passed.
+/// One run of a local note session over `draft`: seed, let `edit` change
+/// the seeded text, publish with no arguments, store. Returns the title
+/// and body the call published.
+fn seed_edit_publish_and_store(
+    store: &Arc<Store>,
+    session_id: &str,
+    draft: &std::path::Path,
+    edit: impl Fn(String) -> String,
+) -> (String, String) {
+    // Run start: the draft is seeded from the store.
+    prepare_local_note_draft_for_run(store, session_id, draft);
+    let seeded = std::fs::read_to_string(draft).unwrap();
+    std::fs::write(draft, edit(seeded)).unwrap();
+
+    // The agent publishes: the call names no title.
+    let slot = crate::note_tool::new_submission_slot();
+    let result = crate::note_tool::handle_write_note(
+        session_id,
+        &slot,
+        draft,
+        crate::note_tool::WriteNoteParams::default(),
+    );
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let submission = crate::note_tool::current_submission(&slot).unwrap();
+    let published = (submission.title.clone(), submission.body.clone());
+
+    // Run end: the hooks store what the call published.
+    remove_local_note_draft_after_run(session_id, draft);
+    let outcome = run_post_completion_hooks(
+        session_id,
+        std::path::Path::new("."),
+        None,
+        None,
+        None,
+        store,
+        0,
+        Some(submission),
+    );
+    assert!(outcome.note_stored);
+    published
+}
+
+/// Seed and publish mirror each other: the seed puts the stored title on
+/// one line above the stored body and the publish takes one line off. A
+/// stored body that opens with `# Section` goes through the seed, an
+/// untouched republish and the store, twice over, and comes back with that
+/// heading in place under the stored title. Nothing changed, so the store
+/// does not restamp the note.
 #[test]
 fn a_body_that_opens_with_a_heading_survives_seed_republish_and_store() {
     const BODY: &str = "# Section\n\nFirst paragraph.\n\n## Details\n\nMore.";
@@ -142,51 +244,186 @@ fn a_body_that_opens_with_a_heading_survives_seed_republish_and_store() {
         let session_id = note_session(&store, project_note, BODY);
         let dir = tempfile::tempdir().unwrap();
         let draft = dir.path().join("staged-note-draft.md");
+        let (_, _, stamped) = stored_note_content(&store, &session_id, project_note);
+        // A write from here on would carry a later timestamp.
+        std::thread::sleep(std::time::Duration::from_millis(5));
 
         for round in 1..=2 {
-            // Run start: the draft is seeded from the store.
-            prepare_local_note_draft_for_run(&store, &session_id, &draft);
+            let what = format!("round {round}, project_note={project_note}");
+            let published = seed_edit_publish_and_store(&store, &session_id, &draft, |seeded| {
+                // The seed is the title line, a blank line and the body.
+                assert_eq!(seeded, format!("# {STORED_TITLE}\n\n{BODY}"), "{what}");
+                // The agent changes nothing.
+                seeded
+            });
             assert_eq!(
-                std::fs::read_to_string(&draft).unwrap(),
-                BODY,
-                "round {round}, project_note={project_note}"
+                published,
+                (STORED_TITLE.to_string(), BODY.to_string()),
+                "{what}"
             );
-
-            // The agent changes nothing and republishes.
-            let slot = crate::note_tool::new_submission_slot();
-            let result = crate::note_tool::handle_write_note(
-                &session_id,
-                &slot,
-                &draft,
-                crate::note_tool::WriteNoteParams {
-                    title: format!("Kept title {round}"),
-                    suggested_next_steps: None,
-                },
-            );
-            assert_ne!(result.is_error, Some(true), "round {round}");
-            let submission = crate::note_tool::current_submission(&slot).unwrap();
-            assert_eq!(submission.body, BODY, "round {round}");
-
-            // Run end: the hooks store what the call published.
-            remove_local_note_draft_after_run(&session_id, &draft);
-            let outcome = run_post_completion_hooks(
-                &session_id,
-                std::path::Path::new("."),
-                None,
-                None,
-                None,
-                &store,
-                0,
-                Some(submission),
-            );
-            assert!(outcome.note_stored, "round {round}");
-            let (title, content) = stored_note_content(&store, &session_id, project_note);
-            assert_eq!(title, format!("Kept title {round}"));
             assert_eq!(
-                content, BODY,
-                "round {round}, project_note={project_note}: the heading is body text"
+                stored_note_content(&store, &session_id, project_note),
+                (STORED_TITLE.to_string(), BODY.to_string(), stamped),
+                "{what}: the same title and body, heading included, and no new timestamp"
             );
         }
+    }
+}
+
+/// An amendment that edits the title line renames the note and leaves the
+/// body alone; one that edits the body keeps the title the store had. Each
+/// is a change, so the store restamps the note.
+#[test]
+fn an_amendment_edits_the_title_line_or_the_body_and_the_store_follows() {
+    const BODY: &str = "# Section\n\nFirst paragraph.";
+    for project_note in [false, true] {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session_id = note_session(&store, project_note, BODY);
+        let dir = tempfile::tempdir().unwrap();
+        let draft = dir.path().join("staged-note-draft.md");
+        let (_, _, stamped) = stored_note_content(&store, &session_id, project_note);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // The title line alone.
+        seed_edit_publish_and_store(&store, &session_id, &draft, |seeded| {
+            seeded.replacen("# Old title", "# New title (2)", 1)
+        });
+        let (title, content, renamed_at) = stored_note_content(&store, &session_id, project_note);
+        assert_eq!((title.as_str(), content.as_str()), ("New title (2)", BODY));
+        assert!(renamed_at > stamped, "project_note={project_note}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // The body alone: the seed carries the new title, and it is kept.
+        seed_edit_publish_and_store(&store, &session_id, &draft, |seeded| {
+            assert!(seeded.starts_with("# New title (2)\n\n"), "{seeded}");
+            format!("{seeded}\n\nSecond paragraph.")
+        });
+        let (title, content, edited_at) = stored_note_content(&store, &session_id, project_note);
+        assert_eq!(title, "New title (2)");
+        assert_eq!(content, format!("{BODY}\n\nSecond paragraph."));
+        assert!(edited_at > renamed_at, "project_note={project_note}");
+    }
+}
+
+/// A stored title with whitespace of any kind inside it is a title
+/// `write_note` can store, and the seed writes it as stored. Seeded,
+/// published untouched and stored, twice over, the note keeps its title,
+/// its body and its timestamp: the republish renames nothing.
+#[test]
+fn a_title_with_inner_whitespace_survives_seed_republish_and_store() {
+    for stored_title in [
+        "Two  spaces",
+        "Tab\tand   spaces",
+        "No\u{a0}break",
+        "Ideographic\u{3000}space",
+        "Line\u{2028}separator",
+        "Paragraph\u{2029}next\u{85}tab\u{b}feed\u{c}end",
+    ] {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = Session::new_running("write a note", std::path::Path::new("."));
+        store.create_session(&session).unwrap();
+        let project = Project::new("test/note-draft");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "notes", "main");
+        store.create_branch(&branch).unwrap();
+        let note = Note::new(&branch.id, stored_title, "Body.").with_session(&session.id);
+        store.create_note(&note).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let draft = dir.path().join("staged-note-draft.md");
+        let (_, _, stamped) = stored_note_content(&store, &session.id, false);
+        // A write from here on would carry a later timestamp.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        for round in 1..=2 {
+            let what = format!("round {round}, {stored_title:?}");
+            let published = seed_edit_publish_and_store(&store, &session.id, &draft, |seeded| {
+                assert_eq!(seeded, format!("# {stored_title}\n\nBody."), "{what}");
+                // The agent changes nothing.
+                seeded
+            });
+            assert_eq!(
+                published,
+                (stored_title.to_string(), "Body.".to_string()),
+                "{what}"
+            );
+            assert_eq!(
+                stored_note_content(&store, &session.id, false),
+                (stored_title.to_string(), "Body.".to_string(), stamped),
+                "{what}"
+            );
+        }
+    }
+}
+
+/// A stored title that does not fit on one line still seeds a draft
+/// `write_note` accepts: a line break becomes a space, with the whitespace
+/// touching it, and an empty title becomes `Untitled Note`. Whitespace
+/// elsewhere in the title is kept. The publish stores that title, and the
+/// next seed leaves it alone.
+#[test]
+fn a_stored_title_that_is_not_one_line_seeds_a_draft_that_publishes() {
+    // (stored title, the title the seeded draft publishes)
+    let cases = [
+        ("Two\nlines  of title", "Two lines  of title"),
+        ("Return\rin \r\n the\ttitle", "Return in the\ttitle"),
+        ("", "Untitled Note"),
+        ("  \n", "Untitled Note"),
+    ];
+    for (stored_title, safe_title) in cases {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = Session::new_running("write a note", std::path::Path::new("."));
+        store.create_session(&session).unwrap();
+        let project = Project::new("test/note-draft");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "notes", "main");
+        store.create_branch(&branch).unwrap();
+        let note = Note::new(&branch.id, stored_title, "Body.").with_session(&session.id);
+        store.create_note(&note).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let draft = dir.path().join("staged-note-draft.md");
+
+        let published = seed_edit_publish_and_store(&store, &session.id, &draft, |seeded| {
+            assert_eq!(
+                seeded,
+                format!("# {safe_title}\n\nBody."),
+                "{stored_title:?}"
+            );
+            seeded
+        });
+        assert_eq!(
+            published,
+            (safe_title.to_string(), "Body.".to_string()),
+            "{stored_title:?}"
+        );
+        let stored = store.get_note_by_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            (stored.title.as_str(), stored.content.as_str()),
+            (safe_title, "Body."),
+            "{stored_title:?}"
+        );
+
+        // The title the first publish stored is one the seed writes back
+        // unchanged, so a second, untouched run restamps nothing.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let republished = seed_edit_publish_and_store(&store, &session.id, &draft, |seeded| {
+            assert_eq!(
+                seeded,
+                format!("# {safe_title}\n\nBody."),
+                "{stored_title:?}"
+            );
+            seeded
+        });
+        assert_eq!(
+            republished,
+            (safe_title.to_string(), "Body.".to_string()),
+            "{stored_title:?}"
+        );
+        let again = store.get_note_by_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            (again.title, again.content, again.updated_at),
+            (stored.title, stored.content, stored.updated_at),
+            "{stored_title:?}"
+        );
     }
 }
 
@@ -255,9 +492,10 @@ fn a_remote_run_start_prepares_the_draft_without_another_round_trip() {
     .unwrap();
     let commands = log.borrow();
     assert_eq!(commands.len(), 2, "collect, then clear+seed: {commands:?}");
+    // The seed is the stored note as a draft: the title line, then the body.
     assert_eq!(
         commands[1],
-        clear_outbox_and_seed_script(&session_id, Some(&b64(STORED_NOTE.as_bytes())))
+        clear_outbox_and_seed_script(&session_id, Some(&b64(SEEDED_DRAFT.as_bytes())))
     );
 }
 
@@ -424,7 +662,16 @@ fn the_note_follow_up_and_pikchr_repair_name_the_draft_file() {
         followup.contains("then call the `write_note` tool"),
         "{followup}"
     );
-    assert!(followup.contains("`title`"), "{followup}");
+    // The title is asked for as the draft's first line, not as an argument.
+    assert!(
+        followup.contains(
+            "(the full note in markdown: the title as a `# ` heading on the first line, then \
+             the body), then call the `write_note` tool with `suggested_next_steps`"
+        ),
+        "{followup}"
+    );
+    assert!(!followup.contains("`title`"), "{followup}");
+    assert!(!followup.contains("without the title"), "{followup}");
     assert!(followup.contains("`suggested_next_steps`"), "{followup}");
     assert!(!followup.contains("`body`"), "{followup}");
     assert_eq!(followup.matches(draft).count(), 1, "{followup}");
@@ -445,14 +692,22 @@ fn the_note_follow_up_and_pikchr_repair_name_the_draft_file() {
         )),
         "{repair}"
     );
+    // The line number counts the body's lines, which start below the
+    // draft's title line, so the prompt says where the count starts.
     assert!(
-        repair.contains("Edit the Pikchr block starting at line 7 of the note body in that file"),
+        repair.contains(
+            "Edit the Pikchr block starting at line 7 of the note body in that file, counting \
+             from the first non-blank line after the `# ` title line, and change nothing else"
+        ),
         "{repair}"
     );
     assert!(
-        repair.contains("call `write_note` again with the title and suggested next steps"),
+        repair.contains("call `write_note` again with the suggested next steps"),
         "{repair}"
     );
+    for stale in ["with the title", "the file's first non-blank line)"] {
+        assert!(!repair.contains(stale), "{stale}: {repair}");
+    }
     assert!(repair.contains("syntax error near boxx"), "{repair}");
     assert!(!repair.contains("complete corrected note"), "{repair}");
     // Editing the draft is the repair, so only *other* files are off limits.
@@ -508,6 +763,20 @@ fn a_pikchr_error_in_the_reply_makes_no_claim_about_the_draft_file() {
         from_reply.contains("write the file if it does not exist yet"),
         "{from_reply}"
     );
+    // What the file must hold names the title line, and the call names no
+    // title.
+    assert!(
+        from_reply.contains(
+            "holds the full note, the title as a `# ` heading on its first line and the body \
+             below it, with this diagram corrected"
+        ),
+        "{from_reply}"
+    );
+    assert!(
+        from_reply.contains("then call `write_note` with the suggested next steps"),
+        "{from_reply}"
+    );
+    assert!(!from_reply.contains("with the title"), "{from_reply}");
     assert!(from_reply.contains("call `write_note`"), "{from_reply}");
     assert!(
         from_reply.contains("Do not edit any other file"),
@@ -562,6 +831,16 @@ fn a_run_without_the_write_note_tool_is_pointed_at_the_separator_fallback() {
         assert_eq!(prompt.matches("write_note").count(), 1, "{prompt}");
     }
     assert!(followup.contains("no note was saved"), "{followup}");
+    // A draft the agent already wrote is the note in the reply's own shape:
+    // the title line, then the body.
+    assert!(
+        followup.contains(
+            "If you already wrote the note into your note draft file, use its contents as the \
+             note: the file has that shape, the `# ` title line and then the body."
+        ),
+        "{followup}"
+    );
+    assert!(!followup.contains("as the body"), "{followup}");
     assert!(
         repair.contains("Return a complete corrected final response"),
         "{repair}"
@@ -911,7 +1190,8 @@ fn a_run_whose_recovery_rejected_a_note_opens_with_the_repair_request() {
     // file, the line in it, the parser's message and the call to make.
     for said in [
         "Your draft file `/home/u/.staged/sessions/sess-1/draft.md` holds the note you saved",
-        "starting at line 12 of the note body in that file",
+        "starting at line 12 of the note body in that file, counting from the first non-blank \
+         line after the `# ` title line",
         "syntax error near boxx",
         "call `write_note` again",
     ] {

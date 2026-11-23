@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computeCharHighlights,
   computeLineDiff,
   createLineDiffCache,
+  LCS_BAILOUT_PRODUCT,
   type LineDiffResult,
   type CharHighlight,
 } from './inlineDiff';
@@ -509,6 +511,36 @@ describe('computeLineDiff', () => {
       expect(result.beforeLines).toEqual(['modified']);
       expect(result.afterLines).toEqual(['modified']);
       expect(result.modifiedPairs).toHaveLength(1);
+    });
+  });
+});
+
+describe('computeCharHighlights', () => {
+  it('returns the words each string has that the other lacks', () => {
+    const before = 'evicted oldest first';
+    const after = 'evicted newest first, in batches';
+    const { beforeHighlights, afterHighlights } = computeCharHighlights(before, after);
+
+    expect(beforeHighlights.map((h) => before.slice(h.start, h.end))).toEqual(['oldest']);
+    expect(afterHighlights.map((h) => after.slice(h.start, h.end))).toEqual(['newest', ', in batches']);
+  });
+
+  it('returns nothing for identical strings', () => {
+    expect(computeCharHighlights('same words', 'same words')).toEqual({
+      beforeHighlights: [],
+      afterHighlights: [],
+    });
+  });
+
+  it('highlights both strings whole when they have too many words to compare', () => {
+    // Each word and each space is a token: 1,001 on each side.
+    const words = Math.ceil(Math.sqrt(LCS_BAILOUT_PRODUCT) / 2) + 1;
+    const before = Array.from({ length: words }, (_, i) => `a${i}`).join(' ');
+    const after = Array.from({ length: words }, (_, i) => `b${i}`).join(' ');
+
+    expect(computeCharHighlights(before, after)).toEqual({
+      beforeHighlights: [{ start: 0, end: before.length }],
+      afterHighlights: [{ start: 0, end: after.length }],
     });
   });
 });

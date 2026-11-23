@@ -1,0 +1,161 @@
+/**
+ * Where a note diff's blocks are, and how two panes showing the two
+ * versions scroll together.
+ *
+ * Everything here is arithmetic over measured boxes (noteDiffUnits.ts takes
+ * the measurements). Offsets are distances down a pane's scrolled content,
+ * the coordinate `scrollTop` moves in.
+ *
+ * The panes are aligned by mapping, not by padding one out to the other's
+ * height. Every block both versions hold is a pair of anchors, its top and
+ * its bottom in each pane, and an offset in one pane maps to the other by
+ * interpolating between the anchors around it. The line kept level is the
+ * reference line, a third of the way down each pane: a block there in one
+ * pane is there in the other, however different the text above it. Through a
+ * stretch only one version has, the other pane holds still.
+ */
+
+import type { NoteDiffHunk, NoteDiffOp, NoteDiffSide } from './noteDiff';
+
+/** A unit's place in its pane's content. */
+export interface NoteDiffUnitBox {
+  top: number;
+  height: number;
+}
+
+/** The same point of the note in each pane's content. */
+export interface NoteDiffScrollAnchor {
+  previous: number;
+  current: number;
+}
+
+/** A pane's scroll state, as its element reports it. */
+export interface NoteDiffPaneScroll {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+}
+
+/** How far down a pane the line that is kept level sits, as a share of its height. */
+export const REFERENCE_LINE_FRACTION = 1 / 3;
+
+/**
+ * Where a hunk is on one side: from the top of its first unit there to the
+ * bottom of its last. A hunk with no unit on that side is the gap its blocks
+ * would fill, a box of no height at the top of the unit after it, or under
+ * the last unit when it is at the end. `null` when the side has nothing
+ * measured to place it by.
+ */
+export function hunkExtent(
+  hunk: NoteDiffHunk,
+  side: NoteDiffSide,
+  boxes: readonly NoteDiffUnitBox[]
+): NoteDiffUnitBox | null {
+  const indices = side === 'previous' ? hunk.previousIndices : hunk.currentIndices;
+  if (indices.length > 0) {
+    const first = boxes[indices[0]];
+    const last = boxes[indices[indices.length - 1]];
+    if (!first || !last) return null;
+    return { top: first.top, height: Math.max(0, last.top + last.height - first.top) };
+  }
+
+  const start = side === 'previous' ? hunk.previousStart : hunk.currentStart;
+  const next = boxes[start];
+  if (next) return { top: next.top, height: 0 };
+  const last = boxes[boxes.length - 1];
+  return last ? { top: last.top + last.height, height: 0 } : null;
+}
+
+/**
+ * The anchors of a diff: the top and the bottom of every block both
+ * versions hold, unchanged or modified.
+ *
+ * The mapping needs them to rise together. Blocks are laid out in order, so
+ * they do; an anchor that would step back in either pane (a layout that
+ * breaks the order, a box not yet measured) is left out rather than fold
+ * the map over.
+ */
+export function buildScrollAnchors(
+  ops: readonly NoteDiffOp[],
+  previousBoxes: readonly NoteDiffUnitBox[],
+  currentBoxes: readonly NoteDiffUnitBox[]
+): NoteDiffScrollAnchor[] {
+  const anchors: NoteDiffScrollAnchor[] = [];
+  const add = (anchor: NoteDiffScrollAnchor) => {
+    const last = anchors[anchors.length - 1];
+    if (last && (anchor.previous < last.previous || anchor.current < last.current)) return;
+    anchors.push(anchor);
+  };
+  for (const op of ops) {
+    if (op.type !== 'equal' && op.type !== 'modified') continue;
+    const previous = previousBoxes[op.previousIndex];
+    const current = currentBoxes[op.currentIndex];
+    if (!previous || !current) continue;
+    add({ previous: previous.top, current: current.top });
+    add({ previous: previous.top + previous.height, current: current.top + current.height });
+  }
+  return anchors;
+}
+
+/**
+ * The offset in the other pane that shows the same point of the note as
+ * `offset` does in the `from` pane.
+ *
+ * The two contents' tops and bottoms are anchors too, so text before the
+ * first shared block and after the last still maps, in proportion.
+ */
+export function mapScrollOffset(
+  anchors: readonly NoteDiffScrollAnchor[],
+  offset: number,
+  from: NoteDiffSide,
+  contentHeights: NoteDiffScrollAnchor
+): number {
+  const to: NoteDiffSide = from === 'previous' ? 'current' : 'previous';
+  let below: NoteDiffScrollAnchor = { previous: 0, current: 0 };
+  if (offset <= 0) return 0;
+  for (const anchor of [...anchors, contentHeights]) {
+    // Behind the last anchor in either pane: using it would fold the map over.
+    if (anchor[from] < below[from] || anchor[to] < below[to]) continue;
+    if (anchor[from] > offset) {
+      const share = (offset - below[from]) / (anchor[from] - below[from]);
+      return below[to] + share * (anchor[to] - below[to]);
+    }
+    below = anchor;
+  }
+  return below[to];
+}
+
+function maxScrollTop(pane: NoteDiffPaneScroll): number {
+  return Math.max(0, pane.scrollHeight - pane.clientHeight);
+}
+
+/** The `scrollTop` that puts `offset` on a pane's reference line, as near as it can scroll. */
+export function scrollTopForOffset(offset: number, pane: NoteDiffPaneScroll): number {
+  const top = offset - pane.clientHeight * REFERENCE_LINE_FRACTION;
+  return Math.min(Math.max(0, top), maxScrollTop(pane));
+}
+
+/**
+ * Where the `target` pane scrolls to follow the `source` pane, which shows
+ * the `from` version.
+ *
+ * With no shared block there is nothing to keep level, and the panes scroll
+ * in proportion instead: each as far through its own content as the other.
+ */
+export function syncedScrollTop(
+  anchors: readonly NoteDiffScrollAnchor[],
+  from: NoteDiffSide,
+  source: NoteDiffPaneScroll,
+  target: NoteDiffPaneScroll
+): number {
+  if (anchors.length === 0) {
+    const sourceMax = maxScrollTop(source);
+    return sourceMax > 0 ? (source.scrollTop / sourceMax) * maxScrollTop(target) : 0;
+  }
+  const heights =
+    from === 'previous'
+      ? { previous: source.scrollHeight, current: target.scrollHeight }
+      : { previous: target.scrollHeight, current: source.scrollHeight };
+  const line = source.scrollTop + source.clientHeight * REFERENCE_LINE_FRACTION;
+  return scrollTopForOffset(mapScrollOffset(anchors, line, from, heights), target);
+}

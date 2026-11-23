@@ -83,7 +83,12 @@ function lcsLength(a: string, b: string): number {
   return prev[n];
 }
 
-const LCS_BAILOUT_PRODUCT = 1_000_000;
+/**
+ * The largest pair the quadratic passes below take on: two lines whose
+ * lengths multiply past this are not compared for similarity, and two token
+ * lists past it are highlighted whole.
+ */
+export const LCS_BAILOUT_PRODUCT = 1_000_000;
 
 function similarity(a: string, b: string): number {
   if (a.length === 0 && b.length === 0) return 1;
@@ -103,7 +108,12 @@ function splitWords(text: string): string[] {
   return text.match(/[\p{L}\p{N}_]+|\s+|[^\s\p{L}\p{N}_]/gu) ?? [];
 }
 
-function computeCharHighlights(
+/**
+ * The word-level difference between two strings: the ranges of each that the
+ * other does not hold. `computeLineDiff` runs this on every pair it calls
+ * modified; it is exported for callers that pair lines themselves.
+ */
+export function computeCharHighlights(
   before: string,
   after: string,
 ): { beforeHighlights: CharHighlight[]; afterHighlights: CharHighlight[] } {

@@ -109,6 +109,37 @@ describe('ContextMenu.Trigger touch presses', () => {
     expect(props.open).toBe(false);
   });
 
+  it('opens when a scroll under a held finger leaves the row where it is', () => {
+    const { props, row } = render();
+    // jsdom lays nothing out: give the row a box that a scroll-anchoring
+    // adjustment does not move.
+    row.getBoundingClientRect = () => new DOMRect(16, 300, 320, 44);
+
+    pointerDown(row, 'touch');
+    touchStart(row);
+    advance(LONG_PRESS_DELAY_MS - 100);
+    document.dispatchEvent(new Event('scroll'));
+    expect(props.open).toBe(false);
+    advance(100);
+
+    expect(props.open).toBe(true);
+  });
+
+  it('stays closed when the scroll carried the row with it', () => {
+    const { props, row } = render();
+    let top = 300;
+    row.getBoundingClientRect = () => new DOMRect(16, top, 320, 44);
+
+    pointerDown(row, 'touch');
+    touchStart(row);
+    advance(LONG_PRESS_DELAY_MS - 100);
+    top = 280;
+    document.dispatchEvent(new Event('scroll'));
+    advance(BITS_UI_LONG_PRESS_MS);
+
+    expect(props.open).toBe(false);
+  });
+
   it('stays closed for a pen press held with no contextmenu', () => {
     const { props, row } = render();
 

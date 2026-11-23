@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { guardTouchTaps, TAP_CLICK_WINDOW_MS, TAP_MAX_TRAVEL_PX } from './touchTapGuard';
+import {
+  FLICK_MAX_DURATION_MS,
+  guardTouchTaps,
+  TAP_CLICK_WINDOW_MS,
+  TAP_MAX_TRAVEL_PX,
+} from './touchTapGuard';
 
 // vitest runs in node, and a dispatched `Event` is never trusted, so the
 // document is a stand-in that hands plain event objects to the capture
@@ -96,9 +101,37 @@ describe('guardTouchTaps', () => {
     pointer('pointerup', 400 + TAP_MAX_TRAVEL_PX, { x: 100 });
     expect(click()).toBe(false);
 
-    // 8 px across and 8 px down is 11.3 px of travel.
+    // 15 px across and 15 px down is 21.2 px of travel.
     pointer('pointerdown', 400, { x: 100 });
-    pointer('pointerup', 408, { x: 108 });
+    pointer('pointerup', 415, { x: 115 });
+    expect(click()).toBe(true);
+  });
+
+  it('lets a quick tap click when the thumb rolled as it pressed', () => {
+    // Past the old 10 px limit, and as short as a flick.
+    touch(438, 438 - 18, 60);
+    expect(click()).toBe(false);
+  });
+
+  it('lets a slow press click however far the finger rolled', () => {
+    touch(438, 438 - 30, FLICK_MAX_DURATION_MS + 1);
+    expect(click()).toBe(false);
+
+    touch(438, 238, 400);
+    expect(click()).toBe(false);
+  });
+
+  it('counts a touch as a flick up to the duration limit, and not beyond it', () => {
+    touch(438, 438 - TAP_MAX_TRAVEL_PX - 1, FLICK_MAX_DURATION_MS);
+    expect(click()).toBe(true);
+
+    touch(438, 438 - TAP_MAX_TRAVEL_PX - 1, FLICK_MAX_DURATION_MS + 1);
+    expect(click()).toBe(false);
+  });
+
+  it('swallows the shortest and slowest flick seen to open a project', () => {
+    // 60 px in 100 ms.
+    touch(438, 378, 100);
     expect(click()).toBe(true);
   });
 

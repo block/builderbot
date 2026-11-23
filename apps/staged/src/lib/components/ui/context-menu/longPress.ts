@@ -45,12 +45,22 @@
  *   when it turns a touch into a scroll: it sends `pointercancel`, and the
  *   touch events carry on. A slow drag can stay inside `moveThreshold` until
  *   after the scroll has begun, so the pending press is also dropped on
- *   `pointercancel` and on any `scroll` of a container holding the touched
- *   element. A press that already fired keeps its suppression;
+ *   `pointercancel` and on a `scroll` of a container holding the touched
+ *   element that carries the element with it. A press that already fired
+ *   keeps its suppression;
+ * - a scroll that leaves the touched element where it is on screen keeps
+ *   the press. That is scroll anchoring: when a row arrives or grows above
+ *   the viewport (the timeline while a session runs), the browser moves the
+ *   scroll position by the same amount and fires `scroll`, and the row under
+ *   the finger stays put. The element's position is read at `touchstart` and
+ *   again on each such scroll; one that cannot be measured counts as moved;
  * - a touch that lands on a list that is still moving is the user catching
  *   the scroll, not pressing a row: a `touchstart` within
  *   `SCROLL_CATCH_WINDOW_MS` of the last scroll of a container holding the
- *   touched element starts no press at all.
+ *   touched element starts no press at all. A scroll-anchoring adjustment
+ *   in that window counts as well: by then only the time of the scroll is
+ *   on record, and telling the two apart would mean measuring every scroll
+ *   in the app. The next touch presses.
  */
 
 export const LONG_PRESS_DELAY_MS = 500;
@@ -67,6 +77,15 @@ export const CLICK_SWALLOW_WINDOW_MS = 100;
  * frame, so anything still moving is well inside this.
  */
 export const SCROLL_CATCH_WINDOW_MS = 150;
+/**
+ * How far the touched element may sit from where it was at `touchstart`,
+ * after a scroll, and still count as not carried by it. Scroll anchoring is
+ * not exact: Safari keeps scroll positions in whole px, and a row held
+ * through a 200 ms slide above it sat up to 1.25 px off in the iOS 27.2
+ * Simulator. A scroll the finger started is past this in its first frames,
+ * and announced by `pointercancel` before that.
+ */
+export const SCROLL_STILL_TOLERANCE_PX = 3;
 
 export interface LongPressPoint {
   target: EventTarget;
@@ -119,12 +138,34 @@ function scrollMoves(scroller: EventTarget | null, target: EventTarget): boolean
   return contains.call(scroller, target as Node);
 }
 
+/** Where an element's box starts on screen. */
+interface ScreenPosition {
+  left: number;
+  top: number;
+}
+
+/**
+ * Where `target` is on screen, or `null` when that cannot be told: a node
+ * that left the DOM, or one with no box of its own.
+ */
+function positionOf(target: EventTarget): ScreenPosition | null {
+  if (isDetached(target)) return null;
+  const measure = (target as Partial<Element>).getBoundingClientRect;
+  if (typeof measure !== 'function') return null;
+  const { left, top, width, height } = measure.call(target);
+  if (width === 0 && height === 0) return null;
+  return { left, top };
+}
+
 /** Recent scrolls seen on one document, shared by every controller on it. */
 interface ScrollWatch {
   users: number;
-  /** When each container last scrolled; emptied once a burst of scrolling ends. */
+  /**
+   * When each container last scrolled. A timer drops an entry as soon as it
+   * is older than the catch window, so no container is held on to once it
+   * has stopped scrolling.
+   */
   recent: Map<EventTarget | null, number>;
-  latest: number;
   stop(): void;
 }
 
@@ -138,19 +179,34 @@ function watchScrolls(scope: EventTarget): ScrollWatch {
   if (!watch) {
     const recent: ScrollWatch['recent'] = new Map();
     const opts = { capture: true, passive: true };
-    const onScroll = (event: Event) => {
+    let sweepTimer: ReturnType<typeof setTimeout> | null = null;
+    // Drops what has aged out, and runs again when the oldest entry left is
+    // due. One timer however many containers scroll, and none once the
+    // record is empty.
+    const sweep = () => {
+      sweepTimer = null;
       const now = Date.now();
-      if (now - created.latest > SCROLL_CATCH_WINDOW_MS) recent.clear();
-      recent.set(event.target, now);
-      created.latest = now;
+      let oldest = Infinity;
+      for (const [scroller, at] of recent) {
+        if (now - at > SCROLL_CATCH_WINDOW_MS) recent.delete(scroller);
+        else oldest = Math.min(oldest, at);
+      }
+      if (recent.size > 0) {
+        sweepTimer = setTimeout(sweep, oldest + SCROLL_CATCH_WINDOW_MS + 1 - now);
+      }
+    };
+    const onScroll = (event: Event) => {
+      recent.set(event.target, Date.now());
+      sweepTimer ??= setTimeout(sweep, SCROLL_CATCH_WINDOW_MS + 1);
     };
     const created: ScrollWatch = {
       users: 0,
       recent,
-      latest: 0,
       stop() {
         scope.removeEventListener('scroll', onScroll, opts);
         scrollWatches.delete(scope);
+        if (sweepTimer !== null) clearTimeout(sweepTimer);
+        sweepTimer = null;
         recent.clear();
       },
     };
@@ -167,10 +223,17 @@ function unwatchScrolls(watch: ScrollWatch) {
   if (watch.users === 0) watch.stop();
 }
 
+/**
+ * How many scrolled containers the watch on `scope` is holding on to. For
+ * tests: the record has to empty itself once scrolling stops.
+ */
+export function recentScrollerCount(scope: EventTarget): number {
+  return scrollWatches.get(scope)?.recent.size ?? 0;
+}
+
 /** Whether a container holding `target` scrolled within the catch window. */
 function landedOnMovingList(watch: ScrollWatch, target: EventTarget): boolean {
   const now = Date.now();
-  if (now - watch.latest > SCROLL_CATCH_WINDOW_MS) return false;
   for (const [scroller, at] of watch.recent) {
     if (now - at <= SCROLL_CATCH_WINDOW_MS && scrollMoves(scroller, target)) return true;
   }
@@ -182,6 +245,8 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   const moveThreshold = options.moveThreshold ?? LONG_PRESS_MOVE_THRESHOLD_PX;
 
   let start: LongPressPoint | null = null;
+  /** Where the touched element was on screen when the finger landed. */
+  let restedAt: ScreenPosition | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let fired = false;
   let unlistenGesture: (() => void) | null = null;
@@ -211,6 +276,7 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     clearTimer();
     unlistenGesture?.();
     start = null;
+    restedAt = null;
     fired = false;
   }
 
@@ -291,8 +357,26 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     if (type === undefined || type === 'touch') clearTimer();
   }
 
+  // Whether the touched element is somewhere else on screen than it was at
+  // `touchstart`. One that cannot be measured, then or now, counts as moved:
+  // dropping a press costs a second try, keeping one opens a menu under a
+  // finger that was scrolling.
+  function carriedAway(): boolean {
+    if (!start || !restedAt) return true;
+    const current = positionOf(start.target);
+    if (!current) return true;
+    return (
+      Math.abs(current.left - restedAt.left) > SCROLL_STILL_TOLERANCE_PX ||
+      Math.abs(current.top - restedAt.top) > SCROLL_STILL_TOLERANCE_PX
+    );
+  }
+
+  // A scroll that carries the touched element is the list moving under the
+  // finger. One that leaves it in place is the browser holding the row still
+  // while content above it changed height, and the press stands.
   function onscroll(event: Event) {
-    if (start && timer !== null && scrollMoves(event.target, start.target)) clearTimer();
+    if (!start || timer === null || !scrollMoves(event.target, start.target)) return;
+    if (carriedAway()) clearTimer();
   }
 
   // The listeners live only for the duration of a press, on the document and
@@ -343,6 +427,7 @@ export function createLongPress(options: LongPressOptions): LongPressController 
       // Catching a list that is still moving stops it; it presses nothing.
       if (scrollWatch && landedOnMovingList(scrollWatch, target)) return;
       start = { target, clientX: touch.clientX, clientY: touch.clientY };
+      restedAt = positionOf(target);
       const point = start;
       const scope = scopeFor(point.target);
       if (scope) listenGesture(scope, point.target);

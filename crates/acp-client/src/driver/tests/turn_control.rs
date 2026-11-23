@@ -436,7 +436,30 @@ where
     F: FnOnce(TurnControlHandle, Arc<FakeAgent>, Arc<TranscriptWriter>) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let writer = Arc::new(TranscriptWriter::default());
+    live_turn_on(
+        Arc::new(TranscriptWriter::default()),
+        agent,
+        setup,
+        prompt,
+        images,
+        drive,
+    )
+    .await
+}
+
+/// [`live_turn_sending`] with a writer the test set up before the turn.
+async fn live_turn_on<F, Fut>(
+    writer: Arc<TranscriptWriter>,
+    agent: &Arc<FakeAgent>,
+    setup: AcpSessionSetup,
+    prompt: &str,
+    images: &[PromptImage],
+    drive: F,
+) -> (Result<TurnStep, String>, Arc<TranscriptWriter>)
+where
+    F: FnOnce(TurnControlHandle, Arc<FakeAgent>, Arc<TranscriptWriter>) -> Fut,
+    Fut: Future<Output = ()>,
+{
     // `run_prompt_turn` is driven without `session/new`, which is what names
     // the connection's session; the fake agent stamps `sess-1`.
     let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
@@ -1702,25 +1725,55 @@ async fn a_pending_permission_decision_does_not_stall_the_connection() {
 /// A `session_info_update` frame on the wire reaches the writer, through the
 /// dispatch `AcpDriver::connect` registers, and by then the writer has been
 /// told the prompt the title may only be repeating.
-#[tokio::test(flavor = "current_thread")]
+///
+/// The second half is `run_prompt_turn` telling the writer before the
+/// request goes out, and a writer that takes the prompt in without yielding
+/// would be told first whichever side of the send the call sat on: nothing
+/// else runs on this runtime until the turn yields. So this writer holds
+/// the call open, and the test checks that the agent has no prompt while it
+/// is held. The clock is paused: a sleep returns only once every task is
+/// idle, so by then a request already sent would have reached the agent
+/// and its title would have reached the writer.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn an_agents_session_title_reaches_the_writer_after_the_prompt_as_sent() {
     let agent = Arc::new(FakeAgent {
         title_on_prompt: Some("Refresh expired login tokens"),
         stream_on_prompt: vec!["on it"],
         ..FakeAgent::default()
     });
+    let writer = Arc::new(TranscriptWriter::default());
+    writer.hold_next_prompt_sent.store(true, Ordering::SeqCst);
 
-    let (step, writer) = live_turn_with(&agent, false, |_handle, agent, writer| async move {
-        agent.await_prompt().await;
-        // The chunk is sent behind the title, so the title was dispatched.
-        wait_until("the chunk behind the title", || {
-            writer
-                .text_flow()
-                .contains(&WriterCall::Append("on it".to_string()))
-        })
-        .await;
-        agent.finish_prompt(StopReason::EndTurn);
-    })
+    let (step, writer) = live_turn_on(
+        writer,
+        &agent,
+        steering_setup(false),
+        "first",
+        &[],
+        |_handle, agent, writer| async move {
+            tokio::time::timeout(SETTLE_TIMEOUT, writer.prompt_sent_arrived.notified())
+                .await
+                .expect("the writer should be told the prompt");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                agent.prompts(),
+                Vec::<String>::new(),
+                "the request went out before the writer had been told the prompt"
+            );
+            assert_eq!(writer.session_calls(), []);
+            writer.release_prompt_sent.notify_one();
+
+            agent.await_prompt().await;
+            // The chunk is sent behind the title, so the title was dispatched.
+            wait_until("the chunk behind the title", || {
+                writer
+                    .text_flow()
+                    .contains(&WriterCall::Append("on it".to_string()))
+            })
+            .await;
+            agent.finish_prompt(StopReason::EndTurn);
+        },
+    )
     .await;
 
     assert!(

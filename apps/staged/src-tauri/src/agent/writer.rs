@@ -69,10 +69,17 @@ pub struct MessageWriter {
     /// Bumped on every event the driver hands this writer, for a watchdog
     /// that wants to know how long the agent has been silent.
     activity: Option<Arc<super::ActivityClock>>,
-    /// The text of each prompt this writer's connection has sent, as the
-    /// agent received it (see `on_prompt_sent`): what a session title is
+    /// The text of each prompt this writer's own connection has sent, as
+    /// the agent received it (see `on_prompt_sent`): what a session title is
     /// checked against on top of the session's stored messages (see
     /// [`MessageWriter::title_echoes_input`]).
+    ///
+    /// It starts empty for every connection and is never filled from an
+    /// earlier one. Each run of a session has a writer of its own, so what
+    /// an earlier run sent is known here only from its stored user row,
+    /// which holds the prompt and not the text the connection added for
+    /// attachments. That goes for every later connection: an ordinary
+    /// resume of the session as much as an attach catching it up.
     sent_prompts: std::sync::Mutex<Vec<String>>,
 }
 
@@ -609,6 +616,17 @@ impl acp_client::MessageWriter for MessageWriter {
     /// is whitespace, which the comparison collapses), and the prompt block
     /// by itself for an agent that reads only that one. Not the agent
     /// speaking, so the activity clock is left alone.
+    ///
+    /// This covers the connection that sent the prompt, not the session.
+    /// The next connection to the session, whether a later run or an attach
+    /// catching it up, has a new writer that was told none of it and reads
+    /// the stored user rows only. A title that runs past a stored row into
+    /// the attachment text is therefore ignored on the connection that sent
+    /// the message and accepted on any later one. An agent that sends its
+    /// title again as the session loads does so before that connection has
+    /// sent a prompt, so such a title is stored on the session's next run.
+    /// It takes a message short enough that the title is not cut before the
+    /// attachment text starts.
     async fn on_prompt_sent(&self, text_blocks: &[&str]) {
         let Some(prompt) = text_blocks.first() else {
             return;
@@ -1977,7 +1995,9 @@ mod tests {
     /// An agent that names a session after its input reads every text block
     /// of the request: the prompt, then what the connection adds for the
     /// attachments. The connection reports those blocks, and a title that
-    /// runs on into them is an echo of the message as a whole.
+    /// runs on into them is an echo of the message as a whole, to the writer
+    /// of the connection that sent it. Every later connection to the
+    /// session has a writer that was not told them, and keeps the title.
     #[tokio::test]
     async fn prompt_echo_is_measured_against_every_text_block_sent() {
         let (store, session_id, _) = setup_writer();
@@ -2005,10 +2025,31 @@ mod tests {
         push_title(&writer, "also add").await;
         assert_eq!(acp_title(&store, &session_id).as_deref(), Some("also add"));
 
-        // A writer that sent nothing (one catching the session up) has the
-        // stored row only, which the title runs past.
+        // That was the connection that sent the message. A later one has a
+        // writer of its own that was told nothing of it: the next run of
+        // the session, where an agent that sends its title again as the
+        // session loads does so before the run's own prompt goes out, as
+        // much as an attach catching the session up. Each has the stored
+        // row only, which the title runs past, so the title is kept.
+        let later_run = MessageWriter::new(session_id.clone(), Arc::clone(&store));
         let catching_up = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
-        push_title(&catching_up, title).await;
+        for (connection, writer) in [("a later run", &later_run), ("catching up", &catching_up)] {
+            store.update_session_acp_title(&session_id, None).unwrap();
+            push_title(writer, title).await;
+            assert_eq!(
+                acp_title(&store, &session_id).as_deref(),
+                Some(title),
+                "{connection}"
+            );
+        }
+        // Sending its own prompt does not teach the later run the earlier
+        // one's attachment text.
+        store
+            .add_session_message(&session_id, MessageRole::User, "and document them")
+            .unwrap();
+        prompt_sent(&later_run, &["and document them"]).await;
+        store.update_session_acp_title(&session_id, None).unwrap();
+        push_title(&later_run, title).await;
         assert_eq!(acp_title(&store, &session_id).as_deref(), Some(title));
     }
 

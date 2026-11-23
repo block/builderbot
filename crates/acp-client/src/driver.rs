@@ -15156,6 +15156,12 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         /// answered — until its cancel token fires or the test releases it.
         hold_next_permission: AtomicBool,
         release_permission: tokio::sync::Notify,
+        /// Hold the next `on_prompt_sent` open (a writer still taking the
+        /// prompt in) until the test releases it. `prompt_sent_arrived` says
+        /// the call is being held; the prompt is recorded as it returns.
+        hold_next_prompt_sent: AtomicBool,
+        prompt_sent_arrived: tokio::sync::Notify,
+        release_prompt_sent: tokio::sync::Notify,
     }
 
     impl TranscriptWriter {
@@ -15247,6 +15253,13 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         }
 
         async fn on_prompt_sent(&self, text_blocks: &[&str]) {
+            if self
+                .hold_next_prompt_sent
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.prompt_sent_arrived.notify_one();
+                self.release_prompt_sent.notified().await;
+            }
             self.session_calls
                 .lock()
                 .unwrap()

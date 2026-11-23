@@ -65,6 +65,33 @@ fn ai_prompt_at(steps: &[PipelineStep], index: usize) -> (&str, &str) {
     }
 }
 
+/// `template` as the pipeline runner sends it (the step outputs filled in)
+/// opens with Staged's instructions, in the form the session-title check
+/// recognises them by: a title that is the bare start of it is an echo of
+/// it (`store::title_echoes_input`).
+fn assert_title_check_recognises_instructions(template: &str) {
+    let prompt = template.replace("{step_outputs}", "$ git log --oneline\nabc1234 a commit");
+    let opening: String = prompt.chars().take(60).collect();
+    assert!(
+        store::opens_with_staged_instructions(&prompt),
+        "{opening:?}"
+    );
+    // As an agent that names a session after its input cuts it, marked or
+    // not.
+    let cut: String = prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(40)
+        .collect();
+    assert!(store::title_echoes_input(&cut, &prompt), "{cut:?}");
+    assert!(
+        store::title_echoes_input(&format!("{cut}…"), &prompt),
+        "{cut:?}"
+    );
+}
+
 fn test_registry() -> Arc<session_runner::SessionRegistry> {
     Arc::new(session_runner::SessionRegistry::new())
 }

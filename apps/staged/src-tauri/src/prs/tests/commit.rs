@@ -662,3 +662,14 @@ fn squash_pipeline_prompt_requires_signoff() {
     assert!(prompt.contains("Use the user's global git identity"));
     assert!(prompt.contains("git commit --signoff"));
 }
+
+/// The hand-off that writes the squashed commit's message is a request
+/// Staged wrote by itself, and opens with its instructions.
+#[test]
+fn squash_handoff_prompt_opens_with_instructions_the_title_check_recognises() {
+    let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main", "main").unwrap();
+
+    let (label, template) = ai_prompt_at(&steps, 3);
+    assert_eq!(label, "Write squashed commit message");
+    assert_title_check_recognises_instructions(template);
+}

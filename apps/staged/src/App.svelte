@@ -32,6 +32,7 @@
   import { safeAreaOffset } from './lib/shared/safeArea';
   import { viewport } from './lib/shared/viewport.svelte';
   import { guardDocumentScroll } from './lib/shared/documentScroll';
+  import { guardTouchTaps } from './lib/shared/touchTapGuard';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
@@ -99,6 +100,7 @@
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let unguardDocumentScroll: (() => void) | undefined;
+  let unguardTouchTaps: (() => void) | undefined;
   // Set only while this window owns the updater loop; ensureUpdaterLoopStarted
   // guards on it, so the mirror cleanup must live in its own handle or a later
   // `updater-owner-available` could never promote this window to owner.
@@ -351,6 +353,7 @@
     prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
     unguardDocumentScroll = guardDocumentScroll();
+    unguardTouchTaps = guardTouchTaps();
 
     // Web resume accelerator: the restored project id is available synchronously
     // (navigation seeds it from localStorage at module load). Warm that project's
@@ -671,6 +674,7 @@
     prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
     unguardDocumentScroll?.();
+    unguardTouchTaps?.();
     unregisterShortcuts?.();
     unlistenMenu?.();
     unlistenReferenceCopy?.();

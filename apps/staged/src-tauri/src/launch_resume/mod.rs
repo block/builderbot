@@ -32,7 +32,7 @@ use serde::Serialize;
 use tauri::Manager;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
-use crate::app_lifecycle::{quit_session_label, session_location};
+use crate::app_lifecycle::{quit_session_label, session_label, session_location};
 use crate::session_commands::project_active_session;
 use crate::session_runner::SessionRegistry;
 use crate::store::{Session, Store};
@@ -52,7 +52,8 @@ pub struct InterruptedSession {
     pub project_id: Option<String>,
     pub branch_id: Option<String>,
     pub session_type: Option<String>,
-    /// `commit on fix-login`, as the quit prompt labels sessions.
+    /// `commit on fix-login`, as the quit prompt labels sessions; a pipeline
+    /// row by its kind (`rebase on fix-login`).
     pub label: String,
     pub branch_name: Option<String>,
     pub project_name: Option<String>,
@@ -189,7 +190,13 @@ fn describe(store: &Store, session: &Session) -> Option<InterruptedSession> {
     let action = action_for(&candidate);
     let info = project_active_session(store, session);
     let location = session_location(store, &info);
-    let label = quit_session_label(&info, location.as_deref());
+    // A pipeline row reads as its pipeline kind (`rebase on fix-login`), not
+    // as the `commit` its pending-commit artifact makes it for the busy-state
+    // projection, whose `session_type` is sent on as it is.
+    let label = match session.pipeline.as_ref().and_then(|p| p.kind.as_ref()) {
+        Some(kind) => session_label(kind.as_str(), &info.status, location.as_deref()),
+        None => quit_session_label(&info, location.as_deref()),
+    };
     let branch_name = info
         .branch_id
         .as_deref()

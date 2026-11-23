@@ -1,21 +1,24 @@
 /**
- * Pure shaping of the launch-resume offer for the dialog: repo sessions
- * grouped under their branch, project sessions under their project, with the
- * counts the body sentence and the buttons need. Kept free of runes so it is
+ * Pure shaping of the launch-resume offer for the dialog: one row per project
+ * (its repo sessions, then its project sessions), which rows start checked,
+ * and the session ids a selection sends. Kept free of runes so it is
  * unit-testable without the Svelte plugin.
  */
 
 import type { InterruptedSession, LaunchRecovery } from '../../types';
 
-export interface InterruptedSessionGroup {
-  /** Stable key for the list. */
+export interface InterruptedProjectRow {
+  /** Stable key for the list and the selection. */
   key: string;
-  /** `Branch fix-login` or `Project Widgets`. */
-  heading: string;
+  /** The project's name, or `Unknown project` when it is gone. */
+  name: string;
+  /** Its interrupted sessions, repo sessions first, in offer order. */
   sessions: InterruptedSession[];
+  /** Ids of the sessions checking this row resumes (none of them `manual`). */
+  resumableIds: string[];
 }
 
-/** How a row reads beside its label. */
+/** How a session reads beside its label in its project's row. */
 export function dispositionNote(session: InterruptedSession): string | null {
   switch (session.disposition) {
     case 'resume':
@@ -27,45 +30,65 @@ export function dispositionNote(session: InterruptedSession): string | null {
   }
 }
 
-function groupBy(
-  sessions: InterruptedSession[],
-  keyOf: (s: InterruptedSession) => string,
-  headingOf: (s: InterruptedSession) => string
-): InterruptedSessionGroup[] {
-  const groups = new Map<string, InterruptedSessionGroup>();
-  for (const session of sessions) {
-    const key = keyOf(session);
-    let group = groups.get(key);
-    if (!group) {
-      group = { key, heading: headingOf(session), sessions: [] };
-      groups.set(key, group);
+function projectKey(session: InterruptedSession): string {
+  return `project:${session.projectId ?? session.projectName ?? 'unknown'}`;
+}
+
+function allSessions(recovery: LaunchRecovery): InterruptedSession[] {
+  return [...recovery.repoSessions, ...recovery.projectSessions];
+}
+
+/**
+ * One row per project, in the order its first session appears in the offer
+ * (repo sessions come first, so projects with branch work lead).
+ */
+export function groupByProject(recovery: LaunchRecovery): InterruptedProjectRow[] {
+  const rows = new Map<string, InterruptedProjectRow>();
+  for (const session of allSessions(recovery)) {
+    const key = projectKey(session);
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        key,
+        name: session.projectName ?? 'Unknown project',
+        sessions: [],
+        resumableIds: [],
+      };
+      rows.set(key, row);
     }
-    group.sessions.push(session);
+    row.sessions.push(session);
+    if (session.disposition !== 'manual') row.resumableIds.push(session.sessionId);
   }
-  return [...groups.values()];
+  return [...rows.values()];
 }
 
-/** Repo sessions under their branch (in offer order), then project sessions under their project. */
-export function groupInterruptedSessions(recovery: LaunchRecovery): InterruptedSessionGroup[] {
-  const repo = groupBy(
-    recovery.repoSessions,
-    (s) => `branch:${s.branchId ?? s.branchName ?? 'unknown'}`,
-    (s) => {
-      const name = s.branchName ?? 'unknown branch';
-      return s.projectName ? `${s.projectName} · ${name}` : name;
-    }
-  );
-  const project = groupBy(
-    recovery.projectSessions,
-    (s) => `project:${s.projectId ?? s.projectName ?? 'unknown'}`,
-    (s) => `${s.projectName ?? 'Unknown project'} (project)`
-  );
-  return [...repo, ...project];
+/** A row with nothing that can be resumed is shown, but cannot be checked. */
+export function rowSelectable(row: InterruptedProjectRow): boolean {
+  return row.resumableIds.length > 0;
 }
 
-/** Every session "Resume all" restarts. */
+/** The rows checked when the dialog opens: every one that can be. */
+export function defaultSelection(recovery: LaunchRecovery): string[] {
+  return groupByProject(recovery)
+    .filter(rowSelectable)
+    .map((row) => row.key);
+}
+
+/**
+ * The session ids Resume sends for the checked rows: their resumable sessions
+ * in offer order, so repo sessions still go before project sessions. Keys of
+ * rows that cannot be resumed (or are not in the offer) send nothing.
+ */
+export function selectedSessionIds(recovery: LaunchRecovery, selected: Iterable<string>): string[] {
+  const keys = new Set(selected);
+  return allSessions(recovery)
+    .filter((s) => s.disposition !== 'manual' && keys.has(projectKey(s)))
+    .map((s) => s.sessionId);
+}
+
+/** Every session that can be resumed, whatever is checked. */
 export function resumableSessionIds(recovery: LaunchRecovery): string[] {
-  return [...recovery.repoSessions, ...recovery.projectSessions]
+  return allSessions(recovery)
     .filter((s) => s.disposition !== 'manual')
     .map((s) => s.sessionId);
 }

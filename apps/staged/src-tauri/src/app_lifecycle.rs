@@ -611,12 +611,20 @@ pub(crate) fn quit_session_label(session: &ActiveSessionInfo, location: Option<&
         .as_deref()
         .and_then(session_type_label)
         .unwrap_or("session");
+    session_label(kind, &session.status, location)
+}
+
+/// [`quit_session_label`] for a caller that already knows what to call the
+/// session: launch resume names a pipeline row by its
+/// [`PipelineKind::as_str`](crate::store::PipelineKind::as_str), so a kind
+/// never depends on having an entry in [`session_type_label`].
+pub(crate) fn session_label(kind: &str, status: &str, location: Option<&str>) -> String {
     let base = match location {
         Some(location) => format!("{kind} on {location}"),
         None => kind.to_string(),
     };
 
-    if session.status == SessionStatus::Queued.as_str() {
+    if status == SessionStatus::Queued.as_str() {
         format!("{base} (queued)")
     } else {
         base

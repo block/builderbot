@@ -1983,6 +1983,21 @@ pub enum PipelineKind {
     Pull,
 }
 
+impl PipelineKind {
+    /// The kind as it is serialized (`rebase`, `squash`, `push`, `pull`), for
+    /// callers that name a pipeline in text. Exhaustive on purpose: a new kind
+    /// gets its spelling here, and `pipeline_kind_as_str_matches_its_serialized_form`
+    /// keeps it equal to the serde one.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PipelineKind::Rebase => "rebase",
+            PipelineKind::Squash => "squash",
+            PipelineKind::Push => "push",
+            PipelineKind::Pull => "pull",
+        }
+    }
+}
+
 #[cfg(test)]
 mod pipeline_tests {
     use super::*;
@@ -1999,6 +2014,34 @@ mod pipeline_tests {
             serde_json::from_str::<StepType>("\"aihandoff\"").unwrap(),
             StepType::AiHandoff
         );
+    }
+
+    #[test]
+    fn pipeline_kind_as_str_matches_its_serialized_form() {
+        let kinds = [
+            PipelineKind::Rebase,
+            PipelineKind::Squash,
+            PipelineKind::Push,
+            PipelineKind::Pull,
+        ];
+        for kind in kinds {
+            // Exhaustive, so a new kind fails to compile here until it is
+            // added to the list above.
+            match kind {
+                PipelineKind::Rebase
+                | PipelineKind::Squash
+                | PipelineKind::Push
+                | PipelineKind::Pull => {}
+            }
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{}\"", kind.as_str())
+            );
+            assert_eq!(
+                serde_json::from_str::<PipelineKind>(&format!("\"{}\"", kind.as_str())).unwrap(),
+                kind
+            );
+        }
     }
 
     #[test]

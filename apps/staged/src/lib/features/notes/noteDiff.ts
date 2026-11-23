@@ -15,8 +15,10 @@
  */
 
 import {
+  charHighlightsWork,
   computeCharHighlights,
   computeLineDiff,
+  DiffWorkBudget,
   LCS_BAILOUT_PRODUCT,
   type CharHighlight,
 } from '@builderbot/diff-viewer/utils';
@@ -98,6 +100,11 @@ export interface NoteDiff {
   /** Every unit of both versions, in order. */
   ops: NoteDiffOp[];
   hunks: NoteDiffHunk[];
+  /**
+   * The work budget refused a comparison (see `NOTE_DIFF_WORK_BUDGET`): some
+   * removals and additions might be one block changed.
+   */
+  capped: boolean;
 }
 
 /** A character no rendered text holds, so the parts of a line cannot run together. */
@@ -120,15 +127,43 @@ const LONG_BLOCK_SIMILARITY = 0.55;
  */
 const MAX_PAIR_SCAN = 10;
 
+/**
+ * How much work goes into finding the blocks a revision reworded, and the
+ * words that changed in them: twelve million cells of a `DiffWorkBudget`,
+ * about 50 ms of comparing.
+ *
+ * Without a cap that work grows with the number of changed blocks times the
+ * square of their length, and the diff is computed while the note opens, on
+ * the thread that draws it: a long note rewritten end to end took seconds.
+ *
+ * `computeLineDiff` spends the budget in note order, and the long blocks
+ * paired here spend what it leaves. Blocks that differ by a few words cost
+ * little, however long they are and however many. The budget goes on blocks
+ * with little in common, which are the ones with no changed words to show,
+ * and its tail is kept from them, so that rewritten blocks do not take the
+ * words out of the small changes among them.
+ *
+ * Blocks whose comparison was refused are left as removals and additions.
+ * Their change is still marked, and as modified where it holds blocks of
+ * both versions: it reads as replaced, the blocks tinted whole rather than
+ * by word, and the two sides lined up by the change instead of block by
+ * block. Blocks with the same text and a different signature (an image, a
+ * diagram) are paired regardless, which costs nothing.
+ */
+export const NOTE_DIFF_WORK_BUDGET = 12_000_000;
+
 export function computeNoteDiff(
   previous: readonly NoteDiffUnit[],
-  current: readonly NoteDiffUnit[]
+  current: readonly NoteDiffUnit[],
+  workBudget: number = NOTE_DIFF_WORK_BUDGET
 ): NoteDiff {
   const previousLines = previous.map(encodeUnit);
   const currentLines = current.map(encodeUnit);
-  const walked = walkOps(previous, current, computeLineDiff(previousLines, currentLines));
-  const ops = pairLeftoverChanges(walked, previous, current, previousLines, currentLines);
-  return { ops, hunks: groupHunks(ops) };
+  const budget = new DiffWorkBudget(workBudget);
+  const lineDiff = computeLineDiff(previousLines, currentLines, { budget });
+  const walked = walkOps(previous, current, lineDiff);
+  const ops = pairLeftoverChanges(walked, previous, current, previousLines, currentLines, budget);
+  return { ops, hunks: groupHunks(ops), capped: budget.capped };
 }
 
 /**
@@ -281,7 +316,8 @@ function pairLeftoverChanges(
   previous: readonly NoteDiffUnit[],
   current: readonly NoteDiffUnit[],
   previousLines: string[],
-  currentLines: string[]
+  currentLines: string[],
+  budget: DiffWorkBudget
 ): NoteDiffOp[] {
   const result: NoteDiffOp[] = [];
   let run: NoteDiffOp[] = [];
@@ -300,7 +336,8 @@ function pairLeftoverChanges(
           previous[previousIndex],
           current[currentIndex],
           previousLines[previousIndex],
-          currentLines[currentIndex]
+          currentLines[currentIndex],
+          budget
         );
         if (!ranges) continue;
         pairs.push(modifiedOp(previousIndex, currentIndex, ranges.previous, ranges.current));
@@ -338,12 +375,17 @@ function pairLeftoverChanges(
   return result;
 }
 
-/** The word ranges of a removal and an addition that are one block changed, or `null`. */
+/**
+ * The word ranges of a removal and an addition that are one block changed,
+ * or `null`. Comparing two long blocks by word is paid for from `budget`,
+ * and two it has no room for are not paired.
+ */
 function pairedRanges(
   previous: NoteDiffUnit,
   current: NoteDiffUnit,
   previousLine: string,
-  currentLine: string
+  currentLine: string,
+  budget: DiffWorkBudget
 ): { previous: NoteDiffTextRange[]; current: NoteDiffTextRange[] } | null {
   if (previous.kind !== current.kind) return null;
   if (previous.text === current.text) {
@@ -358,6 +400,7 @@ function pairedRanges(
   const total = previous.text.length + current.text.length;
   if ((2 * shorter) / total <= LONG_BLOCK_SIMILARITY) return null;
 
+  if (!budget.spend(charHighlightsWork(previous.text, current.text))) return null;
   const { beforeHighlights, afterHighlights } = computeCharHighlights(previous.text, current.text);
   const changed = coveredLength(beforeHighlights) + coveredLength(afterHighlights);
   if (1 - changed / total <= LONG_BLOCK_SIMILARITY) return null;

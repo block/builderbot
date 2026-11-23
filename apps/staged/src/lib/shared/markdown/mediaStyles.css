@@ -125,3 +125,57 @@
     opacity: 1;
   }
 }
+/*
+ * Media the store no longer has (missingMedia.ts). The figure stands as a box
+ * that says so, with an icon over the line and the caption under it, in
+ * place of what the browser draws for a source that does not load. Its size
+ * is its own: wide enough for the line, and about as tall as a small
+ * screenshot's share of a pane, so the text around it is laid out once and
+ * the block is still something to point a change marker at.
+ *
+ * The line is the figure's `data-media-missing-label`, drawn here rather
+ * than added to the markup, and the icon is a mask over the text colour.
+ */
+.markdown-content .markdown-media[data-media-missing] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: min(100%, 320px);
+  min-height: 120px;
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: var(--size-sm);
+  text-align: center;
+  background: var(--bg-hover);
+  border-style: dashed;
+}
+.markdown-content .markdown-media[data-media-missing] > :is(img, video, .markdown-media-expand) {
+  display: none;
+}
+.markdown-content .markdown-media[data-media-missing]::before {
+  content: '';
+  width: 20px;
+  height: 20px;
+  background: currentColor;
+  -webkit-mask: var(--media-missing-icon) center / contain no-repeat;
+  mask: var(--media-missing-icon) center / contain no-repeat;
+}
+.markdown-content .markdown-media[data-media-missing]::after {
+  content: attr(data-media-missing-label);
+  order: 1;
+  color: var(--text-primary);
+}
+.markdown-content .markdown-media[data-media-missing] figcaption {
+  order: 2;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+.markdown-content .markdown-media[data-media-missing='image'] {
+  --media-missing-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='2' x2='22' y1='2' y2='22'/%3E%3Cpath d='M10.41 10.41a2 2 0 1 1-2.83-2.83'/%3E%3Cline x1='13.5' x2='6' y1='13.5' y2='21'/%3E%3Cline x1='18' x2='21' y1='12' y2='15'/%3E%3Cpath d='M3.59 3.59A1.99 1.99 0 0 0 3 5v14a2 2 0 0 0 2 2h14c.55 0 1.052-.22 1.41-.59'/%3E%3Cpath d='M21 15V5a2 2 0 0 0-2-2H9'/%3E%3C/svg%3E");
+}
+.markdown-content .markdown-media[data-media-missing='video'] {
+  --media-missing-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196'/%3E%3Cpath d='M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2'/%3E%3Cpath d='m2 2 20 20'/%3E%3C/svg%3E");
+}

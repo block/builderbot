@@ -2058,8 +2058,6 @@ mod tests {
         );
     }
 
-    /// Staging a move reads what else uses the note's media once, and takes
-    /// along exactly the rows the per-image check calls the note's alone.
     /// A move copies media something else still uses and re-points the note
     /// at the copies. The note's stored versions name the same media, and
     /// take the same rewrite: left as written, the viewer would show every
@@ -2192,6 +2190,8 @@ mod tests {
         assert_eq!(previous(&child.id), embed("Before", &child_copy));
     }
 
+    /// Staging a move reads what else uses the note's media once, and takes
+    /// along exactly the rows the per-image check calls the note's alone.
     #[test]
     fn staging_a_move_checks_its_media_in_one_pass_and_rehomes_what_the_per_image_check_would() {
         let f = fixture();

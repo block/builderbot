@@ -50,6 +50,11 @@ use super::{now_timestamp, Store, StoreChange, StoreError};
 /// given a moving note's id and a text that note held before (the body of one
 /// of its versions), the text with its media references re-pointed as the
 /// note's body was, or `None` when it holds none that the move re-pointed.
+///
+/// It is called with the store's connection locked, inside the move's
+/// transaction, so it must not touch the store: a read through the `Store`
+/// would wait on that lock for ever rather than fail. Whatever it needs from
+/// the store is read before the move and captured.
 pub type MediaRetarget<'a> = &'a dyn Fn(&str, &str) -> Option<String>;
 
 /// The [`MediaRetarget`] of a move that re-pointed no media.

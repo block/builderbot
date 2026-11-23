@@ -1,14 +1,17 @@
 /**
  * The note-diff seeder (`src-tauri/src/note_versions_seed.rs`) leaves a note
- * whose last revision is meant to show one of each change. The fixtures are
- * markdown and the changes are read from rendered blocks, so this renders
- * the last two revisions as the viewer does and holds them to that list.
+ * whose last revision is meant to show one of each change, and a second
+ * note whose revision dropped its media. The fixtures are markdown and the
+ * changes are read from rendered blocks, so this renders each note's last
+ * two revisions as the viewer does and holds them to those lists.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import previousDraft from '../../../../src-tauri/src/note_versions_seed/revision-3.md?raw';
 import currentDraft from '../../../../src-tauri/src/note_versions_seed/revision-4.md?raw';
+import previousMediaDraft from '../../../../src-tauri/src/note_versions_seed/media-revision-1.md?raw';
+import currentMediaDraft from '../../../../src-tauri/src/note_versions_seed/media-revision-2.md?raw';
 import type { PikchrRenderer } from '../../shared/markdown/pikchrRendering';
 import { computeNoteDiff, type NoteDiffHunk } from './noteDiff';
 import { extractNoteDiffUnits, type NoteDiffDomUnit } from './noteDiffUnits';
@@ -74,5 +77,29 @@ describe('the note-diff seed fixtures', () => {
   it('keep the note’s title, so the first block is unchanged', () => {
     expect(units(currentDraft)[0]).toMatchObject(units(previousDraft)[0]);
     expect(units(currentDraft)[0].kind).toBe('h1');
+  });
+
+  it('drop the second note’s screenshot for a sentence and its recording outright', () => {
+    const previous = units(previousMediaDraft);
+    const current = units(currentMediaDraft);
+    const describeHunk = (hunk: NoteDiffHunk) => ({
+      kind: hunk.kind,
+      previous: hunk.previousIndices.map((index) => previous[index].kind),
+      current: hunk.currentIndices.map((index) => current[index].kind),
+    });
+
+    const { hunks } = computeNoteDiff(previous, current);
+
+    expect(hunks.map(describeHunk)).toEqual([
+      // The screenshot, replaced by a sentence about it.
+      { kind: 'modified', previous: ['media'], current: ['p'] },
+      // The recording, gone.
+      { kind: 'removed', previous: ['media'], current: [] },
+      // A finding, added.
+      { kind: 'added', previous: [], current: ['ul-li'] },
+    ]);
+    // The previous version is what names the media: the note itself embeds none.
+    const media = (all: NoteDiffDomUnit[]) => all.filter((unit) => unit.kind === 'media').length;
+    expect([media(previous), media(current)]).toEqual([2, 0]);
   });
 });

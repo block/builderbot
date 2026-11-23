@@ -40,8 +40,8 @@
   the window has room for two panes; elsewhere it scrolls to the change and
   keeps it lit. The previous version takes the place the chat would, so
   opening either closes the other. Escape closes the previous version before
-  it closes the note; in the find field it closes the search and nothing
-  else.
+  it closes the note, and until it has, Escape in the find field closes the
+  search and nothing else.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -100,6 +100,7 @@
     resolveStagedMediaUrl,
   } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
+  import { missingMedia } from '../../shared/markdown/missingMedia';
   import { pageVideos } from '../../shared/markdown/pageVideos';
   import { followSectionLink } from '../../shared/markdown/sectionLinks';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
@@ -444,6 +445,12 @@
       : null
   );
   let previousMarkdownEl = $state<HTMLDivElement>();
+  /**
+   * Media the note embeds is in the store. Media only the previous version
+   * names may not be: it is deleted once nothing but a version names it, and
+   * the version then shows a placeholder where it was (missingMedia.ts).
+   */
+  const noteEmbedsMedia = (id: string) => noteMarkdown.includes(id);
   let mediaViewer = $state<OpenMarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
 
@@ -681,7 +688,16 @@
     noteDiff.select(hunkId, split);
   }
 
-  /** Escape lets go of the diff first: the previous version closes and the note stays. */
+  /**
+   * Escape lets go of the diff first: the previous version closes and the
+   * note stays.
+   *
+   * The find field keeps its Escape to itself for as long as that holds
+   * (`containEscape` below), so that closing the search does not also let go
+   * of the change being read. With nothing of the diff held, one Escape in
+   * the field closes the search and the note, as it does in the session
+   * viewer and did before notes had a diff.
+   */
   function handleEscapeKeydown(event: KeyboardEvent) {
     if (!noteDiff.engaged) return;
     event.preventDefault();
@@ -997,6 +1013,7 @@
       class="markdown-content"
       bind:this={previousMarkdownEl}
       {@attach pageVideos(renderedPreviousHtml)}
+      {@attach missingMedia(renderedPreviousHtml, noteEmbedsMedia)}
     >
       {@html renderedPreviousHtml}
     </div>
@@ -1047,7 +1064,7 @@
               visible={searchVisible}
               {matchCount}
               currentIndex={currentMatchIndex}
-              containEscape
+              containEscape={noteDiff.engaged}
               onSearch={performSearch}
               onNext={nextMatch}
               onPrevious={previousMatch}

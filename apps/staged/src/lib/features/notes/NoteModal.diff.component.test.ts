@@ -263,6 +263,46 @@ describe('NoteModal change bar', () => {
   });
 });
 
+describe('NoteModal media the previous version names', () => {
+  const withImage = (markdown: string, id: string) =>
+    `${markdown}\n\n![Figure](staged-media://${id}.png)`;
+  const figureOf = (pane: Element, id: string) =>
+    pane.querySelector<HTMLElement>(`figure[data-media-id="${id}"]`)!;
+  /** The load failed; `error` does not bubble. */
+  const fail = (figure: Element) => figure.querySelector('img')!.dispatchEvent(new Event('error'));
+
+  it('shows a placeholder for an image the revision replaced, which is no longer stored', async () => {
+    commands.getNotePreviousVersion.mockResolvedValue(
+      versionOf(withImage(PREVIOUS_NOTE, MEDIA_ID))
+    );
+    await open(stored(withImage(CURRENT_NOTE, NOTE_MEDIA_ID)));
+    await press(markers().at(-1)!);
+    const figure = figureOf(previousPane()!, MEDIA_ID);
+    expect(figure.hasAttribute('data-media-missing')).toBe(false);
+
+    fail(figure);
+
+    expect(figure.getAttribute('data-media-missing')).toBe('image');
+    expect(figure.getAttribute('data-media-missing-label')).toBe('Image no longer available');
+    // The block is still the changed one: marked, and lit by its marker.
+    expect(figure.getAttribute(NOTE_DIFF_ATTRIBUTE)).toBe('modified');
+    expect(figure.hasAttribute(NOTE_DIFF_ACTIVE_ATTRIBUTE)).toBe(true);
+  });
+
+  it('leaves an image both versions embed as it is, and the note’s own', async () => {
+    commands.getNotePreviousVersion.mockResolvedValue(
+      versionOf(withImage(PREVIOUS_NOTE, NOTE_MEDIA_ID))
+    );
+    await open(stored(withImage(CURRENT_NOTE, NOTE_MEDIA_ID)));
+    await press(marker('modified'));
+
+    fail(figureOf(previousPane()!, NOTE_MEDIA_ID));
+    fail(figureOf(note(), NOTE_MEDIA_ID));
+
+    expect(document.querySelector('[data-media-missing]')).toBeNull();
+  });
+});
+
 describe('NoteModal image sizes', () => {
   it('does not hold the note back for the images of its previous version', async () => {
     // Each lookup waits for the test, as a slow one would.
@@ -405,17 +445,40 @@ describe('NoteModal previous version', () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it('closes only the search on Escape in the find field when nothing of the diff is open', async () => {
+  it('closes the search and the note on one Escape in the find field when nothing of the diff is open', async () => {
     const { onClose } = await open();
     const field = await openSearch();
 
     await pressEscape(field);
 
     expect(searchBar()).toBeNull();
-    expect(dialog()).not.toBeNull();
-    expect(onClose).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 
+  it('closes only the search on Escape in the find field while a change is lit without a second pane', async () => {
+    screen.wide = false;
+    viewport.canSplit = false;
+    const { onClose } = await open();
+    await press(marker('modified'));
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('closes the search and the note on one Escape again once the previous version is closed', async () => {
+    const { onClose } = await open();
+    await press(marker('modified'));
     await pressEscape();
+    expect(previousPane()).toBeNull();
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
     expect(onClose).toHaveBeenCalledOnce();
   });
 

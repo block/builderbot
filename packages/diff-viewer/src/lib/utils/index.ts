@@ -102,9 +102,11 @@ export {
 } from './fileSelection';
 
 export {
+  charHighlightsWork,
   computeCharHighlights,
   computeLineDiff,
   createLineDiffCache,
+  DiffWorkBudget,
   LCS_BAILOUT_PRODUCT,
 } from './inlineDiff.js';
-export type { BeforeLineClass, AfterLineClass, CharHighlight, ModifiedPair, LineDiffResult, LineDiffCache } from './inlineDiff.js';
+export type { BeforeLineClass, AfterLineClass, CharHighlight, ModifiedPair, LineDiffResult, LineDiffOptions, LineDiffCache } from './inlineDiff.js';

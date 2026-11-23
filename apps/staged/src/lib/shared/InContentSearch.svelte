@@ -24,7 +24,8 @@
     /**
      * Escape in the field closes the search and goes no further. Without
      * this the key carries on to whatever else listens for it, so a dialog
-     * around the search closes on the same press.
+     * around the search closes on the same press, which is what a viewer
+     * with nothing else for Escape to close wants.
      */
     containEscape?: boolean;
   }

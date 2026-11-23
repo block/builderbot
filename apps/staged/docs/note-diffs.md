@@ -35,6 +35,46 @@ that replace a note's text: `update_note_title_and_content`,
   `NotePreviousPane.svelte` show the result. All of it is in
   `src/lib/features/notes/`.
 
+## Limits
+
+### Media a revision dropped
+
+A version keeps the note's text, not its media. Images and videos are deleted
+once no note body and no chat message embeds them
+(`note_media::cleanup_unreferenced`), and the text kept in `note_versions` is
+not read for that. A revision that drops or replaces an image therefore takes
+the file with it, and the previous version goes on naming media that is gone.
+
+The previous version shows a placeholder in its place: a dashed box with an
+icon and **Image no longer available** or **Video no longer available**, and
+the caption under it when the media had one. The box is a fixed 120px tall at
+least, whatever the media measured, so the previous version is shorter there
+than it was when written. The panes are aligned on the blocks as measured, so
+they scroll together as they do past any other block.
+
+The placeholder is drawn when the media fails to load (`missingMedia.ts`), not
+from a check of what is stored. Media the note still embeds is never given
+one, so an image both versions show cannot be mislabelled while the note's own
+copy is on screen.
+
+### How much comparing a note gets
+
+Telling which blocks were reworded, and which words in them changed, costs the
+product of the two texts' lengths for every pair of blocks tried. A long note
+that was largely rewritten has many such pairs and little to gain from them.
+The comparing is therefore given a budget of 12,000,000 table cells
+(`NOTE_DIFF_WORK_BUDGET` in `noteDiff.ts`), about 50 ms, and no one comparison
+may take more than an eighth of what is left. A comparison that does not fit
+is not made: the two blocks are shown as one removed and one added, in an
+orange change, without the changed words picked out. Cheap comparisons go on
+being made after a costly one is refused, so small edits among rewritten
+sections keep their words.
+
+Text the two blocks share at their start and end is not counted, so a long
+paragraph with one word changed costs next to nothing. Which blocks are
+unchanged, added or removed is never affected: only the pairing of changed
+blocks and the words within them are.
+
 ## Trying it in a scratch data directory
 
 A development build opens `~/.staged`, the directory the installed app uses,
@@ -63,7 +103,11 @@ it runs only when asked for like this. It creates the directory and its
   branches would be, so nothing else has to be registered for the note to be
   reachable;
 - one project note, **Upload retries: findings and plan**, written and then
-  revised three times, which leaves three versions.
+  revised three times, which leaves three versions;
+- a second project note, **Settings redesign: review notes**, written with a
+  screenshot and a recording and revised once to drop them. No media is
+  stored for it, which is how the clean-up above leaves a dropped image: its
+  version names two files that are not there.
 
 The last revision is the one the bar shows. Down the note, it holds:
 
@@ -75,6 +119,14 @@ The last revision is the one the bar shows. Down the note, it holds:
 | Orange | A changed list item                |
 | Orange | A changed table row                |
 | Green  | An added section, _Rollout_        |
+
+The second note's revision holds:
+
+| Marker | Change                               |
+| ------ | ------------------------------------ |
+| Orange | The screenshot, replaced by a line   |
+| Red    | The recording, removed               |
+| Green  | An added finding, the last in a list |
 
 The seeder refuses a path that is not absolute and one that leads into
 `~/.staged`, through `..` or a symlink as well. It also refuses a directory
@@ -129,7 +181,8 @@ the time: `lsof -p <pid> | grep -F .staged` should list only paths under
 
 ### 3. Look at the note
 
-Open **Note diffs demo** from the projects grid and press the note. The bar
+Open **Note diffs demo** from the projects grid and press the first note,
+**Upload retries: findings and plan**. The bar
 at the right of the note should carry the six markers above, in that order.
 Hover each one, press an orange one to open the previous version, scroll
 either pane, and press Escape twice: once for the previous version, once for
@@ -151,8 +204,17 @@ What to expect:
   lit and the note shows the red line beside it; for the added section it is
   the other way round, with a green line on the left.
 
-With the find field open (Cmd+F) and focused, Escape closes the search and
-nothing else; the previous version stays as it was.
+With the find field open (Cmd+F) and focused, what Escape does depends on
+whether anything of the diff is held open. While the previous version is
+open, or a change is selected, Escape closes the search and nothing else; the
+previous version stays as it was. Otherwise one Escape closes the search and
+the note together, as it does in every other viewer.
+
+Then open the second note, **Settings redesign: review notes**, and press its
+orange marker. The previous version shows a placeholder where the screenshot
+was, lit as the changed block, level with the sentence that replaced it in
+the note. Press the red marker: the placeholder for the recording is lit, and
+the note shows a red line across the gap it left.
 
 To make a version by hand instead, revise a note of your own. An agent
 rewriting its note keeps the text it replaced, and so does editing and saving

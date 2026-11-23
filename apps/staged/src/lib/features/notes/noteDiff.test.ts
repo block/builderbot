@@ -25,6 +25,32 @@ function longParagraph(prefix: string, count: number): string {
   return Array.from({ length: count }, (_, index) => `${prefix}${index}`).join(' ');
 }
 
+/**
+ * A paragraph of `length` characters in six-letter words of `letters`,
+ * numbered so that no two are the same. Two paragraphs in letters of their
+ * own share the spaces between their words and nothing else.
+ */
+function prose(letters: string, index: number, length: number): string {
+  let text = `${index} `;
+  for (let word = 0; text.length < length; word++) {
+    const start = (index * 7 + word * 3) % letters.length;
+    text += `${(letters + letters).slice(start, start + 6)} `;
+  }
+  return text.slice(0, length).trim();
+}
+
+const EARLY_LETTERS = 'abcdefgh';
+const MIDDLE_LETTERS = 'ijklmnopq';
+const LATE_LETTERS = 'rstuvwxyz';
+
+/** `count` paragraphs of `length` characters, and the same number that share nothing with them. */
+function rewritten(count: number, length: number): [NoteDiffUnit[], NoteDiffUnit[]] {
+  return [
+    Array.from({ length: count }, (_, index) => unit(prose(EARLY_LETTERS, index, length))),
+    Array.from({ length: count }, (_, index) => unit(prose(LATE_LETTERS, index, length))),
+  ];
+}
+
 beforeEach(() => {
   // `computeLineDiff` reports every run on the console.
   vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -43,7 +69,7 @@ describe('computeNoteDiff', () => {
   });
 
   it('finds nothing between two empty versions', () => {
-    expect(computeNoteDiff([], [])).toEqual({ ops: [], hunks: [] });
+    expect(computeNoteDiff([], [])).toEqual({ ops: [], hunks: [], capped: false });
   });
 
   it('marks blocks only the current version has as added', () => {
@@ -338,6 +364,108 @@ describe('computeNoteDiff', () => {
       expect(diff.hunks[0].previousIndices).toEqual([1, 2]);
       expect(diff.hunks[0].currentIndices).toEqual([1, 2]);
     });
+  });
+});
+
+describe('the work budget', () => {
+  it('is not reached by a note that was rewritten end to end, when the note is short', () => {
+    const [previous, current] = rewritten(20, 150);
+
+    const diff = computeNoteDiff(previous, current);
+
+    expect(diff.capped).toBe(false);
+    expect(diff.hunks).toHaveLength(1);
+  });
+
+  it('stops comparing the blocks of a long note that was rewritten end to end', () => {
+    // 120 blocks, each compared with up to eleven others at 160,000 cells a
+    // time: some 200 million cells, uncapped.
+    const [previous, current] = rewritten(120, 400);
+
+    const diff = computeNoteDiff(previous, current);
+
+    expect(diff.capped).toBe(true);
+    // The change reads as replaced: every block of both versions, in one
+    // hunk that is neither an addition nor a removal.
+    expect(diff.hunks).toHaveLength(1);
+    const [hunk] = diff.hunks;
+    expect(hunk.kind).toBe('modified');
+    expect(hunk.previousIndices).toHaveLength(120);
+    expect(hunk.currentIndices).toHaveLength(120);
+    expect(new Set(hunk.ops.map((op) => op.type))).toEqual(new Set(['removed', 'added']));
+    expect(hunkTextRanges(hunk, 'previous').every(({ ranges }) => ranges === null)).toBe(true);
+    expect(hunkTextRanges(hunk, 'current')).toHaveLength(120);
+  });
+
+  it('leaves a reworded block unpaired when there is no room to compare it', () => {
+    const reworded = unit(middle.text.replace('oldest', 'newest'));
+    expect(computeNoteDiff([intro, middle], [intro, reworded]).hunks[0].ops[0].type).toBe(
+      'modified'
+    );
+
+    const diff = computeNoteDiff([intro, middle], [intro, reworded], 100);
+
+    expect(diff.capped).toBe(true);
+    expect(diff.hunks).toHaveLength(1);
+    expect(diff.hunks[0].kind).toBe('modified');
+    expect(diff.hunks[0].ops).toEqual([
+      { type: 'removed', previousIndex: 1 },
+      { type: 'added', currentIndex: 1 },
+    ]);
+  });
+
+  it('leaves long blocks unpaired when there is no room to compare their words', () => {
+    const before = unit(longParagraph('word', 220));
+    const after = unit(before.text.replace('word7 ', 'changed7 '));
+    // 439 words and spaces a side: 192,721 cells.
+    const diff = computeNoteDiff([intro, before], [intro, after], 1_000_000);
+
+    expect(diff.capped).toBe(true);
+    expect(diff.hunks[0].ops.map((op) => op.type)).toEqual(['removed', 'added']);
+  });
+
+  it('still pairs blocks whose signature alone changed, which costs nothing', () => {
+    const diagram = unit('', 'diagram', 'drawing-1');
+    const redrawn = unit('', 'diagram', 'drawing-2');
+
+    const diff = computeNoteDiff([intro, diagram], [intro, redrawn], 0);
+
+    expect(diff.hunks[0].ops.map((op) => op.type)).toEqual(['modified']);
+  });
+
+  it('keeps the changed words of small changes among rewritten blocks', () => {
+    // Every other block rewritten, at some four million cells each, and
+    // every other one with a word changed.
+    const [gone, fresh] = rewritten(40, 600);
+    const edited = gone.map((_, index) => unit(prose(MIDDLE_LETTERS, index, 600)));
+    const reworded = edited.map((block) => unit(block.text.replace(/ \w+ /, ' changed ')));
+
+    const diff = computeNoteDiff(
+      gone.flatMap((block, index) => [block, edited[index]]),
+      fresh.flatMap((block, index) => [block, reworded[index]])
+    );
+
+    // The rewritten blocks alone are far past the budget.
+    expect(diff.capped).toBe(true);
+    const pairs = diff.ops.filter((op) => op.type === 'modified');
+    expect(pairs.map((op) => op.previousIndex)).toEqual(gone.map((_, index) => 2 * index + 1));
+    expect(
+      pairs.every(
+        (op, index) => covered(reworded[index].text, op.currentRanges).join() === 'changed'
+      )
+    ).toBe(true);
+  });
+
+  it('is not reached by one word changed in every block of a long note', () => {
+    const previous = Array.from({ length: 200 }, (_, index) =>
+      unit(prose(MIDDLE_LETTERS, index, 600))
+    );
+    const current = previous.map((block) => unit(block.text.replace(/ \w+ /, ' changed ')));
+
+    const diff = computeNoteDiff(previous, current);
+
+    expect(diff.capped).toBe(false);
+    expect(diff.ops.every((op) => op.type === 'modified')).toBe(true);
   });
 });
 

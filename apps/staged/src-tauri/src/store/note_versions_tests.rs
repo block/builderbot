@@ -5,7 +5,7 @@ use rusqlite::params;
 
 use super::models::*;
 use super::note_versions::MAX_NOTE_VERSIONS;
-use super::{no_media_retargeted, Store};
+use super::{no_media_retargeted, ChildNoteMove, Store};
 
 struct Fixture {
     store: Store,
@@ -683,7 +683,10 @@ fn a_moved_notes_versions_take_the_title_it_lands_with() {
     assert_eq!(previous.content, "second body");
 }
 
-/// A failed move leaves the versions as they were, with the note.
+/// A failed move leaves the versions as they were, with the note. The
+/// children of a project note are carried before the parent, so by the time
+/// the parent's write is refused a child's versions have been rewritten, and
+/// the transaction has to take that back.
 #[test]
 fn a_refused_move_leaves_the_versions_as_they_were() {
     let f = fixture();
@@ -691,6 +694,11 @@ fn a_refused_move_leaves_the_versions_as_they_were() {
     f.store.create_project(&target).unwrap();
     let target_branch = Branch::new(&target.id, "other", "main");
     f.store.create_branch(&target_branch).unwrap();
+    // The destination already has a "Plan", so the child's title, and with it
+    // the title of its versions, gains a suffix on the way.
+    f.store
+        .create_note(&Note::new(&target_branch.id, "Plan", "taken"))
+        .unwrap();
     let parent = stub_project_note(&f);
     revise_project_note(
         &f.store,
@@ -704,9 +712,25 @@ fn a_refused_move_leaves_the_versions_as_they_were() {
         "Research",
         "second ![a](staged-media://old.png)",
     );
-    let before = versions(&f.store, &parent.id);
+    let child = Note::new(&f.branch.id, "", "").with_parent_project_note(&parent.id);
+    f.store.create_note(&child).unwrap();
+    revise(
+        &f.store,
+        &child.id,
+        "Plan",
+        "first ![c](staged-media://old.png)",
+    );
+    let child_body = "second ![c](staged-media://old.png)";
+    revise(&f.store, &child.id, "Plan", child_body);
+    let parent_before = versions(&f.store, &parent.id);
+    let child_before = versions(&f.store, &child.id);
+    assert_eq!(parent_before.len(), 1);
+    assert_eq!(child_before.len(), 1);
 
-    // The body the plan read is not the one the note holds.
+    // The child's plan is good, so its move is written and its versions
+    // rewritten. The parent's is not: the body the plan read is not the one
+    // the note holds.
+    let rewritten = std::cell::RefCell::new(Vec::new());
     let refused = f.store.move_project_note_to_project(
         &parent.id,
         &f.project.id,
@@ -715,10 +739,28 @@ fn a_refused_move_leaves_the_versions_as_they_were() {
         "second ![a](staged-media://new.png)",
         &[],
         &[],
-        &[],
-        &|_, text| Some(text.replace("old", "new")),
+        &[ChildNoteMove {
+            note_id: child.id.clone(),
+            expected_branch_id: f.branch.id.clone(),
+            expected_content: child_body.to_string(),
+            target_branch_id: target_branch.id.clone(),
+            content: child_body.replace("old", "new"),
+            media: Vec::new(),
+            rehomed: Vec::new(),
+        }],
+        &|note_id, text| {
+            rewritten.borrow_mut().push(note_id.to_string());
+            Some(text.replace("old", "new"))
+        },
     );
 
     assert!(refused.is_err());
-    assert_eq!(versions(&f.store, &parent.id), before);
+    // The rewrite did run, for the child alone, before the refusal.
+    assert_eq!(rewritten.into_inner(), [child.id.clone()]);
+    assert_eq!(versions(&f.store, &child.id), child_before);
+    assert_eq!(versions(&f.store, &parent.id), parent_before);
+    let stored = f.store.get_note(&child.id).unwrap().unwrap();
+    assert_eq!(stored.branch_id, f.branch.id);
+    assert_eq!(stored.title, "Plan");
+    assert_eq!(stored.content, child_body);
 }

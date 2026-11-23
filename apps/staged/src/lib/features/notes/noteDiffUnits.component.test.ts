@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { watchForMissingMedia } from '../../shared/markdown/missingMedia';
 import type { PikchrRenderer } from '../../shared/markdown/pikchrRendering';
 import { highlightMatches } from '../../shared/textHighlight';
 import { computeNoteDiff } from './noteDiff';
@@ -152,6 +153,21 @@ describe('extractNoteDiffUnits', () => {
       ['media', 'Shot'],
       ['p', 'After the picture.'],
     ]);
+  });
+
+  it('reads a figure the same once it stands for media that is gone', () => {
+    const root = mount(`Before\n\n![Shot](${IMAGE})\n\n![Clip](${VIDEO})\n\nAfter`);
+    const read = () =>
+      extractNoteDiffUnits(root).map(({ kind, text, signature }) => ({ kind, text, signature }));
+    const before = read();
+    watchForMissingMedia(root);
+
+    for (const media of root.querySelectorAll('.markdown-media > :is(img, video)')) {
+      media.dispatchEvent(new Event('error'));
+    }
+
+    expect(root.querySelectorAll('[data-media-missing]')).toHaveLength(2);
+    expect(read()).toEqual(before);
   });
 
   it('reads what a paragraph said after its figure as part of the figure', () => {

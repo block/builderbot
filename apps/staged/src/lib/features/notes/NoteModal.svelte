@@ -1348,18 +1348,24 @@
     margin-top: 0;
   }
 
-  /* A section link (`[text](#heading-slug)`) scrolls its heading to the top
-     of the note and moves focus there (sectionLinks.ts). The margin is the
-     room left above it: nothing is stuck over the scroll box's top edge, so
-     it is breathing space only. The ring shows where a keyboard landed. */
-  .markdown-content :global(:is(h1, h2, h3, h4, h5, h6)) {
+  /* A section link (`[text](#heading-slug)`) scrolls its heading, or the
+     anchor an author named (`<a name="…">`), to the top of the note and
+     moves focus there (sectionLinks.ts). The margin is the room left above
+     it: nothing is stuck over the scroll box's top edge, so it is breathing
+     space only. The ring shows where a keyboard landed; an anchor with
+     nothing in it has nothing to ring. */
+  .markdown-content :global(:is(h1, h2, h3, h4, h5, h6, a[name])) {
     scroll-margin-top: 16px;
   }
 
-  .markdown-content :global(:is(h1, h2, h3, h4, h5, h6):focus-visible) {
+  .markdown-content :global(:is(h1, h2, h3, h4, h5, h6, a[name]):focus-visible) {
     outline: 2px solid var(--ui-accent);
     outline-offset: 4px;
     border-radius: 2px;
+  }
+
+  .markdown-content :global(a[name]:empty:focus-visible) {
+    outline: none;
   }
 
   .markdown-content :global(h1) {

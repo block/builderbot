@@ -1,5 +1,5 @@
 /**
- * sectionLinks — links from rendered markdown to a heading in the same
+ * sectionLinks — links from rendered markdown to a place in the same
  * document: `[difficult cases](#how-the-plan-behaves-in-difficult-cases)`.
  *
  * The rendered headings carry no ids. The sanitizer strips them, and an id
@@ -7,8 +7,10 @@
  * with a child note opened over it) and share heading text. So a link is
  * resolved when it is followed, against the headings of the markdown it sits
  * in: their slugs are derived from their text by GitHub's rule
- * (headingSlug.ts) and the first match is scrolled to. Nothing outside that
- * markdown is looked at, and the webview never navigates.
+ * (headingSlug.ts) and the first match is scrolled to. A fragment no heading
+ * matches may still name an anchor the author wrote (`<a name="manual">`),
+ * which the sanitizer keeps. Nothing outside that markdown is looked at, and
+ * the webview never navigates.
  *
  * This is about `href`s. A `#note:<id>` / `#commit:<sha>` / `#review:<id>`
  * reference in prose is not a link at all: it renders as a badge
@@ -41,6 +43,30 @@ export function sectionLinkFragment(href: string | null | undefined): string | n
 }
 
 /**
+ * The text a heading is slugged by: what its markdown source says, which is
+ * what GitHub slugs and what an author derives a link from. That is the
+ * rendered text except where the note viewer draws something else:
+ *
+ * - A hashtag reference is drawn as a badge labelled with the title of what
+ *   it refers to, or a shortened id. The badge carries the reference as
+ *   written (`data-hashtag-ref`), so the slug is the same whether or not the
+ *   item has loaded and whatever it is renamed to.
+ * - An embedded image is drawn as a figure that repeats its alt text in a
+ *   caption. An image has no text on GitHub, so the figure has none here.
+ */
+export function headingSlugText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue ?? '';
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+  const element = node as Element;
+  const reference = element.getAttribute('data-hashtag-ref');
+  if (reference !== null) return reference;
+  if (element.matches('figure.markdown-media')) return '';
+  let text = '';
+  for (const child of element.childNodes) text += headingSlugText(child);
+  return text;
+}
+
+/**
  * The heading in `content` that `fragment` names, or null.
  *
  * Every heading is slugged in document order with one slugger, so repeated
@@ -53,51 +79,190 @@ export function findSectionHeading(content: Element, fragment: string): HTMLElem
   if (!wanted) return null;
   const slug = createHeadingSlugger();
   for (const heading of content.querySelectorAll<HTMLElement>(HEADINGS)) {
-    if (slug(heading.textContent ?? '') === wanted) return heading;
+    if (slug(headingSlugText(heading)) === wanted) return heading;
   }
   return null;
+}
+
+/**
+ * The anchor in `content` named `fragment` (`<a name="manual"></a>`), or
+ * null. A name is matched exactly, as a browser matches it: unlike a slug it
+ * is the author's own spelling. Compared here rather than in a selector, so
+ * no fragment has to be escaped into one.
+ */
+export function findNamedAnchor(content: Element, fragment: string): HTMLElement | null {
+  if (!fragment) return null;
+  for (const anchor of content.querySelectorAll<HTMLElement>('a[name]')) {
+    if (anchor.getAttribute('name') === fragment) return anchor;
+  }
+  return null;
+}
+
+/** What `fragment` names in `content`: a heading, else a named anchor, else null. */
+export function findSectionTarget(content: Element, fragment: string): HTMLElement | null {
+  return findSectionHeading(content, fragment) ?? findNamedAnchor(content, fragment);
 }
 
 function prefersReducedMotion(): boolean {
   return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 }
 
-/** The heading's `scroll-margin-top` in px: the room to leave above it. */
-function scrollMarginTop(heading: HTMLElement): number {
-  return parseFloat(getComputedStyle(heading).getPropertyValue('scroll-margin-top')) || 0;
+/** The target's `scroll-margin-top` in px: the room to leave above it. */
+function scrollMarginTop(target: HTMLElement): number {
+  return parseFloat(getComputedStyle(target).getPropertyValue('scroll-margin-top')) || 0;
 }
 
 /**
- * Bring `heading` to the top of `scroller` and move focus to it.
+ * Where `scroller` has to be scrolled to for `target` to sit `margin` below
+ * its top edge, as the layout stands now. While a scroll runs and nothing
+ * else moves, this stays the same number.
+ */
+function restingScrollTop(target: HTMLElement, scroller: HTMLElement, margin: number): number {
+  const portTop = scroller.getBoundingClientRect().top + scroller.clientTop;
+  const offset = target.getBoundingClientRect().top - portTop - margin;
+  return Math.max(scroller.scrollTop + offset, 0);
+}
+
+/**
+ * Open every closed `<details>` around `target`, up to `within`, so it is
+ * laid out and can take focus: inside a closed one it has no box to scroll
+ * to. A target in a block's own `<summary>` shows while the block is closed,
+ * so that block is left as the reader had it.
+ */
+function openEnclosingDetails(target: HTMLElement, within: HTMLElement): void {
+  for (let el = target.parentElement; el && el !== within; el = el.parentElement) {
+    if (el.localName !== 'details') continue;
+    const details = el as HTMLDetailsElement;
+    if (details.open) continue;
+    const summary = [...details.children].find((child) => child.localName === 'summary');
+    if (!summary?.contains(target)) details.open = true;
+  }
+}
+
+/**
+ * Move focus to `target`, which is not focusable as rendered. It is made so
+ * for as long as it holds focus and not left that way in the markup: the
+ * attribute goes when focus leaves, or at once if focus did not land.
+ */
+function focusTarget(target: HTMLElement): void {
+  const madeFocusable = !target.hasAttribute('tabindex');
+  if (madeFocusable) target.setAttribute('tabindex', '-1');
+  target.focus({ preventScroll: true });
+  if (!madeFocusable) return;
+  if (target.ownerDocument.activeElement === target) {
+    target.addEventListener('blur', () => target.removeAttribute('tabindex'), { once: true });
+  } else {
+    target.removeAttribute('tabindex');
+  }
+}
+
+/** The target has landed once it and the scroll have held still this long. */
+const SETTLED_MS = 1000;
+/** The longest a target is followed, however much keeps moving. */
+const FOLLOW_LIMIT_MS = 5000;
+/** A change in the resting position that is layout moving the target, not rounding. */
+const SHIFT_PX = 1;
+/** The reader scrolling, clicking or typing in the scroll box: the position is theirs again. */
+const TAKEOVER_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+
+/** The scroll boxes that are following a target, each with the way to stop. */
+const following = new WeakMap<HTMLElement, () => void>();
+
+/**
+ * Keep `target` where the scroll was aimed while the layout above it is
+ * still changing.
+ *
+ * The resting position is only right for the layout it was measured in. A
+ * note's images load lazily, and one with no stored size takes up no room
+ * until it has loaded, so an image the scroll passes on its way pushes the
+ * target down after the aim was taken, and the scroll stops short of it.
+ * Engines hold a resting scroll box steady when content above grows (scroll
+ * anchoring), but not one in the middle of a smooth scroll, and not every
+ * engine does it at all.
+ *
+ * So the resting position is taken again on each frame and, when it has
+ * moved, the scroll is aimed at the new one. This ends when the target and
+ * the scroll have held still for `SETTLED_MS`, when the reader takes over,
+ * when another target is followed in the same box, when the target leaves
+ * the document, or after `FOLLOW_LIMIT_MS`.
+ */
+function followTarget(
+  target: HTMLElement,
+  scroller: HTMLElement,
+  margin: number,
+  aim: number,
+  behavior: ScrollBehavior
+): void {
+  following.get(scroller)?.();
+  if (typeof requestAnimationFrame !== 'function') return;
+
+  const started = performance.now();
+  let stillSince = started;
+  let lastTop = scroller.scrollTop;
+  let frame = 0;
+
+  const stop = () => {
+    cancelAnimationFrame(frame);
+    for (const type of TAKEOVER_EVENTS) scroller.removeEventListener(type, stop, true);
+    if (following.get(scroller) === stop) following.delete(scroller);
+  };
+  const check = () => {
+    const now = performance.now();
+    if (!scroller.contains(target) || !target.isConnected || now - started > FOLLOW_LIMIT_MS) {
+      stop();
+      return;
+    }
+    const top = scroller.scrollTop;
+    const resting = restingScrollTop(target, scroller, margin);
+    if (Math.abs(resting - aim) > SHIFT_PX) {
+      aim = resting;
+      scroller.scrollTo({ top: aim, behavior });
+      stillSince = now;
+    } else if (top !== lastTop) {
+      stillSince = now;
+    } else if (now - stillSince >= SETTLED_MS) {
+      stop();
+      return;
+    }
+    lastTop = top;
+    frame = requestAnimationFrame(check);
+  };
+
+  for (const type of TAKEOVER_EVENTS) {
+    scroller.addEventListener(type, stop, { capture: true, passive: true });
+  }
+  following.set(scroller, stop);
+  frame = requestAnimationFrame(check);
+}
+
+/**
+ * Bring `target` (a heading or a named anchor) to the top of `scroller` and
+ * move focus to it.
  *
  * Only `scroller` scrolls: `scrollIntoView` would also scroll every box
- * around it, up to the page. The heading stops its `scroll-margin-top`
- * below the scroller's top edge, so a render site with something stuck over
- * that edge clears it in CSS.
+ * around it, up to the page. The target stops its `scroll-margin-top` below
+ * the scroller's top edge, so a render site with something stuck over that
+ * edge clears it in CSS. A target folded away in a `<details>` is unfolded
+ * first, and the target is followed until the layout around it has settled
+ * (see `followTarget`).
  *
  * Focus follows the scroll, as it does for a fragment link in a page, so
  * Tab and a screen reader carry on from the section rather than from the
- * link left behind. A heading is not focusable; it is made so for as long
- * as it holds focus and not left in the markup.
+ * link left behind.
  */
-export function revealSectionHeading(heading: HTMLElement, scroller: HTMLElement): void {
-  if (!scroller.contains(heading)) return;
-  const portTop = scroller.getBoundingClientRect().top + scroller.clientTop;
-  const offset = heading.getBoundingClientRect().top - portTop - scrollMarginTop(heading);
-  scroller.scrollTo({
-    top: Math.max(scroller.scrollTop + offset, 0),
-    behavior: prefersReducedMotion() ? 'auto' : 'smooth',
-  });
-
-  if (!heading.hasAttribute('tabindex')) {
-    heading.setAttribute('tabindex', '-1');
-    heading.addEventListener('blur', () => heading.removeAttribute('tabindex'), { once: true });
-  }
-  heading.focus({ preventScroll: true });
+export function revealSectionTarget(target: HTMLElement, scroller: HTMLElement): void {
+  if (!scroller.contains(target)) return;
+  openEnclosingDetails(target, scroller);
+  const margin = scrollMarginTop(target);
+  const aim = restingScrollTop(target, scroller, margin);
+  const behavior: ScrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';
+  scroller.scrollTo({ top: aim, behavior });
+  focusTarget(target);
+  followTarget(target, scroller, margin, aim, behavior);
 }
 
 export interface SectionLinkScope {
-  /** The element one document's markdown is rendered into: the link and its heading are both in it. */
+  /** The element one document's markdown is rendered into: the link and its target are both in it. */
   content: Element | null | undefined;
   /** The box that scrolls that document. */
   scroller: HTMLElement | null | undefined;
@@ -108,9 +273,10 @@ export interface SectionLinkScope {
  *
  * Returns whether the click was one, so a delegated handler can stop there.
  * A section link's default is always prevented, matched or not: the default
- * is the webview navigating to the fragment, which finds nothing (headings
- * have no ids) and only rewrites the app's URL. A fragment no heading
- * matches therefore does nothing.
+ * is the webview navigating to the fragment, which finds no heading (they
+ * have no ids), would scroll the page as well as the note for a named
+ * anchor, and rewrites the app's URL. A fragment that names nothing in
+ * `content` therefore does nothing.
  *
  * A link activated from the keyboard arrives here too, as the click Enter
  * raises on a focused link.
@@ -126,7 +292,7 @@ export function followSectionLink(
   if (fragment === null) return false;
 
   event.preventDefault();
-  const heading = findSectionHeading(content, fragment);
-  if (heading && scroller) revealSectionHeading(heading, scroller);
+  const target = findSectionTarget(content, fragment);
+  if (target && scroller) revealSectionTarget(target, scroller);
   return true;
 }

@@ -61,6 +61,12 @@ const BODY = [
   '| Step | See |',
   '| --- | --- |',
   '| First | [the title](#TITLE) |',
+  '',
+  '### See #note:abc123',
+  '',
+  'Back to [the related section](#see-noteabc123) or [the appendix](#appendix).',
+  '',
+  '<a name="appendix"></a>Appendix text.',
 ].join('\n');
 
 const NOTE_ITEM: HashtagItem = {
@@ -130,7 +136,7 @@ describe('NoteModal section links', () => {
         )!;
       },
       heading(text) {
-        return [...root.querySelectorAll<HTMLElement>('.markdown-content :is(h1, h2)')].find(
+        return [...root.querySelectorAll<HTMLElement>('.markdown-content :is(h1, h2, h3)')].find(
           (h) => h.textContent === text
         )!;
       },
@@ -182,6 +188,29 @@ describe('NoteModal section links', () => {
 
     expect(note.scrollTo).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(note.heading('Title'));
+  });
+
+  it('finds a heading by the reference written in it, whatever title the badge shows', async () => {
+    const note = await mountNote('Title');
+    // The badge is labelled with the referenced note's title.
+    const heading = note.heading('See Related note');
+    expect(heading.querySelector('[data-hashtag-ref="#note:abc123"]')).not.toBeNull();
+
+    expect(click(note.link('#see-noteabc123'))).toBe(true);
+
+    expect(note.scrollTo).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(heading);
+  });
+
+  it('follows a link to an anchor the author named', async () => {
+    const note = await mountNote('Title');
+    const anchor = note.root.querySelector<HTMLElement>('.markdown-content a[name="appendix"]');
+    expect(anchor).not.toBeNull();
+
+    expect(click(note.link('#appendix'))).toBe(true);
+
+    expect(note.scrollTo).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(anchor);
   });
 
   it('still opens an http link outside the app, and a hashtag reference as a reference', async () => {

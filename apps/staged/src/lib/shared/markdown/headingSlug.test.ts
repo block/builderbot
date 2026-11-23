@@ -40,6 +40,70 @@ describe('githubHeadingSlug', () => {
     expect(githubHeadingSlug('Done ✅')).toBe('done-');
   });
 
+  it('keeps combining marks, which are not letters', () => {
+    // The virama (U+094D) in स्ते and the acute of a decomposed é (U+0301)
+    // are marks: dropped, the slugs would be नमसते-दुनिया and ecole.
+    expect(githubHeadingSlug('नमस्ते दुनिया')).toBe('नमस्ते-दुनिया');
+    expect(githubHeadingSlug('e\u0301cole')).toBe('e\u0301cole');
+    expect(githubHeadingSlug('x\u030c e\u030a')).toBe('x\u030c-e\u030a');
+  });
+
+  it('keeps the variation selector and joiner an emoji leaves behind, as GitHub does', () => {
+    // `⚠️` is U+26A0 U+FE0F. The sign goes and the selector, a mark, stays,
+    // so the fragment is not `-kiwi`. Not tolerated on purpose: the slug is
+    // GitHub's, and a link copied from there carries the selector too.
+    expect(githubHeadingSlug('\u26a0\ufe0f Kiwi')).toBe('\ufe0f-kiwi');
+    expect(githubHeadingSlug('Kiwi \u26a0\ufe0f plum')).toBe('kiwi-\ufe0f-plum');
+    expect(githubHeadingSlug('\u26a0 Fig')).toBe('-fig');
+    // 👩‍💻 is two emoji around a zero-width joiner; 1️⃣ is a digit and two marks.
+    expect(githubHeadingSlug('\u{1f469}\u200d\u{1f4bb} Olive')).toBe('\u200d-olive');
+    expect(githubHeadingSlug('1\ufe0f\u20e3 Pear')).toBe('1\ufe0f\u20e3-pear');
+    expect(githubHeadingSlug('Zero\u200bwidth\u200cjoiner')).toBe('zerowidth\u200cjoiner');
+  });
+
+  it('slugs an emoji shortcode by its name: it is not turned into an emoji here', () => {
+    // GitHub draws `:rocket:` as 🚀 yet slugs the name it was written with.
+    expect(githubHeadingSlug(':rocket: Mango')).toBe('rocket-mango');
+    expect(githubHeadingSlug('Papaya :rocket: guava')).toBe('papaya-rocket-guava');
+  });
+
+  it('lowercases a capital sigma to σ even at the end of a word', () => {
+    expect(githubHeadingSlug('ΌΣΟΣ')).toBe('όσοσ');
+    expect(githubHeadingSlug('ΑΣ ΑΣ. ΑΣΑ')).toBe('ασ-ασ-ασα');
+    // A final sigma the author wrote stays as written.
+    expect(githubHeadingSlug('Σίσυφος')).toBe('σίσυφος');
+  });
+
+  // Made-up headings, with the anchors GitHub's renderer (`POST /markdown`)
+  // gave for them on 2026-11-23. The left side is the heading's text as
+  // rendered, which is what is slugged here.
+  it.each([
+    ['Quince & Lemon', 'quince--lemon'],
+    ['Melon   peach', 'melon---peach'],
+    ['Grape #commit:0a1b2c3d4e5f', 'grape-commit0a1b2c3d4e5f'],
+    ['Grape #note:abc-123 tail', 'grape-noteabc-123-tail'],
+    ['Snake_case dunder _esc_', 'snake_case-dunder-_esc_'],
+    ['(Optional) nectarine.', 'optional-nectarine'],
+    ['Plum — damson – sloe', 'plum--damson--sloe'],
+    ['Über Straße İstanbul', 'über-straße-i\u0307stanbul'],
+    ['ǅemal ǈ ǋ', 'ǆemal-ǉ-ǌ'],
+    ['ẞ ß ſ K Å', 'ß-ß-ſ-k-å'],
+    ['café ½ ² ① Ⅷ', 'café----ⅷ'],
+    ['Ⓐ ⓐ ① ㊀ ℃', 'ⓐ-ⓐ---'],
+    ['･ｶﾞ ー 々 〆', 'ｶﾞ-ー-々-〆'],
+    ['٣ ௩ ৩ ๓', '٣-௩-৩-๓'],
+    ['· ‧ · ⁀ ⁔ ︳', '---⁀-⁔-︳'],
+    ['a‿b ＿c', 'a‿b-＿c'],
+    ['$ + < = > ^ ` | ~', '--------'],
+    ['™ © ® ℠ № ℗', '-----'],
+    ['_ - _', '_---_'],
+    ['Tab‑hyphen non‑breaking space', 'tabhyphen-nonbreaking-space'],
+    ['🇦🇺 Flag 👍🏽 tone', '-flag--tone'],
+    ['Emoji only 🚀', 'emoji-only-'],
+  ])('slugs %j as GitHub does: %j', (heading, slug) => {
+    expect(githubHeadingSlug(heading)).toBe(slug);
+  });
+
   it('slugs the text of inline code like any other text', () => {
     // The heading `## Calling `write_note()` twice`, as its rendered text.
     expect(githubHeadingSlug('Calling write_note() twice')).toBe('calling-write_note-twice');
@@ -50,8 +114,19 @@ describe('githubHeadingSlug', () => {
     expect(githubHeadingSlug('Step 2 of 10')).toBe('step-2-of-10');
   });
 
-  it('ignores whitespace around the text', () => {
-    expect(githubHeadingSlug('  Ordered steps \n')).toBe('ordered-steps');
+  it('keeps the hyphen of a space at either edge', () => {
+    // The parser trims a heading, so a space still at an edge stood beside
+    // something with no text: `## ![icon](x) Title`, `## Title ![icon](x)`,
+    // or the padding inside a code span, as in ``## `  hazel  ` nut``.
+    expect(githubHeadingSlug(' Heron')).toBe('-heron');
+    expect(githubHeadingSlug('Ibis ')).toBe('ibis-');
+    expect(githubHeadingSlug(' hazel  nut')).toBe('-hazel--nut');
+  });
+
+  it('drops a line break, a tab and a no-break space without a hyphen', () => {
+    expect(githubHeadingSlug('Walnut\npecan')).toBe('walnutpecan');
+    expect(githubHeadingSlug('Cherry\tapricot')).toBe('cherryapricot');
+    expect(githubHeadingSlug('macadamia\u00a0nut')).toBe('macadamianut');
   });
 
   it('is empty for a heading with nothing sluggable', () => {
@@ -84,6 +159,12 @@ describe('createHeadingSlugger', () => {
   it('skips a numbered slug a heading held first', () => {
     const slug = createHeadingSlugger();
     expect(['Notes 1', 'Notes', 'Notes'].map(slug)).toEqual(['notes-1', 'notes', 'notes-2']);
+  });
+
+  it('numbers headings with nothing sluggable, and a lone hyphen, as GitHub does', () => {
+    // `???` twice: GitHub gives the first no anchor at all and the second `-1`.
+    expect(['???', '???'].map(createHeadingSlugger())).toEqual(['', '-1']);
+    expect(['-', '-'].map(createHeadingSlugger())).toEqual(['-', '--1']);
   });
 
   it('starts over for each document', () => {

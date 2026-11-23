@@ -688,12 +688,10 @@ fn an_expired_window_settles_the_row_once_and_stops_the_polling() {
 
 #[test]
 fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
-    let valid = NoteSubmission::from_params(
-        crate::note_tool::WriteNoteParams {
-            title: Some("Plan".into()),
-            suggested_next_steps: None,
-        },
+    let valid = NoteSubmission::from_parts_as_written(
+        "Plan",
         "Body\n```pikchr\nbox \"ok\"\n```",
+        None,
         NoteSubmissionSource::Outbox,
     )
     .unwrap();
@@ -702,12 +700,10 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
         ("completed", None, CompletionReason::TurnComplete)
     );
 
-    let broken = NoteSubmission::from_params(
-        crate::note_tool::WriteNoteParams {
-            title: Some("Plan".into()),
-            suggested_next_steps: None,
-        },
+    let broken = NoteSubmission::from_parts_as_written(
+        "Plan",
         "Body\n```pikchr\nboxx \"bad\"\n```",
+        None,
         NoteSubmissionSource::Outbox,
     )
     .unwrap();
@@ -1268,15 +1264,9 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
     )
     .expect("a silent connection with a finished note is a lost agent");
     assert!(detail.contains("10 minutes"), "{detail}");
-    let valid = NoteSubmission::from_params(
-        crate::note_tool::WriteNoteParams {
-            title: Some("Plan".into()),
-            suggested_next_steps: None,
-        },
-        "Body",
-        NoteSubmissionSource::Outbox,
-    )
-    .unwrap();
+    let valid =
+        NoteSubmission::from_parts_as_written("Plan", "Body", None, NoteSubmissionSource::Outbox)
+            .unwrap();
     assert_eq!(
         lost_remote_agent_terminal_state(&detail, "ws-1", Some(&valid)),
         ("completed", None, CompletionReason::TurnComplete)

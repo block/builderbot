@@ -502,8 +502,13 @@ fn background_hold_from_overrides(
 /// Blox (stdio); the agent sees the same tool either way.
 ///
 /// One wording covers a fresh note and an amendment: the draft is absent for
-/// a fresh note and seeded with the stored body before an amending run
-/// starts, so "if the file already exists" is the amendment case.
+/// a fresh note and seeded with the stored note, title line first, before an
+/// amending run starts, so "if the file already exists" is the amendment
+/// case.
+///
+/// The title is the draft's first line, a `# ` heading, and not an argument
+/// of the call: the guidance says so where it describes the file and again
+/// where it lists what the call takes.
 ///
 /// The `---` separator contract this replaces is still parsed by the
 /// post-completion hooks as a logged fallback, but prompts no longer mention
@@ -525,9 +530,11 @@ path from the `staged` MCP server's instructions, which name the draft file."
     };
     format!(
         "Your note draft file is `{draft_path}`. This file is your note. Write it, edit it, and \
-when it is ready call `write_note`. Put the full note body in it as markdown, without the title \
-and without wrapping it in code fences, using your file tools. If the file already exists, it \
-holds the note as last saved: Read it and edit only what changes instead of rewriting it.\
+when it is ready call `write_note`. Put the full note in it as markdown, without wrapping it in \
+code fences, using your file tools. The file's first line must be the note's title as a level-1 \
+heading: `# ` followed by the title on one line. The note body goes below that line; use `##` \
+and deeper headings for its sections. If the file already exists, it holds the note as last \
+saved, title line included: Read it and edit only what changes instead of rewriting it.\
 {unresolved_home}\n\
 \n\
 To publish the note, call the `write_note` tool from the `staged` MCP server. In Claude Code \
@@ -536,9 +543,9 @@ tools, load it with `ToolSearch select:mcp__staged__write_note` first, then call
 schema — never call it with empty or guessed input. The call is the deliverable: Staged saves \
 the draft file's contents at the moment of the call and nothing else. Your assistant text is not \
 saved and is not shown with the note, so do not write the note into your reply, and do not pass \
-the note body to the call. To change a published note, edit the file and call `write_note` \
-again (the last call of the turn wins). The call takes:\n\
-- `title`: a plain-text title (no markdown, no leading `#`).\n\
+the note's title or body to the call: both come from the file. To change a published note or its \
+title, edit the file and call `write_note` again (the last call of the turn wins). The call \
+takes one argument:\n\
 - `suggested_next_steps`: an object with two nullable string fields, `suggestedNextCommitStep` \
 and `suggestedNextNoteStep`, suggesting what the user might want to do next.\n\
 \n\
@@ -14726,8 +14733,31 @@ it, and when it is ready call `write_note`."
             prompt.contains("Read it and edit only what changes"),
             "{prompt}"
         );
+        // The title is the draft's first line, not an argument: the
+        // guidance says what that line must be, that a seeded draft has it,
+        // and names one argument only.
+        assert!(
+            prompt.contains(
+                "Put the full note in it as markdown, without wrapping it in code fences, using \
+your file tools. The file's first line must be the note's title as a level-1 heading: `# ` \
+followed by the title on one line. The note body goes below that line; use `##` and deeper \
+headings for its sections. If the file already exists, it holds the note as last saved, title \
+line included: Read it and edit only what changes instead of rewriting it."
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "do not pass the note's title or body to the call: both come from the file. To \
+change a published note or its title, edit the file and call `write_note` again (the last call \
+of the turn wins). The call takes one argument:\n- `suggested_next_steps`:"
+            ),
+            "{prompt}"
+        );
         assert!(!prompt.contains("`body`"), "{prompt}");
-        assert!(prompt.contains("`title`"), "{prompt}");
+        assert!(!prompt.contains("`title`"), "{prompt}");
+        assert!(!prompt.contains("without the title"), "{prompt}");
+        assert!(!prompt.contains("plain-text title"), "{prompt}");
         assert!(prompt.contains("call the `write_note` tool"), "{prompt}");
         // Named in full so the Claude bridge can load the deferred MCP tool
         // up front instead of spending a ToolSearch round trip on it.

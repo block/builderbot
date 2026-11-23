@@ -2105,7 +2105,7 @@ pub fn start_session(
             // the separator contract the hooks still parse.
             //
             // Before the server starts the draft is put in its run-start
-            // state: seeded with the stored body for an amendment, absent
+            // state: seeded with the stored note for an amendment, absent
             // for a fresh note (a stale draft from an earlier run is removed).
             let _note_tool_handle = if let Some(draft_path) = local_note_draft.as_ref() {
                 prepare_local_note_draft_for_run(&store, &config.session_id, draft_path);
@@ -2182,10 +2182,10 @@ pub fn start_session(
                     let exec = remote_staged_mcp::workspace_exec(&ws_name);
                     let staged_mcp = remote_staged_mcp::install(&exec)?;
                     // The recovery's clear also seeds `draft.md` with the
-                    // stored body for an amendment (asked after any ingest,
-                    // so a note recovered just now is what gets seeded), or
-                    // removes a stale draft for a fresh note — in the same
-                    // round trip either way.
+                    // stored note, title line first, for an amendment (asked
+                    // after any ingest, so a note recovered just now is what
+                    // gets seeded), or removes a stale draft for a fresh
+                    // note — in the same round trip either way.
                     //
                     // When the recovery fails before its clear, the draft is
                     // neither removed nor seeded: `draft.md` is whatever the
@@ -3842,7 +3842,8 @@ enum PikchrErrorOrigin {
     /// note is not checked at all ([`turn_pikchr_error`]).
     FinalMessage,
     /// The note body `write_note` published (the submission slot): the
-    /// draft file's contents from its first non-blank line.
+    /// draft file's contents below its `# ` title line, from the first
+    /// non-blank line there.
     SubmittedNote,
 }
 
@@ -3984,7 +3985,9 @@ run, so do not write the draft file. {NOTE_TOOL_UNAVAILABLE} instead. End your r
 /// - **Submitted note**: the broken block is in the body `write_note`
 ///   published, so the prompt points at its line in the draft file and asks
 ///   for an edit there and another call. Only this case may say the draft
-///   holds the saved note at that line.
+///   holds the saved note at that line. The line number counts the body's
+///   lines, and the body starts below the draft's title line, so the prompt
+///   says where the count starts.
 /// - **Final message, tool attached**: the line number is the reply's, and
 ///   the reply is not the note. The prompt says so, asks for the diagram to
 ///   be right in the draft file and for a `write_note` call, and makes no
@@ -4012,10 +4015,10 @@ commits, or change repository state.";
             SAVED_NOTE_SUBJECT,
             format!(
                 "Your draft file `{draft_path}` holds the note you saved. Edit the Pikchr block \
-starting at line {} of the note body in that file (the body starts at the file's first non-blank \
-line) and change nothing else, then call `write_note` again with the title and suggested next \
-steps. The call republishes the file and replaces the saved note; your assistant text is not \
-saved, so do not paste the note into your reply.",
+starting at line {} of the note body in that file, counting from the first non-blank line after \
+the `# ` title line, and change nothing else, then call `write_note` again with the suggested \
+next steps. The call republishes the file and replaces the saved note; your assistant text is \
+not saved, so do not paste the note into your reply.",
                 error.line_number
             ),
             NOTE_REPAIR_SCOPE,
@@ -4027,9 +4030,10 @@ saved, so do not paste the note into your reply.",
             SAVED_NOTE_SUBJECT,
             format!(
                 "Edit the Pikchr block starting at line {} of the note body in your note draft \
-file (its path is in your instructions) and change nothing else, then call `write_note` again \
-with the title and suggested next steps. The call republishes the file and replaces the saved \
-note; your assistant text is not saved, so do not paste the note into your reply.",
+file (its path is in your instructions), counting from the first non-blank line after the `# ` \
+title line, and change nothing else, then call `write_note` again with the suggested next steps. \
+The call republishes the file and replaces the saved note; your assistant text is not saved, so \
+do not paste the note into your reply.",
                 error.line_number
             ),
             NOTE_REPAIR_SCOPE,
@@ -4039,9 +4043,9 @@ note; your assistant text is not saved, so do not paste the note into your reply
             format!(
                 "That line number counts the lines of your reply, not of your draft file. Your \
 reply is not saved: the note is your draft file `{draft_path}`, published by `write_note`. Make \
-sure that file holds the full note body with this diagram corrected (write the file if it does \
-not exist yet), then call `write_note` with the title and suggested next steps, and leave the \
-diagram and the note out of your reply."
+sure that file holds the full note, the title as a `# ` heading on its first line and the body \
+below it, with this diagram corrected (write the file if it does not exist yet), then call \
+`write_note` with the suggested next steps, and leave the diagram and the note out of your reply."
             ),
             NOTE_REPAIR_SCOPE,
         ),
@@ -4157,8 +4161,8 @@ fn note_write_followup_prompt(note_draft_path: Option<&str>) -> String {
         Some(path) => format!(
             "<action>\n\
 Your turn ended without a `write_note` call, so no note was saved. Write or finish the draft at \
-`{path}` (the full note body in markdown, without the title), then call the `write_note` tool \
-with `title` (plain text) and `suggested_next_steps` (an object with nullable \
+`{path}` (the full note in markdown: the title as a `# ` heading on the first line, then the \
+body), then call the `write_note` tool with `suggested_next_steps` (an object with nullable \
 `suggestedNextCommitStep` and `suggestedNextNoteStep`); it publishes the draft file as the note. \
 A draft that is never published is not saved either: your assistant text is not saved — only \
 the tool call is. Do not create commits or change other files.\n\
@@ -4169,8 +4173,9 @@ the tool call is. Do not create commits or change other files.\n\
             format!(
                 "<action>\n\
 Your turn ended without delivering a note, so no note was saved. {NOTE_TOOL_UNAVAILABLE} \
-instead. Reply with {NOTE_SEPARATOR_FALLBACK_FORMAT}. If you already wrote the body into your \
-note draft file, use its contents as the body. Do not create commits or change other files.\n\
+instead. Reply with {NOTE_SEPARATOR_FALLBACK_FORMAT}. If you already wrote the note into your \
+note draft file, use its contents as the note: the file has that shape, the `# ` title line and \
+then the body. Do not create commits or change other files.\n\
 \n\
 {next_steps}\n\
 </action>"
@@ -4235,23 +4240,24 @@ fn note_rejected_by_recovery(
     }
 }
 
-/// The body to seed a note session's draft with at run start: the stored
-/// note's body when the session is amending or repairing a note that already
-/// has one, `None` for a fresh note (see `note_draft`).
+/// The text to seed a note session's draft with at run start: the stored
+/// note, its title as the draft's title line above its body
+/// (`note_draft::seed_body`), when the session is amending or repairing a
+/// note that already has a body; `None` for a fresh note, whatever title
+/// its stub row has (see `note_draft`).
 fn stored_note_seed(store: &Store, session_id: &str) -> Option<String> {
     let repo = store
         .get_note_by_session(session_id)
         .ok()
         .flatten()
-        .map(|note| note.content);
+        .map(|note| (note.title, note.content));
     let project = store
         .get_project_note_by_session(session_id)
         .ok()
         .flatten()
-        .map(|note| note.content);
+        .map(|note| (note.title, note.content));
     repo.or(project)
-        .as_deref()
-        .and_then(crate::note_draft::seed_body)
+        .and_then(|(title, content)| crate::note_draft::seed_body(&title, &content))
 }
 
 /// Whether the note this session writes already has a stored body: the
@@ -4265,7 +4271,7 @@ fn stored_note_has_body(store: &Store, session_id: &str) -> bool {
 }
 
 /// Put a local note session's draft in its run-start state, before the agent
-/// starts: seeded with the stored body for an amendment or a Pikchr repair,
+/// starts: seeded with the stored note for an amendment or a Pikchr repair,
 /// absent for a fresh note (a stale draft from an earlier run is removed).
 /// A failure is logged, not fatal: `write_note` reports a missing draft to
 /// the agent by path, and the agent writes it.
@@ -10802,10 +10808,11 @@ mod tests {
                 assert!(prompt.contains(&error.message));
                 assert!(prompt.contains(
                     "Edit the Pikchr block starting at line 2 of the note body in your note \
-draft file"
+draft file (its path is in your instructions), counting from the first non-blank line after the \
+`# ` title line,"
                 ));
-                assert!(prompt
-                    .contains("call `write_note` again with the title and suggested next steps"));
+                assert!(prompt.contains("call `write_note` again with the suggested next steps"));
+                assert!(!prompt.contains("with the title"), "{prompt}");
                 assert!(!prompt.contains("body, and"), "{prompt}");
                 assert!(prompt.contains("your assistant text is not saved"));
                 assert!(prompt.contains("Do not edit any other file"));

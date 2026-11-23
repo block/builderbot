@@ -684,7 +684,9 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_config_selection: Option<AcpConfigSelection>,
     /// Latest session title pushed by the agent via ACP `session_info_update`.
-    /// Used as an interim display name while the session is running.
+    /// Used as an interim display name while the session is running. A title
+    /// that only repeats the start of a message Staged sent is never stored
+    /// (see `session_titles::title_echoes_input`).
     #[serde(default)]
     pub acp_title: Option<String>,
     /// Branch this session belongs to — the branch queue's scheduling key.

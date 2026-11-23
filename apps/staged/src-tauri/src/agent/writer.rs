@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::store::{AcpMessageMetadata, MessageRole, Store};
+use crate::store::{title_echoes_input, AcpMessageMetadata, MessageRole, Store};
 
 use acp_client::{
     autoapprove_permission_decision, strip_code_fences, AcpEventMetadata, AcpInitializeMetadata,
@@ -69,6 +69,10 @@ pub struct MessageWriter {
     /// Bumped on every event the driver hands this writer, for a watchdog
     /// that wants to know how long the agent has been silent.
     activity: Option<Arc<super::ActivityClock>>,
+    /// The prompt this writer's connection sends, exactly as sent, when the
+    /// runner knows it: what a session title is checked against on top of
+    /// the session's stored messages (see [`MessageWriter::title_echoes_input`]).
+    sent_prompt: Option<String>,
 }
 
 /// The title of a tool call recorded from an update that names none (see
@@ -174,6 +178,7 @@ impl MessageWriter {
             tool_result_rows: Mutex::new(HashMap::new()),
             note_slot: None,
             activity: None,
+            sent_prompt: None,
         }
     }
 
@@ -231,6 +236,49 @@ impl MessageWriter {
     pub fn with_activity_clock(mut self, clock: Arc<super::ActivityClock>) -> Self {
         self.activity = Some(clock);
         self
+    }
+
+    /// Tell the writer the prompt its connection sends, exactly as sent. A
+    /// run's first prompt can carry more than the stored user message does
+    /// (attachment notes, a notice for the agent only), and a session title
+    /// that echoes the prompt is measured against all of it.
+    pub fn with_sent_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.sent_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Whether an agent-provided session title is only the start of a
+    /// message Staged sent in this session, which is how some agents name a
+    /// session and never a name worth showing: Staged's messages open with
+    /// its own instructions (see [`title_echoes_input`] for the comparison).
+    ///
+    /// Every message of the session counts, not just its first: the stored
+    /// user rows cover earlier runs, follow-ups and a writer that is only
+    /// catching up, so an echo of the first prompt is still recognised when
+    /// it arrives, or is sent again, turns later, and an agent that renames
+    /// the session after a later message gets the same answer.
+    fn title_echoes_input(&self, title: &str) -> bool {
+        if self
+            .sent_prompt
+            .as_deref()
+            .is_some_and(|prompt| title_echoes_input(title, prompt))
+        {
+            return true;
+        }
+        match self
+            .store
+            .session_title_echoes_input(&self.session_id, title)
+        {
+            Ok(echoes) => echoes,
+            Err(e) => {
+                log::warn!(
+                    "Session {}: couldn't compare the ACP session title with the session's \
+                     messages; keeping the title: {e}",
+                    self.session_id
+                );
+                false
+            }
+        }
     }
 
     /// The agent was heard from: record it for the watchdog, if any.
@@ -574,8 +622,20 @@ impl acp_client::MessageWriter for MessageWriter {
         }
 
         // Mirror the agent-provided title onto the session row so it can be
-        // shown as an interim session name while the session runs.
+        // shown as an interim session name while the session runs. The row
+        // above keeps the update as received either way; nothing reads a
+        // title from it.
         match &info.title {
+            // A title that is only the start of what Staged sent names
+            // nothing: whatever title the session has, or would fall back
+            // to, stands.
+            MaybeUndefined::Value(title) if self.title_echoes_input(title) => {
+                log::debug!(
+                    "Session {}: ignoring an ACP session title that repeats the start of a \
+                     message Staged sent",
+                    self.session_id
+                );
+            }
             MaybeUndefined::Value(title) => {
                 let title = sanitize_title(title);
                 let title = title.trim();
@@ -1524,6 +1584,176 @@ mod tests {
 
         let session = store.get_session(&session_id).unwrap().unwrap();
         assert_eq!(session.acp_title.as_deref(), Some("Earlier title"));
+    }
+
+    /// A prompt as Staged builds one: its instructions, then the user's text.
+    const STAGED_PROMPT: &str = "<action>\nThe user is requesting you make a commit based on \
+        the prompt below. Make the necessary\ncode changes, then create a commit.\n\n\
+        Project information:\n  You are working in project \"Login\".\n</action>\n\n\
+        Fix the login flow so expired tokens are refreshed";
+
+    /// A writer for a session whose first message is [`STAGED_PROMPT`],
+    /// stored the way `start_session` stores it before the agent starts.
+    fn setup_writer_after_prompt() -> (Arc<Store>, String, MessageWriter) {
+        let (store, session_id, writer) = setup_writer();
+        store
+            .add_session_message(&session_id, MessageRole::User, STAGED_PROMPT)
+            .unwrap();
+        (store, session_id, writer)
+    }
+
+    async fn push_title(writer: &MessageWriter, title: &str) {
+        let info = acp_client::SessionInfoUpdate::new().title(title);
+        <MessageWriter as acp_client::MessageWriter>::on_session_info_update(writer, &info).await;
+    }
+
+    fn acp_title(store: &Store, session_id: &str) -> Option<String> {
+        store.get_session(session_id).unwrap().unwrap().acp_title
+    }
+
+    #[tokio::test]
+    async fn session_title_that_starts_the_sent_prompt_is_ignored() {
+        let (store, session_id, writer) = setup_writer_after_prompt();
+
+        push_title(
+            &writer,
+            "<action>\nThe user is requesting you make a commit",
+        )
+        .await;
+
+        assert_eq!(acp_title(&store, &session_id), None);
+        // The update itself is still on record, as every ACP event is.
+        let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
+        assert_eq!(metadata_rows.len(), 1);
+        assert_eq!(
+            metadata_rows[0].acp.acp_event_kind.as_deref(),
+            Some("session_info_update")
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_and_whitespace_normalised_prompt_echoes_are_ignored() {
+        let (store, session_id, writer) = setup_writer_after_prompt();
+
+        for title in [
+            // Cut with an ellipsis, mid-word and at a word.
+            "<action>\nThe user is requesting you make a comm…",
+            "<action>\nThe user is requesting you make a commit...",
+            // Newlines and runs of spaces collapsed, ends padded.
+            "<action> The user is requesting you make a commit based on the prompt below. \
+             Make the necessary code changes",
+            "  <action>   The user is\trequesting  ",
+            // Both.
+            "<action> The user is requesting you make a commit based on the prompt below. \
+             Make the necessary code changes, then create a commit. Project information: \
+             You are working in project \"Login\". </action> Fix the login flow so exp…",
+        ] {
+            push_title(&writer, title).await;
+            assert_eq!(acp_title(&store, &session_id), None, "{title:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn written_session_title_is_accepted_after_the_prompt_was_sent() {
+        let (store, session_id, writer) = setup_writer_after_prompt();
+
+        push_title(&writer, "Refresh expired login tokens").await;
+        assert_eq!(
+            acp_title(&store, &session_id).as_deref(),
+            Some("Refresh expired login tokens")
+        );
+
+        // The user's own words, which are not how the prompt starts, and a
+        // title that only shares its first word with it.
+        push_title(&writer, "Fix the login flow").await;
+        assert_eq!(
+            acp_title(&store, &session_id).as_deref(),
+            Some("Fix the login flow")
+        );
+        push_title(&writer, "<action> tags in prompts").await;
+        assert_eq!(
+            acp_title(&store, &session_id).as_deref(),
+            Some("<action> tags in prompts")
+        );
+    }
+
+    #[tokio::test]
+    async fn written_session_title_is_accepted_after_an_ignored_one() {
+        let (store, session_id, writer) = setup_writer_after_prompt();
+
+        push_title(&writer, "<action> The user is requesting…").await;
+        assert_eq!(acp_title(&store, &session_id), None);
+
+        push_title(&writer, "Refresh expired login tokens").await;
+        assert_eq!(
+            acp_title(&store, &session_id).as_deref(),
+            Some("Refresh expired login tokens")
+        );
+    }
+
+    #[tokio::test]
+    async fn ignored_session_title_leaves_the_existing_title() {
+        let (store, session_id, writer) = setup_writer_after_prompt();
+        push_title(&writer, "Refresh expired login tokens").await;
+
+        // The echo sent again after the agent's own title, as on a reload.
+        push_title(&writer, "<action> The user is requesting…").await;
+
+        assert_eq!(
+            acp_title(&store, &session_id).as_deref(),
+            Some("Refresh expired login tokens")
+        );
+    }
+
+    /// A later turn has its own writer, and so does an attach catching the
+    /// session up: neither was handed the first prompt, and both know it
+    /// from the session's stored messages. The later messages count too.
+    #[tokio::test]
+    async fn prompt_echo_is_ignored_in_later_turns_and_for_later_messages() {
+        let (store, session_id, _first_turn_writer) = setup_writer_after_prompt();
+        store
+            .add_session_message(&session_id, MessageRole::Assistant, "Tokens now refresh.")
+            .unwrap();
+        let follow_up = "<action>\nThe user sent a follow-up message.\n</action>\n\nAlso log it";
+        store
+            .add_session_message(&session_id, MessageRole::User, follow_up)
+            .unwrap();
+
+        let later_turn =
+            MessageWriter::new(session_id.clone(), Arc::clone(&store)).with_sent_prompt(follow_up);
+        let catching_up = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
+        for writer in [&later_turn, &catching_up] {
+            push_title(writer, "<action> The user is requesting you make a commit…").await;
+            push_title(writer, "<action> The user sent a follow-up message.").await;
+            assert_eq!(acp_title(&store, &session_id), None);
+        }
+
+        push_title(&later_turn, "Log token refreshes").await;
+        assert_eq!(
+            acp_title(&store, &session_id).as_deref(),
+            Some("Log token refreshes")
+        );
+    }
+
+    /// A run's first prompt can say more to the agent than the stored user
+    /// message does; a title that runs on into that part is an echo too.
+    #[tokio::test]
+    async fn prompt_echo_is_measured_against_the_prompt_as_sent() {
+        let (store, session_id, _) = setup_writer();
+        store
+            .add_session_message(&session_id, MessageRole::User, "Describe this")
+            .unwrap();
+        let title = "Describe this [Attached: diagram.pdf, 2 pages]";
+
+        let writer = MessageWriter::new(session_id.clone(), Arc::clone(&store))
+            .with_sent_prompt("Describe this\n\n[Attached: diagram.pdf, 2 pages]\n\nMore");
+        push_title(&writer, title).await;
+        assert_eq!(acp_title(&store, &session_id), None);
+
+        // Without the sent prompt it is longer than anything stored.
+        let writer = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+        push_title(&writer, title).await;
+        assert_eq!(acp_title(&store, &session_id).as_deref(), Some(title));
     }
 
     fn acp_event(event_kind: &str, content: serde_json::Value) -> acp_client::AcpEventMetadata {

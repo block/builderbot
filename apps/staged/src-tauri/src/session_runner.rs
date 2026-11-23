@@ -2311,7 +2311,8 @@ pub fn start_session(
                 let writer = Arc::new(
                     MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
                         .with_note_slot(Arc::clone(&note_slot))
-                        .with_activity_clock(Arc::clone(&activity)),
+                        .with_activity_clock(Arc::clone(&activity))
+                        .with_sent_prompt(prompt.as_str()),
                 );
                 // The token the connection observes. A child of the session's
                 // so a Stop reaches it, but one this loop can also fire on its

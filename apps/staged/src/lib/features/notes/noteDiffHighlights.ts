@@ -16,6 +16,9 @@
  *   built when a hunk is pointed at, from the text as it then stands: a
  *   range kept from before a quote was wrapped would end in the wrong node.
  *   A runtime without the API shows the block tint alone.
+ *
+ * `pointAtNoteDiffHunk` does both for the hunk being pointed at, and is what
+ * the viewer's two panes call.
  */
 
 import {
@@ -139,4 +142,35 @@ export function paintNoteDiffWords(side: NoteDiffSide, ranges: readonly Range[])
   if (ranges.length === 0) registry.delete(highlightName(side));
   else registry.set(highlightName(side), new Highlight(...ranges));
   return true;
+}
+
+/**
+ * Show `hunk` as the one being pointed at on one side: its blocks active
+ * and its changed words painted. `units` are that side's, read from `root`.
+ * `null` points at nothing. Returns the undo.
+ *
+ * The words stay painted as the note's text nodes are rewritten under them:
+ * a quote wrapped in its spans, find-in-note's marks put in or taken out.
+ * A range made before such a pass ends in a node that has since been split
+ * or moved, so the ranges are made again after each one. Attributes are not
+ * watched, so the marks set here start nothing.
+ */
+export function pointAtNoteDiffHunk(
+  root: Element,
+  units: readonly NoteDiffDomUnit[],
+  hunk: NoteDiffHunk | null,
+  side: NoteDiffSide
+): () => void {
+  setActiveNoteDiffHunk(root, hunk?.id ?? null);
+  if (!hunk) return () => {};
+
+  const paint = () => paintNoteDiffWords(side, noteDiffHunkRanges(units, hunk, side));
+  const observer =
+    paint() && typeof MutationObserver !== 'undefined' ? new MutationObserver(paint) : null;
+  observer?.observe(root, { childList: true, subtree: true, characterData: true });
+  return () => {
+    observer?.disconnect();
+    paintNoteDiffWords(side, []);
+    setActiveNoteDiffHunk(root, null);
+  };
 }

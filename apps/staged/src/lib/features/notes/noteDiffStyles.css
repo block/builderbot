@@ -1,0 +1,65 @@
+/*
+ * How a note diff shows in rendered note markup (noteDiffHighlights.ts).
+ *
+ * The markup comes from `{@html}`, in the note and in its previous version,
+ * so these rules are global and keyed on the attributes and highlight names
+ * that module sets. A changed block carries `data-note-diff`, its hunk's
+ * kind, and is tinted in that kind's colour, the colour of its marker on
+ * the change bar. It is tinted while its hunk is the one being pointed at
+ * (`data-note-diff-active`), and faintly throughout inside a
+ * `.note-diff-all` container: the two panes of the side-by-side view.
+ *
+ * The tint is an inset shadow, not a background: it lies over whatever
+ * background the block has (a code block's, a table header's) instead of
+ * competing with the rule that sets it. The outline carries it a little
+ * past the text, and is what shows around an image.
+ */
+
+[data-note-diff='added'] {
+  --note-diff-color: var(--status-added);
+}
+
+[data-note-diff='removed'] {
+  --note-diff-color: var(--status-deleted);
+}
+
+[data-note-diff='modified'] {
+  --note-diff-color: var(--status-modified);
+}
+
+.note-diff-all [data-note-diff] {
+  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 8%, transparent);
+}
+
+[data-note-diff][data-note-diff-active],
+.note-diff-all [data-note-diff][data-note-diff-active] {
+  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 20%, transparent);
+}
+
+.note-diff-all [data-note-diff],
+[data-note-diff][data-note-diff-active] {
+  border-radius: 2px;
+  outline: 3px solid var(--note-diff-tint);
+  box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
+}
+
+/* A table row paints neither; its cells take the tint. */
+.note-diff-all tr[data-note-diff],
+tr[data-note-diff][data-note-diff-active] {
+  outline: none;
+  box-shadow: none;
+}
+
+.note-diff-all tr[data-note-diff] > *,
+tr[data-note-diff][data-note-diff-active] > * {
+  box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
+}
+
+/* The words a modified block gained, and in the previous version the ones it lost. */
+::highlight(note-diff-added) {
+  background-color: color-mix(in srgb, var(--status-added) 32%, transparent);
+}
+
+::highlight(note-diff-removed) {
+  background-color: color-mix(in srgb, var(--status-deleted) 32%, transparent);
+}

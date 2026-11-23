@@ -122,6 +122,11 @@ pub(crate) enum DraftError {
     NotUtf8,
     /// Nothing but whitespace.
     Empty,
+    /// The first line is not a `# ` heading holding the title
+    /// ([`split_title`]).
+    MissingTitle,
+    /// Nothing below the title line ([`split_title`]).
+    TitleOnly,
     /// Another I/O failure.
     Io(String),
 }
@@ -149,6 +154,16 @@ impl DraftError {
             Self::Empty => format!(
                 "the draft file `{path}` is empty. Write the full note body (markdown, \
                  without the title) into it"
+            ),
+            Self::MissingTitle => format!(
+                "the draft file `{path}` does not start with the note's title. Its first \
+                 non-blank line must be a level-1 markdown heading: `# ` followed by the title \
+                 on one line (not `##`, not a line underlined with `===`, and nothing above \
+                 it). Add that line at the top and leave the rest of the note below it"
+            ),
+            Self::TitleOnly => format!(
+                "the draft file `{path}` holds only the title line. Write the note body in \
+                 markdown below the `# ` title line"
             ),
             Self::Io(error) => format!("the draft file `{path}` could not be read: {error}"),
         };
@@ -221,6 +236,43 @@ pub(crate) fn read_draft(path: &Path) -> Result<String, DraftError> {
         return Err(DraftError::Empty);
     }
     Ok(body.to_string())
+}
+
+/// Split a draft that opens with its title into `(title, body)`. `draft` is
+/// what [`read_draft`] returns: the byte order mark and the surrounding
+/// whitespace are already gone, so its first line is the file's first
+/// non-blank line.
+///
+/// 1. The first line is the text up to the first `\n`.
+/// 2. It must be one `#` followed by a space or a tab. The title is the rest
+///    of the line, trimmed, and must not be empty
+///    ([`DraftError::MissingTitle`] otherwise).
+/// 3. The body is everything after that line, trimmed, and must not be empty
+///    ([`DraftError::TitleOnly`] otherwise).
+///
+/// Only that one line is consumed. A `##` heading is a section and never a
+/// title, the title text is kept as written (inline markdown and a closing
+/// `#` included), and a later `# Heading` is body text. Putting
+/// `# {title}`, a blank line and a body together and splitting the result
+/// therefore gives the same title and body back, whatever the body opens
+/// with.
+///
+/// Nothing calls this yet: `write_note` still takes the title as an argument
+/// and publishes the whole draft as the body.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn split_title(draft: &str) -> Result<(String, String), DraftError> {
+    let (first_line, rest) = draft.split_once('\n').unwrap_or((draft, ""));
+    let title = first_line
+        .strip_prefix('#')
+        .filter(|after_marker| after_marker.starts_with([' ', '\t']))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .ok_or(DraftError::MissingTitle)?;
+    let body = rest.trim();
+    if body.is_empty() {
+        return Err(DraftError::TitleOnly);
+    }
+    Ok((title.to_string(), body.to_string()))
 }
 
 /// The body to seed an amendment's draft with: the stored note body exactly
@@ -444,6 +496,205 @@ mod tests {
         assert!(DraftError::Oversized(2_000_000)
             .describe("/x")
             .contains("2000000 bytes"),);
+    }
+
+    #[test]
+    fn title_error_texts_say_what_the_first_line_must_be() {
+        assert_eq!(
+            DraftError::MissingTitle.describe("/tmp/draft.md"),
+            "write_note rejected: the draft file `/tmp/draft.md` does not start with the \
+             note's title. Its first non-blank line must be a level-1 markdown heading: `# ` \
+             followed by the title on one line (not `##`, not a line underlined with `===`, \
+             and nothing above it). Add that line at the top and leave the rest of the note \
+             below it, then call write_note again."
+        );
+        assert_eq!(
+            DraftError::TitleOnly.describe("/tmp/draft.md"),
+            "write_note rejected: the draft file `/tmp/draft.md` holds only the title line. \
+             Write the note body in markdown below the `# ` title line, then call write_note \
+             again."
+        );
+    }
+
+    fn split_ok(draft: &str) -> (String, String) {
+        split_title(draft).unwrap_or_else(|error| panic!("{draft:?}: {error:?}"))
+    }
+
+    fn parts(title: &str, body: &str) -> (String, String) {
+        (title.to_string(), body.to_string())
+    }
+
+    #[test]
+    fn split_title_takes_the_first_line_as_the_title_and_the_rest_as_the_body() {
+        assert_eq!(
+            split_ok("# Title\n\nBody.\n\n## Section\nMore."),
+            parts("Title", "Body.\n\n## Section\nMore.")
+        );
+        // The body may follow on the very next line, and a tab separates the
+        // marker from the title as well as a space does.
+        assert_eq!(split_ok("# Title\nBody."), parts("Title", "Body."));
+        assert_eq!(split_ok("#\tTitle\nBody."), parts("Title", "Body."));
+        // The title is trimmed; the blank lines under it are not body.
+        assert_eq!(
+            split_ok("#   Spaced out \t\n\n\n\nBody."),
+            parts("Spaced out", "Body.")
+        );
+    }
+
+    #[test]
+    fn split_title_accepts_blank_lines_or_a_byte_order_mark_above_the_heading() {
+        // `read_draft` removes both before the split sees the text.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+        for draft in [
+            "\n\n  \n# Title\n\nBody.\n",
+            "\u{feff}# Title\n\nBody.\n",
+            "\u{feff}\n\n# Title\n\nBody.\n",
+        ] {
+            std::fs::write(&path, draft).unwrap();
+            assert_eq!(
+                split_ok(&read_draft(&path).unwrap()),
+                parts("Title", "Body."),
+                "{draft:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_title_rejects_a_first_line_that_is_not_a_level_one_heading() {
+        for draft in [
+            // A deeper heading is a section, never the title.
+            "## Title\n\nBody.",
+            "### Title\n\nBody.",
+            "###### Title\n\nBody.",
+            // A marker with no title text.
+            "#\n\nBody.",
+            "#",
+            "#   \n\nBody.",
+            "# \t \n\nBody.",
+            "#   ",
+            // No space after the marker: not a heading, and a hashtag
+            // reference must not become a title.
+            "#Title\n\nBody.",
+            "#note:6c48d5ac-cecc-4cfe-a9ac-f7f7313fa06e\n\nBody.",
+            // A setext heading.
+            "Title\n===\n\nBody.",
+            "Title\n=====\n\nBody.",
+            // Front matter.
+            "---\ntitle: Title\n---\n\nBody.",
+            // Plain text, with the heading only further down.
+            "Body first.\n\n# Title\n\nMore.",
+            "Body only.",
+            // An escaped marker is text.
+            "\\# Title\n\nBody.",
+            "",
+        ] {
+            assert_eq!(
+                split_title(draft),
+                Err(DraftError::MissingTitle),
+                "{draft:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_title_keeps_the_title_text_as_written() {
+        // Inline markdown is title text: titles are stored as markdown source.
+        assert_eq!(
+            split_ok("# Use `foo` for [bar](x)\n\nBody."),
+            parts("Use `foo` for [bar](x)", "Body.")
+        );
+        // A closing sequence is not stripped.
+        assert_eq!(split_ok("# Title #\n\nBody."), parts("Title #", "Body."));
+        assert_eq!(split_ok("# Title ##\n\nBody."), parts("Title ##", "Body."));
+        // Only the one marker is consumed.
+        assert_eq!(split_ok("# # Title\n\nBody."), parts("# Title", "Body."));
+    }
+
+    #[test]
+    fn split_title_rejects_a_draft_that_is_only_the_title_line() {
+        for draft in ["# Title", "# Title\n", "# Title\n\n  \n\t\n", "# Title\r\n"] {
+            assert_eq!(split_title(draft), Err(DraftError::TitleOnly), "{draft:?}");
+        }
+    }
+
+    #[test]
+    fn split_title_leaves_a_later_level_one_heading_in_the_body() {
+        assert_eq!(
+            split_ok("# Title\n\nIntro.\n\n# Second heading\n\nMore.\n\n# Third\nEnd."),
+            parts(
+                "Title",
+                "Intro.\n\n# Second heading\n\nMore.\n\n# Third\nEnd."
+            )
+        );
+        // Directly under the title too: the body opens with its own H1.
+        assert_eq!(
+            split_ok("# Title\n# Section\nBody."),
+            parts("Title", "# Section\nBody.")
+        );
+    }
+
+    #[test]
+    fn split_title_reads_crlf_line_endings() {
+        // The carriage return that ends the title line is trimmed off the
+        // title; the body keeps its own line endings.
+        assert_eq!(
+            split_ok("# Title\r\n\r\nFirst line.\r\nSecond line."),
+            parts("Title", "First line.\r\nSecond line.")
+        );
+        assert_eq!(split_ok("# Title\r\nBody."), parts("Title", "Body."));
+        // The same rejections as with bare line feeds.
+        assert_eq!(split_title("#\r\n\r\nBody."), Err(DraftError::MissingTitle));
+        assert_eq!(
+            split_title("## Title\r\n\r\nBody."),
+            Err(DraftError::MissingTitle)
+        );
+        assert_eq!(
+            split_title("Title\r\n===\r\n\r\nBody."),
+            Err(DraftError::MissingTitle)
+        );
+        assert_eq!(split_title("# Title\r\n\r\n"), Err(DraftError::TitleOnly));
+    }
+
+    #[test]
+    fn a_title_heading_placed_above_a_body_splits_back_into_the_same_title_and_body() {
+        // The shape a draft seeded with its title will have: the heading, a
+        // blank line, the stored body. Written to the draft file, read back
+        // as an untouched publish would read it and split, it gives the
+        // stored title and body again. Only the first line is consumed, so
+        // a body that opens with its own `# Section` keeps it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("staged-note-draft-s1.md");
+        for (title, body) in [
+            (
+                "Plan the title move",
+                "## Summary\n\nFirst paragraph.\n\n## Details\nMore.",
+            ),
+            (
+                "Plan the title move",
+                "# Section\n\nFirst paragraph.\n\n## Details\nMore.",
+            ),
+            (
+                "Plan the title move",
+                "Plain opening line.\n\n# Late heading\nMore.",
+            ),
+            (
+                "Use `foo` for [bar](x) (2)",
+                "Body ![Shot](staged-media://abc.png)",
+            ),
+            (
+                "Title #",
+                "#note:6c48d5ac-cecc-4cfe-a9ac-f7f7313fa06e is the plan.",
+            ),
+        ] {
+            let draft = format!("# {title}\n\n{body}");
+            prepare_local_draft(&path, Some(&draft)).unwrap();
+            assert_eq!(
+                split_ok(&read_draft(&path).unwrap()),
+                parts(title, body),
+                "{draft:?}"
+            );
+        }
     }
 
     #[test]

@@ -35,7 +35,7 @@ use serde::Deserialize;
 
 use super::{session_dir_expr, validate_session_id, RemoteExec};
 use crate::note_tool::{
-    NoteSubmission, NoteSubmissionSlot, NoteSubmissionSource, SuggestedNextSteps, WriteNoteParams,
+    NoteSubmission, NoteSubmissionSlot, NoteSubmissionSource, SuggestedNextSteps,
 };
 
 /// Empty the session's outbox and remove its directory once it is empty.
@@ -602,12 +602,10 @@ pub(crate) fn outbox_state(
             return Ok(OutboxState::StaleTurn { found: meta.turn });
         }
     }
-    let submission = NoteSubmission::from_params(
-        WriteNoteParams {
-            title: meta.title,
-            suggested_next_steps: meta.suggested_next_steps,
-        },
+    let submission = NoteSubmission::from_parts(
+        &meta.title,
         &body,
+        meta.suggested_next_steps,
         NoteSubmissionSource::Outbox,
     )
     .map_err(|e| format!("outbox note is invalid: {e}"))?;
@@ -930,6 +928,7 @@ pub(crate) fn recover_uncollected_outbox(
 mod tests {
     use super::super::test_support::{local_exec, node, run_script};
     use super::*;
+    use crate::note_tool::WriteNoteParams;
     use std::cell::RefCell;
 
     fn b64(bytes: &[u8]) -> String {
@@ -1302,6 +1301,51 @@ mod tests {
             body: Some("Body".into()),
         };
         assert!(outbox_state(incomplete, None).is_err());
+    }
+
+    /// The collector applies the tool's own title and body rules to what the
+    /// outbox holds, and names the outbox in each rejection.
+    #[test]
+    fn outbox_state_normalizes_and_validates_the_outbox_title_and_body() {
+        let snapshot = |title: &str, body: &str| {
+            let mut snapshot = done_snapshot(Some("t1"));
+            let meta = snapshot.meta.as_mut().unwrap();
+            meta.title = title.to_string();
+            meta.suggested_next_steps = Some(SuggestedNextSteps {
+                suggested_next_commit_step: Some("  Commit ".into()),
+                suggested_next_note_step: Some("  ".into()),
+            });
+            snapshot.body = Some(body.to_string());
+            snapshot
+        };
+
+        assert_eq!(
+            outbox_state(snapshot("  # Title  ", "\nBody\n"), Some("t1")).unwrap(),
+            OutboxState::Delivered(NoteSubmission {
+                title: "Title".into(),
+                body: "Body".into(),
+                suggested_next_steps: Some(SuggestedNextSteps {
+                    suggested_next_commit_step: Some("Commit".into()),
+                    suggested_next_note_step: None,
+                }),
+                source: NoteSubmissionSource::Outbox,
+            })
+        );
+
+        let rejected =
+            |title: &str, body: &str| outbox_state(snapshot(title, body), Some("t1")).unwrap_err();
+        assert_eq!(
+            rejected("  ", "Body"),
+            "outbox note is invalid: `title` must not be empty"
+        );
+        assert_eq!(
+            rejected("a\nb", "Body"),
+            "outbox note is invalid: `title` must be a single line"
+        );
+        assert_eq!(
+            rejected("Title", " \n"),
+            "outbox note is invalid: the note body must not be empty"
+        );
     }
 
     /// Answers the collect script with `collect_output` and records every

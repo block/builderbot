@@ -128,18 +128,32 @@ pub struct NoteSubmission {
 
 impl NoteSubmission {
     /// Validate and normalize tool arguments plus the body read from the
-    /// draft (locally) or the outbox's `note.md` (remotely) into a
-    /// submission.
-    ///
-    /// The title and body must both be non-empty after trimming; a title that
-    /// was written as a markdown H1 anyway has its `# ` stripped so the stored
-    /// title stays plain text.
+    /// draft into a submission. The rules are [`Self::from_parts`]'s.
     pub(crate) fn from_params(
         params: WriteNoteParams,
         body: &str,
         source: NoteSubmissionSource,
     ) -> Result<Self, String> {
-        let title = params.title.trim();
+        Self::from_parts(&params.title, body, params.suggested_next_steps, source)
+    }
+
+    /// Validate and normalize a title, a body and suggested next steps into
+    /// a submission, whatever carried them: the tool's arguments and the
+    /// draft locally ([`Self::from_params`]), or the outbox's `meta.json`
+    /// and `note.md` remotely (`remote_staged_mcp::note_outbox`). The outbox
+    /// reader calls this directly, so it does not depend on the shape of
+    /// [`WriteNoteParams`].
+    ///
+    /// The title and body must both be non-empty after trimming; a title that
+    /// was written as a markdown H1 anyway has its `# ` stripped so the stored
+    /// title stays plain text.
+    pub(crate) fn from_parts(
+        title: &str,
+        body: &str,
+        suggested_next_steps: Option<SuggestedNextSteps>,
+        source: NoteSubmissionSource,
+    ) -> Result<Self, String> {
+        let title = title.trim();
         let title = title.strip_prefix('#').unwrap_or(title).trim();
         if title.is_empty() {
             return Err("`title` must not be empty".to_string());
@@ -154,9 +168,7 @@ impl NoteSubmission {
         Ok(Self {
             title: title.to_string(),
             body: body.to_string(),
-            suggested_next_steps: params
-                .suggested_next_steps
-                .map(SuggestedNextSteps::normalized),
+            suggested_next_steps: suggested_next_steps.map(SuggestedNextSteps::normalized),
             source,
         })
     }
@@ -478,6 +490,68 @@ question, answer it before making this call."
                 .unwrap_err()
                 .contains("body")
         );
+    }
+
+    /// `from_params` is `from_parts` over the arguments' fields: the same
+    /// submission for valid input and the same reason for each rejection.
+    #[test]
+    fn from_parts_validates_and_normalizes_exactly_like_from_params() {
+        let steps = || {
+            Some(SuggestedNextSteps {
+                suggested_next_commit_step: Some("  Fix it ".to_string()),
+                suggested_next_note_step: Some("   ".to_string()),
+            })
+        };
+        let cases = [
+            ("  # Design  ", "\nBody text.\n"),
+            ("Plain title", "Body"),
+            ("## Deeper", "# Section\n\nText"),
+            ("", "body"),
+            ("# ", "body"),
+            ("a\nb", "body"),
+            ("Title", "  \n"),
+            ("", ""),
+        ];
+        for (title, body) in cases {
+            for source in [NoteSubmissionSource::Tool, NoteSubmissionSource::Outbox] {
+                for steps in [None, steps()] {
+                    let mut p = params(title);
+                    p.suggested_next_steps = steps.clone();
+                    assert_eq!(
+                        NoteSubmission::from_parts(title, body, steps, source),
+                        NoteSubmission::from_params(p, body, source),
+                        "title {title:?}, body {body:?}"
+                    );
+                }
+            }
+        }
+
+        let submission = NoteSubmission::from_parts(
+            "  # Design  ",
+            "\nBody text.\n",
+            steps(),
+            NoteSubmissionSource::Outbox,
+        )
+        .unwrap();
+        assert_eq!(
+            submission,
+            NoteSubmission {
+                title: "Design".to_string(),
+                body: "Body text.".to_string(),
+                suggested_next_steps: Some(SuggestedNextSteps {
+                    suggested_next_commit_step: Some("Fix it".to_string()),
+                    suggested_next_note_step: None,
+                }),
+                source: NoteSubmissionSource::Outbox,
+            }
+        );
+        let reject = |title: &str, body: &str| {
+            NoteSubmission::from_parts(title, body, None, NoteSubmissionSource::Outbox).unwrap_err()
+        };
+        assert_eq!(reject("", "body"), "`title` must not be empty");
+        assert_eq!(reject("# ", "body"), "`title` must not be empty");
+        assert_eq!(reject("a\nb", "body"), "`title` must be a single line");
+        assert_eq!(reject("Title", "  \n"), "the note body must not be empty");
     }
 
     #[test]

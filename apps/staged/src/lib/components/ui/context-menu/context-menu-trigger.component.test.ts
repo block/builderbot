@@ -140,6 +140,43 @@ describe('ContextMenu.Trigger touch presses', () => {
     expect(props.open).toBe(false);
   });
 
+  // A keyed re-render replaces the row under the finger: the node the touch
+  // started on leaves the DOM and another takes its place in the trigger.
+  function replaceRow(row: HTMLElement, top: number) {
+    const next = document.createElement('div');
+    next.getBoundingClientRect = () => new DOMRect(16, top, 320, 44);
+    row.replaceWith(next);
+  }
+
+  it('opens when the row was replaced during the hold and a scroll leaves the trigger where it is', () => {
+    const { props, row } = render();
+    row.getBoundingClientRect = () => new DOMRect(16, 300, 320, 44);
+
+    pointerDown(row, 'touch');
+    touchStart(row);
+    advance(LONG_PRESS_DELAY_MS - 100);
+    replaceRow(row, 300.5);
+    document.dispatchEvent(new Event('scroll'));
+    expect(props.open).toBe(false);
+    advance(100);
+
+    expect(props.open).toBe(true);
+  });
+
+  it('stays closed when the row was replaced during the hold and a scroll carried the trigger', () => {
+    const { props, row } = render();
+    row.getBoundingClientRect = () => new DOMRect(16, 300, 320, 44);
+
+    pointerDown(row, 'touch');
+    touchStart(row);
+    advance(LONG_PRESS_DELAY_MS - 100);
+    replaceRow(row, 280);
+    document.dispatchEvent(new Event('scroll'));
+    advance(BITS_UI_LONG_PRESS_MS);
+
+    expect(props.open).toBe(false);
+  });
+
   it('stays closed for a pen press held with no contextmenu', () => {
     const { props, row } = render();
 

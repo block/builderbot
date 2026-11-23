@@ -12,15 +12,24 @@ import { describe, expect, it } from 'vitest';
 // they match comments too: in prose, write "the env() bottom inset".
 
 // index.html and everything under src but the tests, as text (Vite's raw
-// import; vitest.config.ts lets it through for stylesheets).
+// import; vitest.config.ts lets it through for stylesheets). The diff viewer
+// package is scanned too: its components render in the same document.
 const sources = import.meta.glob(
-  ['/index.html', '/src/**/*.{css,html,svelte,ts}', '!/src/**/*.test.ts'],
+  [
+    '/index.html',
+    '/src/**/*.{css,html,svelte,ts}',
+    '!/src/**/*.test.ts',
+    '../../../../../packages/diff-viewer/src/**/*.{css,html,svelte,ts}',
+    '!../../../../../packages/diff-viewer/src/**/*.test.ts',
+  ],
   { query: '?raw', import: 'default', eager: true }
 ) as Record<string, string>;
 
 const APP_CSS = '/src/app.css';
 // The guard's probe reads the inset itself, to save it before cover goes.
 const VIEWPORT_FIT = '/src/lib/shared/viewportFit.ts';
+// Files outside the app are keyed by their path from it: `../../packages/…`.
+const DIFF_VIEWER_SRC = '/packages/diff-viewer/src/';
 
 const DEFINITION = 'max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))';
 
@@ -55,6 +64,11 @@ describe('the bottom safe-area inset', () => {
     expect(sources[APP_CSS]).toContain('--safe-bottom');
     expect(sources[VIEWPORT_FIT]).toContain('guardViewportFit');
     expect(sources['/index.html']).toContain('viewport-fit=cover');
+    const diffViewer = Object.entries(sources).filter(([path]) => path.includes(DIFF_VIEWER_SRC));
+    expect(diffViewer.length).toBeGreaterThan(10);
+    const text = (name: string) => diffViewer.find(([path]) => path.endsWith(name))?.[1];
+    expect(text('/DiffViewer.svelte')).toContain('<style>');
+    expect(text('/search.css')).toContain('{');
     expect(matches(/var\(\s*--safe-bottom\s*[,)]/g).length).toBeGreaterThan(10);
   });
 

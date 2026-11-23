@@ -54,6 +54,12 @@
  *   scroll position by the same amount and fires `scroll`, and the row under
  *   the finger stays put. The element's position is read at `touchstart` and
  *   again on each such scroll; one that cannot be measured counts as moved;
+ * - a touched element replaced during the hold (a keyed re-render, which the
+ *   same timeline does) is in no scroller and has no position. The scroll
+ *   test then follows the trigger, as the firing path does: its position is
+ *   read at `touchstart` too, and a scroll of a container holding it drops
+ *   the press only when the trigger has moved. With no trigger left to
+ *   follow, any scroll drops the press;
  * - a touch that lands on a list that is still moving is the user catching
  *   the scroll, not pressing a row: a `touchstart` within
  *   `SCROLL_CATCH_WINDOW_MS` of the last scroll of a container holding the
@@ -101,7 +107,8 @@ export interface LongPressOptions {
   /**
    * The trigger element. A press whose touched descendant is no longer in the
    * DOM when the hold matures fires at the trigger instead, so the menu still
-   * opens for the element the user is holding.
+   * opens for the element the user is holding. A scroll during the hold is
+   * judged by the trigger's position for such a press, for the same reason.
    */
   trigger?: () => EventTarget | null;
   /**
@@ -155,6 +162,29 @@ function positionOf(target: EventTarget): ScreenPosition | null {
   const { left, top, width, height } = measure.call(target);
   if (width === 0 && height === 0) return null;
   return { left, top };
+}
+
+/**
+ * Where a trigger is on screen. Most triggers are `display: contents`
+ * wrappers with no box of their own; one of those is placed by the first
+ * element inside it that has a box.
+ */
+function triggerPositionOf(trigger: EventTarget): ScreenPosition | null {
+  if (isDetached(trigger)) return null;
+  const own = positionOf(trigger);
+  if (own) return own;
+  for (const child of Array.from((trigger as Partial<Element>).children ?? [])) {
+    const inner = triggerPositionOf(child);
+    if (inner) return inner;
+  }
+  return null;
+}
+
+function apart(a: ScreenPosition, b: ScreenPosition): boolean {
+  return (
+    Math.abs(a.left - b.left) > SCROLL_STILL_TOLERANCE_PX ||
+    Math.abs(a.top - b.top) > SCROLL_STILL_TOLERANCE_PX
+  );
 }
 
 /** Recent scrolls seen on one document, shared by every controller on it. */
@@ -247,6 +277,8 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   let start: LongPressPoint | null = null;
   /** Where the touched element was on screen when the finger landed. */
   let restedAt: ScreenPosition | null = null;
+  /** Where the trigger was then, for a touched element replaced mid-hold. */
+  let triggerRestedAt: ScreenPosition | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let fired = false;
   let unlistenGesture: (() => void) | null = null;
@@ -277,6 +309,7 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     unlistenGesture?.();
     start = null;
     restedAt = null;
+    triggerRestedAt = null;
     fired = false;
   }
 
@@ -357,26 +390,27 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     if (type === undefined || type === 'touch') clearTimer();
   }
 
-  // Whether the touched element is somewhere else on screen than it was at
-  // `touchstart`. One that cannot be measured, then or now, counts as moved:
-  // dropping a press costs a second try, keeping one opens a menu under a
-  // finger that was scrolling.
-  function carriedAway(): boolean {
-    if (!start || !restedAt) return true;
-    const current = positionOf(start.target);
-    if (!current) return true;
-    return (
-      Math.abs(current.left - restedAt.left) > SCROLL_STILL_TOLERANCE_PX ||
-      Math.abs(current.top - restedAt.top) > SCROLL_STILL_TOLERANCE_PX
-    );
-  }
-
   // A scroll that carries the touched element is the list moving under the
   // finger. One that leaves it in place is the browser holding the row still
-  // while content above it changed height, and the press stands.
+  // while content above it changed height, and the press stands. An element
+  // that cannot be measured, at `touchstart` or now, counts as moved: dropping
+  // a press costs a second try, keeping one opens a menu under a finger that
+  // was scrolling.
   function onscroll(event: Event) {
-    if (!start || timer === null || !scrollMoves(event.target, start.target)) return;
-    if (carriedAway()) clearTimer();
+    if (!start || timer === null) return;
+    // A touched element replaced during the hold is inside no scroller and
+    // has no position: the trigger stands in for it, as it does when the
+    // press fires.
+    const replaced = isDetached(start.target);
+    const held = replaced ? (options.trigger?.() ?? null) : start.target;
+    if (!held || isDetached(held)) {
+      clearTimer();
+      return;
+    }
+    if (!scrollMoves(event.target, held)) return;
+    const was = replaced ? triggerRestedAt : restedAt;
+    const now = replaced ? triggerPositionOf(held) : positionOf(held);
+    if (!was || !now || apart(was, now)) clearTimer();
   }
 
   // The listeners live only for the duration of a press, on the document and
@@ -428,6 +462,8 @@ export function createLongPress(options: LongPressOptions): LongPressController 
       if (scrollWatch && landedOnMovingList(scrollWatch, target)) return;
       start = { target, clientX: touch.clientX, clientY: touch.clientY };
       restedAt = positionOf(target);
+      const trigger = options.trigger?.();
+      triggerRestedAt = trigger ? triggerPositionOf(trigger) : null;
       const point = start;
       const scope = scopeFor(point.target);
       if (scope) listenGesture(scope, point.target);

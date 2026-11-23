@@ -366,10 +366,10 @@ describe('guardTouchTaps', () => {
     it('starts at the distance iOS starts a scroll, whatever the duration', () => {
       const { card } = projectList();
       for (const durationMs of [20, 120, 600]) {
-        expect(flicked(card, 0, -TAP_SCROLL_SLOP_PX, durationMs), `${durationMs} ms`).toBe(false);
-        expect(flicked(card, 0, -(TAP_SCROLL_SLOP_PX + 1), durationMs), `${durationMs} ms`).toBe(
-          true
+        expect(flicked(card, 0, -(TAP_SCROLL_SLOP_PX - 1), durationMs), `${durationMs} ms`).toBe(
+          false
         );
+        expect(flicked(card, 0, -TAP_SCROLL_SLOP_PX, durationMs), `${durationMs} ms`).toBe(true);
       }
       expect(flicked(card, 0, 0)).toBe(false);
     });
@@ -384,13 +384,17 @@ describe('guardTouchTaps', () => {
       expect(flicked(card, 26, -24, 400)).toBe(true);
     });
 
-    it('passes a sideways roll on that card with under 10 pt of vertical travel', () => {
+    it('passes a sideways roll on that card that drifts along the list outside the cone', () => {
       const { card, title } = projectList();
       expect(flicked(card, 26, -8, 120)).toBe(false);
       expect(flicked(card, 26, 8, 120)).toBe(false);
       expect(flicked(title, -26, -9, 50)).toBe(false);
       expect(flicked(card, 26, -TAP_SCROLL_SLOP_PX, 120)).toBe(false);
-      expect(flicked(card, 26, -(TAP_SCROLL_SLOP_PX + 1), 120)).toBe(true);
+      // 26 across and 11 along is 67° from the list's axis: iOS clicks for it.
+      expect(flicked(card, 26, -(TAP_SCROLL_SLOP_PX + 1), 120)).toBe(false);
+      // tan 30° of 26 is 15.01: 15 along is outside the cone, 16 inside.
+      expect(flicked(card, 26, -15, 120)).toBe(false);
+      expect(flicked(card, 26, -16, 120)).toBe(true);
       // 43 across and 10 along is 44.1 pt in all: still under the far limit.
       expect(flicked(card, 43, -10, 140)).toBe(false);
     });
@@ -407,9 +411,83 @@ describe('guardTouchTaps', () => {
       expect(flicked(card, 9, -9)).toBe(false);
       const { chip } = chipRow();
       expect(flicked(chip, 20, 12)).toBe(true);
+      // 12 along the row and 20 across it is inside the cone, as on the card.
       expect(flicked(chip, 12, 20)).toBe(true);
+      // 11 along the row and 26 across it is not: the mirror of the card's roll.
+      expect(flicked(chip, TAP_SCROLL_SLOP_PX + 1, 26)).toBe(false);
       expect(flicked(chip, 8, 26)).toBe(false);
       expect(flicked(chip, 9, 9)).toBe(false);
+    });
+
+    // Review baa3cc80: sampled strokes on a project card in the list, iOS 27.2
+    // Simulator, as px across the list / px along it. With every sample
+    // WebKit clicked for the first group and sent no click for the second, so
+    // the guard must pass the one and swallow the other. A count is how many
+    // times the review ran the stroke.
+    const WEBKIT_CLICKED: [across: number, along: number][] = [
+      [22, 12],
+      [24, 12],
+      [26, 12], // 4, up and down, left and right
+      [26, 14],
+      [30, 12], // 3
+      [36, 20],
+      [40, 12],
+      [40, 14],
+      [40, 18],
+      [40, 20],
+      // Not in the review's 25: 18/10 is its other reading of the cone's edge,
+      // and 10/8 is short of the scroll limit.
+      [18, 10],
+      [10, 8],
+    ];
+    const WEBKIT_SCROLLED: [across: number, along: number][] = [
+      [10, 10], // 2
+      [12, 12],
+      [14, 12],
+      [16, 12],
+      [20, 12], // 2
+      [26, 16], // 2
+      [34, 20],
+      // The diagonal flick of bff08996, and the review's readings at the limit.
+      [26, 24],
+      [0, 10],
+    ];
+    const strokes = [
+      ...WEBKIT_CLICKED.map(([across, along]) => ({ across, along, webkit: 'clicked' })),
+      ...WEBKIT_SCROLLED.map(([across, along]) => ({ across, along, webkit: 'sent no click' })),
+    ];
+
+    describe.each([
+      {
+        where: 'a card in a vertical scroller',
+        landing: () => projectList().card,
+        // Across the list is x, along it is y.
+        delta: (across: number, along: number) => [across, along],
+      },
+      {
+        where: 'a chip in a horizontal scroller',
+        landing: () => chipRow().chip,
+        delta: (across: number, along: number) => [along, across],
+      },
+    ])('the strokes WebKit was measured on, on $where', ({ landing, delta }) => {
+      it.each(strokes)('$across across, $along along: WebKit $webkit', (stroke) => {
+        const target = landing();
+        const [dx, dy] = delta(stroke.across, stroke.along);
+        // Either way along and either way across, quick and slow.
+        for (const [sx, sy] of [
+          [1, 1],
+          [1, -1],
+          [-1, 1],
+          [-1, -1],
+        ]) {
+          for (const durationMs of [50, 160, 610]) {
+            expect(
+              flicked(target, sx * dx, sy * dy, durationMs),
+              `${sx * dx}, ${sy * dy} in ${durationMs} ms`
+            ).toBe(stroke.webkit === 'sent no click');
+          }
+        }
+      });
     });
 
     it('passes diagonal rolls on a button outside any scroller', () => {
@@ -555,7 +633,8 @@ describe('guardTouchTaps', () => {
       // The replacement is held to the same limits as an element still there.
       expect(flicked(title, 24, 0)).toBe(false);
       expect(flicked(title, 26, -8, 120)).toBe(false);
-      expect(flicked(title, 0, -TAP_SCROLL_SLOP_PX)).toBe(false);
+      expect(flicked(title, 0, -(TAP_SCROLL_SLOP_PX - 1))).toBe(false);
+      expect(flicked(title, 0, -TAP_SCROLL_SLOP_PX)).toBe(true);
     });
 
     it('passes a roll on a replaced element with no scroller at the press point', () => {
@@ -618,9 +697,10 @@ describe('guardTouchTaps', () => {
     it('holds the 10 pt scroll limit in screen points', () => {
       const { card } = projectList();
       stubScale(2);
-      // 6 px is 12 pt along the list; 5 px is 10 pt.
+      // 6 px is 12 pt along the list, 5 px is 10 pt, and 4 px is 8 pt.
       expect(flicked(card, 0, -6)).toBe(true);
-      expect(flicked(card, 0, -5)).toBe(false);
+      expect(flicked(card, 0, -5)).toBe(true);
+      expect(flicked(card, 0, -4)).toBe(false);
       stubScale(3);
       expect(flicked(card, 0, -4)).toBe(true);
       expect(flicked(card, 14, 0)).toBe(false);
@@ -632,11 +712,16 @@ describe('guardTouchTaps', () => {
     it('holds each axis to the scroll limit in screen points', () => {
       const { card } = projectList();
       stubScale(2);
-      // 13 px across and 6 px up is 12 pt along the list; 13 and 5 is 10 pt.
-      expect(flicked(card, 13, -6)).toBe(true);
-      expect(flicked(card, 13, -5)).toBe(false);
+      // 13 px across and 12 px up is 26 pt and 24 pt: along the list, inside
+      // the cone. 13 and 6 is 26 pt and 12 pt: outside it at any scale.
+      expect(flicked(card, 13, -12)).toBe(true);
+      expect(flicked(card, 13, -6)).toBe(false);
+      // 5 px each way is 10 pt along the list; 4 px is 8 pt.
+      expect(flicked(card, 5, -5)).toBe(true);
+      expect(flicked(card, 5, -4)).toBe(false);
       stubScale(1);
       expect(flicked(card, 13, -6)).toBe(false);
+      expect(flicked(card, 5, -5)).toBe(false);
     });
 
     it('measures in layout px where the scale cannot be read', () => {
@@ -645,8 +730,8 @@ describe('guardTouchTaps', () => {
         stubScale(scale);
         expect(flicked(newProject, 30, 0), String(scale)).toBe(false);
         expect(flicked(newProject, 46, 0), String(scale)).toBe(true);
-        expect(flicked(card, 0, -10), String(scale)).toBe(false);
-        expect(flicked(card, 0, -11), String(scale)).toBe(true);
+        expect(flicked(card, 0, -9), String(scale)).toBe(false);
+        expect(flicked(card, 0, -10), String(scale)).toBe(true);
       }
     });
   });

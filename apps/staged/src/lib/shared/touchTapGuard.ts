@@ -17,24 +17,32 @@
 //   44 px clicks, 48 px does not, quick or slow). A thumb rolls up to about
 //   30 px as it presses, and iOS clicks for that
 // - along a scroller iOS starts the scroll instead, and makes no click, once
-//   the finger has gone about 10 pt (same Simulator, a project card in the
-//   list: 8 px clicks, 12 px scrolls)
+//   the finger has gone 10 pt along it on a stroke within about 60° of its
+//   axis (same Simulator, a project card in the list: 8 px along the list
+//   clicks and 10 px scrolls; 36 px across it with 20 px along clicks, and
+//   34 px across with 20 px along scrolls)
 //
 // A click after less travel than the limit for where it went is one iOS
 // judged and meant. A click after more is one iOS made without seeing the
-// travel, and those are the flicks: past 45 pt anywhere, and past 10 pt
+// travel, and those are the flicks: past 45 pt anywhere, and from 10 pt
 // along something that scrolls. So a click is swallowed when the touch
 // lifted
 //
 // - more than `TAP_MAX_TRAVEL_PX` away, or
-// - more than `TAP_SCROLL_SLOP_PX` away along an axis on which an ancestor of
-//   the element it landed on scrolls
+// - `TAP_SCROLL_SLOP_PX` or more away along an axis on which an ancestor of
+//   the element it landed on scrolls, on a stroke inside the cone around
+//   that axis
 //
-// The second limit is held to each axis's own part of the travel, not to the
-// larger part alone. A flick 26 px across and 24 px up a vertical list has
-// gone 24 pt along the list, and is swallowed: given the samples, iOS makes no
-// click for that stroke (same Simulator, a project card). A roll 26 px across
-// the list with 8 px of drift along it has not, and passes.
+// The second limit is held to each axis's own part of the travel, and the
+// cone is `SCROLL_CONE_SLOPE`: the part along the axis is more than tan 30°
+// (0.577) of the part across it. A flick 26 px across and 24 px up a vertical
+// list has gone 24 pt along the list, 47° from its axis, and is swallowed:
+// given the samples, iOS makes no click for that stroke. A roll 26 px across
+// the list with 12 px of drift along it is 65° from the axis. iOS clicks for
+// it, and it passes, as does any stroke with under 10 pt along the list. The
+// cone was measured on a vertical list (25 strokes, its edge between 0.556
+// and 0.588 of along over across), and a horizontal scroller is held to the
+// same one.
 //
 // "Scrolls along an axis" is `scrollsAlong` below: content that overflows on
 // that axis in a box the finger can scroll, wherever it is scrolled to. The
@@ -62,11 +70,18 @@
 export const TAP_MAX_TRAVEL_PX = 45;
 
 /**
- * Travel, in screen points, up to which a touch is a tap even along
- * something that scrolls: the distance iOS lets a finger go before it starts
- * the scroll.
+ * Travel along something that scrolls, in screen points, from which a touch
+ * is no tap: the distance at which iOS starts the scroll. A touch that has
+ * gone less far along it is a tap.
  */
 export const TAP_SCROLL_SLOP_PX = 10;
+
+/**
+ * How much of a stroke's travel across a scroller's axis its travel along
+ * the axis must exceed for iOS to take it as a scroll: tan 30°, a cone of
+ * 60° to either side of the axis.
+ */
+const SCROLL_CONE_SLOPE = Math.tan(Math.PI / 6);
 
 /** How long after a travelled touch ends its click can still arrive. */
 export const TAP_CLICK_WINDOW_MS = 700;
@@ -198,10 +213,11 @@ function scrollsAlong(from: ElementLike | null, axis: Axis): boolean {
 
 /**
  * Swallow the click that follows a primary touch lifted further from where
- * it landed than a tap goes: more than `TAP_MAX_TRAVEL_PX` anywhere, or more
- * than `TAP_SCROLL_SLOP_PX` along an axis something there scrolls on, however
- * long it lasted. Mouse and pen input, taps, rolled presses and scripted
- * clicks pass through untouched. Returns the cleanup.
+ * it landed than a tap goes: more than `TAP_MAX_TRAVEL_PX` anywhere, or
+ * `TAP_SCROLL_SLOP_PX` or more along an axis something there scrolls on, on
+ * a stroke inside the cone around that axis, however long it lasted. Mouse
+ * and pen input, taps, rolled presses and scripted clicks pass through
+ * untouched. Returns the cleanup.
  */
 export function guardTouchTaps(target?: EventTarget): () => void {
   const root = target ?? (typeof document === 'undefined' ? undefined : document);
@@ -240,10 +256,13 @@ export function guardTouchTaps(target?: EventTarget): () => void {
       travelledAt = pointer.timeStamp;
       return;
     }
-    // Each axis the finger went further along than a scroll takes to start.
+    // Each axis the finger went along as far as a scroll takes to start, on
+    // a stroke inside the cone around that axis.
+    const ax = Math.abs(dx);
+    const ay = Math.abs(dy);
     const axes: Axis[] = [];
-    if (Math.abs(dy) * scale > TAP_SCROLL_SLOP_PX) axes.push('y');
-    if (Math.abs(dx) * scale > TAP_SCROLL_SLOP_PX) axes.push('x');
+    if (ay * scale >= TAP_SCROLL_SLOP_PX && ay > ax * SCROLL_CONE_SLOPE) axes.push('y');
+    if (ax * scale >= TAP_SCROLL_SLOP_PX && ax > ay * SCROLL_CONE_SLOPE) axes.push('x');
     // The DOM is read only for a touch between the two limits.
     if (axes.length === 0) return;
     const from = landingOf(landed);

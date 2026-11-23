@@ -260,6 +260,10 @@ pub(crate) fn read_draft(path: &Path) -> Result<String, DraftError> {
 /// The local `write_note` handler calls this for a call that passes no
 /// `title` (`NoteSubmission::from_draft`). A call that passes one still
 /// publishes the whole draft as the body.
+///
+/// `staged-mcp.cjs` (`splitDraftTitle`) applies the same rule for a remote
+/// session; `write_note_reads_the_same_drafts_on_both_transports` in
+/// `remote_staged_mcp::note_outbox` runs both over the same drafts.
 pub(crate) fn split_title(draft: &str) -> Result<(String, String), DraftError> {
     let (first_line, rest) = draft.split_once('\n').unwrap_or((draft, ""));
     let title = first_line

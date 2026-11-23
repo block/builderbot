@@ -60,7 +60,13 @@ const readline = require("readline");
 
 // Reported as `serverInfo.version` and stamped by tools into what they write
 // (`write_note`'s `meta.json` keeps it under its original `helperVersion` key).
-const SERVER_VERSION = 7;
+//
+// Version 8: `write_note` accepts a call without `title` and takes the title
+// from the draft's first line, and `meta.json` holds the title exactly as the
+// laptop stores it. The laptop reads the version to tell that from the title
+// of an earlier script, which it still normalizes itself
+// (`remote_staged_mcp::note_outbox::outbox_state`).
+const SERVER_VERSION = 8;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -148,7 +154,13 @@ function removeIfPresent(filePath) {
 // directory, which the agent writes with its own file tools (Staged seeds it
 // with the stored body for an amendment and leaves it absent for a fresh
 // note). A call reads the draft and replaces the session's note, atomically
-// (temp file + rename), in the session directory:
+// (temp file + rename), in the session directory.
+//
+// The title comes from the call when it passes `title`, and the whole draft
+// is then the body. A call without `title` takes it from the draft's first
+// line, which must be a `# Title` heading (`splitDraftTitle`); that line is
+// not part of the published body. Either way `meta.json` holds the title and
+// `note.md` the body without it:
 //
 //     draft.md   the agent's draft (the laptop seeds and clears it; this
 //                server only reads it)
@@ -179,7 +191,9 @@ const WRITE_NOTE_DESCRIPTION =
 
 // Mirrors the schema rmcp derives from `WriteNoteParams`; the Rust test
 // `write_note_schema_matches_the_rust_tool_schema` checks property names and
-// required fields. There is no `body`: the body is the draft file.
+// required fields. There is no `body`: the body is the draft file. `title`
+// is still listed as required here, as it is on the laptop; `writeNote`
+// itself accepts a call without it.
 const WRITE_NOTE_INPUT_SCHEMA = {
   type: "object",
   properties: {
@@ -366,6 +380,80 @@ function readDraft(context) {
   return { body: body };
 }
 
+/**
+ * Split a draft that opens with its title into `{ title, body }`, or return
+ * `{ error }` with the wording of `DraftError::MissingTitle` and
+ * `DraftError::TitleOnly` on the laptop. `draft` is what `readDraft`
+ * returns, so its first line is the file's first non-blank line.
+ *
+ * The same rule as `note_draft::split_title`, which the laptop's handler
+ * applies to a call without `title`:
+ *
+ *   1. The first line is the text up to the first "\n".
+ *   2. It must be one `#` followed by a space or a tab. The title is the rest
+ *      of the line, trimmed as Rust trims, and must not be empty.
+ *   3. The body is everything after that line, trimmed, and must not be
+ *      empty.
+ *
+ * Only that line is consumed: `##` is a section and never a title, the title
+ * text is kept as written (inline markdown and a `#` of its own included),
+ * and a later `# Heading` is body text.
+ * `write_note_reads_the_same_drafts_on_both_transports` runs both
+ * implementations over the same drafts.
+ */
+function splitDraftTitle(context, draft) {
+  const filePath = draftPath(context);
+  const newline = draft.indexOf("\n");
+  const firstLine = newline === -1 ? draft : draft.slice(0, newline);
+  const rest = newline === -1 ? "" : draft.slice(newline + 1);
+  const afterMarker = firstLine.charCodeAt(1);
+  const title =
+    firstLine.charCodeAt(0) === 0x23 && (afterMarker === 0x20 || afterMarker === 0x09)
+      ? rustTrim(firstLine.slice(1))
+      : "";
+  if (title.length === 0) {
+    return {
+      error: draftRejection(
+        "the draft file `" +
+          filePath +
+          "` does not start with the note's title. Its first non-blank line must be a " +
+          "level-1 markdown heading: `# ` followed by the title on one line (not `##`, not a " +
+          "line underlined with `===`, and nothing above it). Add that line at the top and " +
+          "leave the rest of the note below it"
+      ),
+    };
+  }
+  const body = rustTrim(rest);
+  if (body.length === 0) {
+    return {
+      error: draftRejection(
+        "the draft file `" +
+          filePath +
+          "` holds only the title line. Write the note body in markdown below the `# ` title line"
+      ),
+    };
+  }
+  return { title: title, body: body };
+}
+
+/**
+ * The title the laptop stores for a `title` argument, given the title as
+ * `writeNote` has normalized it.
+ *
+ * Up to version 7 the laptop normalized `meta.title` once more when it
+ * collected the outbox (`NoteSubmission::from_parts`: trim as Rust trims,
+ * strip one leading `#`, trim), so an argument of `## Plan` was saved here as
+ * `# Plan` and stored as `Plan`. From version 8 the laptop stores `meta.title`
+ * as written, which a title taken from the draft heading needs, so that
+ * second pass is applied here and a call that passes `title` stores the title
+ * it always did. An empty result is written as it is: the laptop refuses it,
+ * as it refused such an outbox before.
+ */
+function storedArgumentTitle(title) {
+  const trimmed = rustTrim(title);
+  return trimmed.startsWith("#") ? rustTrim(trimmed.slice(1)) : trimmed;
+}
+
 function cleanStep(value) {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") {
@@ -419,31 +507,44 @@ function generationToken() {
   return crypto.randomBytes(16).toString("hex");
 }
 
-/** Validate the arguments, read the draft and write the note outbox. Returns {text, isError}. */
+/**
+ * Validate the arguments, read the draft and write the note outbox. Returns
+ * {text, isError}.
+ *
+ * A call that passes `title` is handled as it was when the argument was
+ * required: the argument is the title and the whole draft is the body, a
+ * heading at its top included. A call that leaves `title` out, or passes
+ * null, takes the title from the draft's first line and publishes the rest
+ * (`splitDraftTitle`), as the laptop's handler does.
+ */
 function writeNote(context, args) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
     return { text: "write_note rejected: arguments must be an object.", isError: true };
   }
-  let title = args.title;
-  if (typeof title !== "string") {
-    return {
-      text: "write_note rejected: `title` must be a string. Call it again with a non-empty one-line title.",
-      isError: true,
-    };
-  }
-  title = title.trim();
-  if (title.startsWith("#")) title = title.slice(1).trim();
-  if (title.length === 0) {
-    return {
-      text: "write_note rejected: `title` must not be empty. Call it again with a non-empty one-line title.",
-      isError: true,
-    };
-  }
-  if (title.indexOf("\n") !== -1) {
-    return {
-      text: "write_note rejected: `title` must be a single line. Call it again with a one-line title.",
-      isError: true,
-    };
+  const titlePassed = args.title !== undefined && args.title !== null;
+  let title = null;
+  if (titlePassed) {
+    title = args.title;
+    if (typeof title !== "string") {
+      return {
+        text: "write_note rejected: `title` must be a string. Call it again with a non-empty one-line title.",
+        isError: true,
+      };
+    }
+    title = title.trim();
+    if (title.startsWith("#")) title = title.slice(1).trim();
+    if (title.length === 0) {
+      return {
+        text: "write_note rejected: `title` must not be empty. Call it again with a non-empty one-line title.",
+        isError: true,
+      };
+    }
+    if (title.indexOf("\n") !== -1) {
+      return {
+        text: "write_note rejected: `title` must be a single line. Call it again with a one-line title.",
+        isError: true,
+      };
+    }
   }
   let steps;
   try {
@@ -459,11 +560,27 @@ function writeNote(context, args) {
     log("write_note could not read the draft for session " + context.sessionId);
     return { text: draft.error, isError: true };
   }
-  const body = draft.body;
+  let body = draft.body;
+  // What `meta.json` holds is the title the laptop stores, as written.
+  let storedTitle;
+  if (titlePassed) {
+    storedTitle = storedArgumentTitle(title);
+  } else {
+    // A draft with no title line, or nothing under it, is rejected like an
+    // unreadable one: nothing has been written yet.
+    const split = splitDraftTitle(context, draft.body);
+    if (split.error) {
+      log("write_note found no title and body in the draft for session " + context.sessionId);
+      return { text: split.error, isError: true };
+    }
+    title = split.title;
+    body = split.body;
+    storedTitle = title;
+  }
 
   const directory = ensureSessionDir(context);
   const meta = {
-    title: title,
+    title: storedTitle,
     suggestedNextSteps: steps,
     turn: context.turnId,
     writtenAt: Math.floor(Date.now() / 1000),

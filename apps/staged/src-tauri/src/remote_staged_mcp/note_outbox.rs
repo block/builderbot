@@ -15,6 +15,13 @@
 //!                                           holds that call's generation token
 //! ```
 //!
+//! The title in `meta.json` is the call's `title` argument, or, for a call
+//! that passed none, the text of the `# Title` heading the draft opens with;
+//! `note.md` then holds the draft without that line. The script does that
+//! split on the workstation, because the laptop never reads the draft. How
+//! the title is read back depends on the script's version, see
+//! [`TITLE_AS_WRITTEN_SERVER_VERSION`].
+//!
 //! The draft is the laptop's to seed and clear (`note_draft`): the
 //! start-of-run recovery's clear seeds it with the stored body for an
 //! amendment, in the same round trip ([`clear_outbox_and_seed`]), and every
@@ -494,6 +501,25 @@ impl<'a> MarkerLine<'a> {
     }
 }
 
+/// The first `SERVER_VERSION` of the script whose `meta.json` holds the title
+/// exactly as it is to be stored.
+///
+/// Up to version 7 the title is always the call's `title` argument, and the
+/// collector normalizes it the way the local tool normalizes that argument
+/// ([`NoteSubmission::from_parts`]: one leading `#` is stripped). From
+/// version 8 the title may be the draft's heading text, which the local
+/// handler stores as written ([`NoteSubmission::from_draft`]); stripping a
+/// `#` from it here would title the draft `# #12 follow-up` as
+/// `12 follow-up` for a remote session and `#12 follow-up` for a local one.
+/// So a version 8 script settles the title itself, for a `title` argument
+/// too, and the collector takes it as written
+/// ([`NoteSubmission::from_parts_as_written`]).
+///
+/// An outbox with an earlier version, or none, is collected as it always
+/// was: a turn that outlives its connection keeps the script it started
+/// with, so such outboxes are still written after an update.
+pub(crate) const TITLE_AS_WRITTEN_SERVER_VERSION: u32 = 8;
+
 /// `meta.json` as `write_note` writes it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -602,7 +628,15 @@ pub(crate) fn outbox_state(
             return Ok(OutboxState::StaleTurn { found: meta.turn });
         }
     }
-    let submission = NoteSubmission::from_parts(
+    let title_as_written = meta
+        .server_version
+        .is_some_and(|version| version >= TITLE_AS_WRITTEN_SERVER_VERSION);
+    let from_outbox = if title_as_written {
+        NoteSubmission::from_parts_as_written
+    } else {
+        NoteSubmission::from_parts
+    };
+    let submission = from_outbox(
         &meta.title,
         &body,
         meta.suggested_next_steps,
@@ -1348,6 +1382,105 @@ mod tests {
         );
     }
 
+    /// From version 8 the script settles the title, so the collector stores
+    /// it as written: a title taken from the draft heading keeps a `#` of
+    /// its own, as it does for a local session. An outbox from an earlier
+    /// script, or one that names no version, is normalized as it always was.
+    #[test]
+    fn outbox_state_keeps_a_version_8_title_as_written_and_normalizes_an_earlier_one() {
+        assert_eq!(TITLE_AS_WRITTEN_SERVER_VERSION, 8);
+        let snapshot = |version: Option<u32>, title: &str, body: &str| {
+            let mut snapshot = done_snapshot(Some("t1"));
+            let meta = snapshot.meta.as_mut().unwrap();
+            meta.title = title.to_string();
+            meta.server_version = version;
+            snapshot.body = Some(body.to_string());
+            snapshot
+        };
+        let title_of = |version: Option<u32>, title: &str| match outbox_state(
+            snapshot(version, title, "Body"),
+            Some("t1"),
+        )
+        .unwrap()
+        {
+            OutboxState::Delivered(submission) => submission.title,
+            other => panic!("{other:?}"),
+        };
+
+        // (title in meta.json, stored before version 8, stored from it on)
+        for (written, before, from_8) in [
+            ("Plan", "Plan", "Plan"),
+            ("  Padded  ", "Padded", "Padded"),
+            ("#12 follow-up", "12 follow-up", "#12 follow-up"),
+            ("# Plan", "Plan", "# Plan"),
+            (
+                "Ends with a hash #",
+                "Ends with a hash #",
+                "Ends with a hash #",
+            ),
+        ] {
+            for version in [None, Some(1), Some(6), Some(7)] {
+                assert_eq!(
+                    title_of(version, written),
+                    before,
+                    "{version:?} {written:?}"
+                );
+            }
+            for version in [Some(8), Some(9)] {
+                assert_eq!(
+                    title_of(version, written),
+                    from_8,
+                    "{version:?} {written:?}"
+                );
+            }
+        }
+
+        // The body and the steps are read the same way at every version.
+        for version in [Some(7), Some(8)] {
+            let mut with_steps = snapshot(version, "Title", "\nBody\n");
+            with_steps.meta.as_mut().unwrap().suggested_next_steps = Some(SuggestedNextSteps {
+                suggested_next_commit_step: Some("  Commit ".into()),
+                suggested_next_note_step: Some("  ".into()),
+            });
+            assert_eq!(
+                outbox_state(with_steps, Some("t1")).unwrap(),
+                OutboxState::Delivered(NoteSubmission {
+                    title: "Title".into(),
+                    body: "Body".into(),
+                    suggested_next_steps: Some(SuggestedNextSteps {
+                        suggested_next_commit_step: Some("Commit".into()),
+                        suggested_next_note_step: None,
+                    }),
+                    source: NoteSubmissionSource::Outbox,
+                }),
+                "{version:?}"
+            );
+        }
+
+        // A version 8 outbox is still checked, in the same words.
+        let rejected = |title: &str, body: &str| {
+            outbox_state(snapshot(Some(8), title, body), Some("t1")).unwrap_err()
+        };
+        assert_eq!(
+            rejected("  ", "Body"),
+            "outbox note is invalid: `title` must not be empty"
+        );
+        assert_eq!(
+            rejected("a\nb", "Body"),
+            "outbox note is invalid: `title` must be a single line"
+        );
+        assert_eq!(
+            rejected("Title", " \n"),
+            "outbox note is invalid: the note body must not be empty"
+        );
+        // A lone `#` is a title as written and was an empty one before.
+        assert_eq!(title_of(Some(8), "#"), "#");
+        assert_eq!(
+            outbox_state(snapshot(Some(7), "#", "Body"), Some("t1")).unwrap_err(),
+            "outbox note is invalid: `title` must not be empty"
+        );
+    }
+
     /// Answers the collect script with `collect_output` and records every
     /// command; anything else succeeds with empty output.
     fn collecting_exec<'a>(
@@ -2089,6 +2222,523 @@ mod tests {
         assert_eq!(
             collect(&exec, "never-ran", None).unwrap(),
             OutboxState::Pending
+        );
+    }
+
+    /// The three files a `write_note` call leaves, as bytes; `None` for a
+    /// file that is not there.
+    fn outbox_files(home: &std::path::Path) -> [Option<Vec<u8>>; 3] {
+        let outbox = home.join(".staged/sessions/sess-1");
+        ["done", "meta.json", "note.md"].map(|name| std::fs::read(outbox.join(name)).ok())
+    }
+
+    /// One `write_note` call on the script with `arguments`: whether it was
+    /// rejected, and the result text.
+    fn call_write_note(
+        home: &std::path::Path,
+        node: &str,
+        arguments: serde_json::Value,
+    ) -> (bool, String) {
+        let responses = run_script(
+            home,
+            node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":arguments}}),
+            ],
+        );
+        let result = &responses[0]["result"];
+        (
+            result["isError"] == true,
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a text result: {responses:?}"))
+                .to_string(),
+        )
+    }
+
+    /// A call without `title` takes the title from the draft's first line:
+    /// `meta.json` carries the parsed title, `note.md` the draft without the
+    /// heading line, and the collector hands both on unchanged.
+    #[test]
+    fn write_note_without_a_title_publishes_the_draft_heading_as_the_title() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping the draft heading test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+
+        let draft =
+            "\n\n# Design the outbox\n\nFirst body ![Shot](staged-media://abc.png)\n\n## Details\n";
+        let body = "First body ![Shot](staged-media://abc.png)\n\n## Details";
+        write_draft(home.path(), draft);
+        let (is_error, text) = call_write_note(
+            home.path(),
+            &node,
+            serde_json::json!({"suggested_next_steps":{"suggestedNextCommitStep":" Fix it ","suggestedNextNoteStep":""}}),
+        );
+        assert!(!is_error, "{text}");
+        // The result echoes the parsed title, and the count is the body
+        // without the heading line.
+        assert_eq!(
+            text,
+            crate::note_tool::saved_message("Design the outbox", body.len())
+        );
+
+        assert!(outbox.join("done").exists());
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("note.md")).unwrap(),
+            body,
+            "note.md has no heading"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("draft.md")).unwrap(),
+            draft,
+            "the script only reads the draft"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(outbox.join("meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["title"], "Design the outbox");
+        assert_eq!(meta["turn"], "turn-1");
+        assert_eq!(
+            meta["suggestedNextSteps"],
+            serde_json::json!({"suggestedNextCommitStep":"Fix it","suggestedNextNoteStep":null})
+        );
+        // No key was added for this: the version is what tells the laptop
+        // the title is to be stored as written.
+        let mut keys: Vec<&str> = meta
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "helperVersion",
+                "suggestedNextSteps",
+                "title",
+                "turn",
+                "writtenAt"
+            ]
+        );
+        assert_eq!(
+            meta["helperVersion"],
+            u64::from(TITLE_AS_WRITTEN_SERVER_VERSION),
+            "the script's version is the one the collector's rule starts at"
+        );
+
+        assert_eq!(
+            collect(&exec, "sess-1", Some("turn-1")).unwrap(),
+            OutboxState::Delivered(NoteSubmission {
+                title: "Design the outbox".into(),
+                body: body.into(),
+                suggested_next_steps: Some(SuggestedNextSteps {
+                    suggested_next_commit_step: Some("Fix it".into()),
+                    suggested_next_note_step: None,
+                }),
+                source: NoteSubmissionSource::Outbox,
+            })
+        );
+
+        // (draft, title, body)
+        let cases = [
+            // Only the first line is consumed: a body that opens with its
+            // own H1 keeps it.
+            ("# Title\n\n# Section\n\nText", "Title", "# Section\n\nText"),
+            // The title text is kept as written, a `#` of its own included,
+            // on the workstation and through the collector.
+            ("# #12 follow-up\nBody", "#12 follow-up", "Body"),
+            ("# # Spaced\nBody", "# Spaced", "Body"),
+            (
+                "# Use `foo` for [bar](x) #\nBody",
+                "Use `foo` for [bar](x) #",
+                "Body",
+            ),
+            ("#\t Tabbed \t\nBody", "Tabbed", "Body"),
+            ("\u{feff}\n\n# Marked\r\n\r\nBody\r\n", "Marked", "Body"),
+        ];
+        for (draft, title, body) in cases {
+            write_draft(home.path(), draft);
+            // `title` may be left out or null.
+            for arguments in [serde_json::json!({}), serde_json::json!({"title": null})] {
+                let (is_error, text) = call_write_note(home.path(), &node, arguments.clone());
+                assert!(!is_error, "{draft:?} {arguments}: {text}");
+                assert_eq!(
+                    text,
+                    crate::note_tool::saved_message(title, body.len()),
+                    "{draft:?}"
+                );
+                let meta: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(outbox.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(meta["title"], title, "{draft:?}");
+                assert_eq!(
+                    meta["suggestedNextSteps"],
+                    serde_json::Value::Null,
+                    "{draft:?}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(outbox.join("note.md")).unwrap(),
+                    body,
+                    "{draft:?}"
+                );
+                assert_eq!(
+                    collect(&exec, "sess-1", Some("turn-1")).unwrap(),
+                    OutboxState::Delivered(NoteSubmission {
+                        title: title.into(),
+                        body: body.into(),
+                        suggested_next_steps: None,
+                        source: NoteSubmissionSource::Outbox,
+                    }),
+                    "{draft:?}"
+                );
+            }
+        }
+    }
+
+    /// With no `title`, a draft that does not open with a `# Title` line, or
+    /// has nothing under it, is rejected in the laptop's words and the
+    /// outbox keeps what it held: nothing, or the note of an earlier call.
+    #[test]
+    fn write_note_without_a_title_rejects_a_draft_with_no_heading_and_leaves_the_outbox_untouched()
+    {
+        use crate::note_draft::DraftError;
+
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping the missing heading test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let shown = outbox.join("draft.md").to_string_lossy().into_owned();
+
+        let cases = [
+            ("Plain text\n\nBody", DraftError::MissingTitle),
+            ("## Section\n\nBody", DraftError::MissingTitle),
+            ("### Deeper\n\nBody", DraftError::MissingTitle),
+            ("#\nBody", DraftError::MissingTitle),
+            ("#   \nBody", DraftError::MissingTitle),
+            ("#Title\n\nBody", DraftError::MissingTitle),
+            ("#note:6c48d5ac\n\nBody", DraftError::MissingTitle),
+            ("Title\n=====\n\nBody", DraftError::MissingTitle),
+            ("---\ntitle: T\n---\n\nBody", DraftError::MissingTitle),
+            ("Intro line\n# Title\n\nBody", DraftError::MissingTitle),
+            ("# Title", DraftError::TitleOnly),
+            ("\n# Title\n\n  \n", DraftError::TitleOnly),
+        ];
+
+        // An empty outbox stays empty: only the draft is in the directory.
+        for (draft, error) in &cases {
+            write_draft(home.path(), draft);
+            let (is_error, text) = call_write_note(home.path(), &node, serde_json::json!({}));
+            assert!(is_error, "{draft:?}: {text}");
+            assert_eq!(text, error.describe(&shown), "{draft:?}");
+            assert_eq!(outbox_files(home.path()), [None, None, None], "{draft:?}");
+            assert_eq!(
+                collect(&exec, "sess-1", Some("turn-1")).unwrap(),
+                OutboxState::Pending,
+                "{draft:?}"
+            );
+        }
+
+        // The texts, word for word.
+        write_draft(home.path(), "## Section\n\nBody");
+        assert_eq!(
+            call_write_note(home.path(), &node, serde_json::json!({"title": null})).1,
+            format!(
+                "write_note rejected: the draft file `{shown}` does not start with the note's \
+title. Its first non-blank line must be a level-1 markdown heading: `# ` followed by the title \
+on one line (not `##`, not a line underlined with `===`, and nothing above it). Add that line \
+at the top and leave the rest of the note below it, then call write_note again."
+            )
+        );
+        write_draft(home.path(), "# Title\n");
+        assert_eq!(
+            call_write_note(home.path(), &node, serde_json::json!({})).1,
+            format!(
+                "write_note rejected: the draft file `{shown}` holds only the title line. \
+Write the note body in markdown below the `# ` title line, then call write_note again."
+            )
+        );
+
+        // An outbox filled by an earlier call keeps that note, marker token
+        // included.
+        write_draft(home.path(), "# Kept\n\nKept body");
+        let (is_error, text) = call_write_note(home.path(), &node, serde_json::json!({}));
+        assert!(!is_error, "{text}");
+        let kept = outbox_files(home.path());
+        assert!(kept.iter().all(Option::is_some), "{kept:?}");
+        for (draft, _) in &cases {
+            write_draft(home.path(), draft);
+            let (is_error, text) = call_write_note(home.path(), &node, serde_json::json!({}));
+            assert!(is_error, "{draft:?}: {text}");
+            assert_eq!(
+                outbox_files(home.path()),
+                kept,
+                "{draft:?} must not replace the earlier note"
+            );
+        }
+        assert!(matches!(
+            collect(&exec, "sess-1", Some("turn-1")).unwrap(),
+            OutboxState::Delivered(submission)
+                if submission.title == "Kept" && submission.body == "Kept body"
+        ));
+
+        // Bad suggested next steps are refused before the draft is read,
+        // and an unreadable draft before its heading is looked for.
+        let (is_error, text) = call_write_note(
+            home.path(),
+            &node,
+            serde_json::json!({"suggested_next_steps": "soon"}),
+        );
+        assert!(is_error);
+        assert_eq!(
+            text,
+            "write_note rejected: `suggested_next_steps` must be an object or null."
+        );
+        std::fs::remove_file(outbox.join("draft.md")).unwrap();
+        let (_, without) = call_write_note(home.path(), &node, serde_json::json!({}));
+        let (_, with) = call_write_note(home.path(), &node, serde_json::json!({"title": "Title"}));
+        assert_eq!(without, DraftError::Missing.describe(&shown));
+        assert_eq!(without, with);
+        write_draft(home.path(), "  \n\t\n");
+        let (_, without) = call_write_note(home.path(), &node, serde_json::json!({}));
+        assert_eq!(without, DraftError::Empty.describe(&shown));
+        assert_eq!(outbox_files(home.path()), kept);
+    }
+
+    /// A call that passes `title` is handled as it was before the script
+    /// could read a heading: the whole draft is the body, the result text
+    /// names the title as the script normalized it, and the note is stored
+    /// under the title a version 7 outbox of the same call was collected
+    /// with. The laptop no longer strips a `#` from a version 8 title, so
+    /// the script has to write the stored title itself.
+    #[test]
+    fn a_call_that_passes_a_title_stores_what_it_stored_before_version_8() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping the passed title test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+
+        // What a version 7 script left for the same call: the title of its
+        // result text in `meta.json`, the same body in `note.md`.
+        let collected_from_version_7 = |title: &str, body: &str| {
+            let mut snapshot = done_snapshot(Some("turn-1"));
+            let meta = snapshot.meta.as_mut().unwrap();
+            meta.title = title.to_string();
+            meta.suggested_next_steps = None;
+            meta.server_version = Some(7);
+            snapshot.body = Some(body.to_string());
+            outbox_state(snapshot, Some("turn-1"))
+        };
+
+        // (draft, `title` argument, title in the result text, stored title)
+        let cases = [
+            // A heading at the top of the draft stays in the body, whether
+            // it differs from the argument or repeats it.
+            (
+                "# Draft heading\n\nBody",
+                "Passed title",
+                "Passed title",
+                "Passed title",
+            ),
+            ("# Same\n\nBody", "Same", "Same", "Same"),
+            ("# Only a heading", "Passed", "Passed", "Passed"),
+            // Drafts the no-title path rejects are accepted with a title.
+            ("Plain body", "Passed", "Passed", "Passed"),
+            ("## Section\n\nText", "Passed", "Passed", "Passed"),
+            // The argument is trimmed and loses one leading `#`.
+            ("Body", "  # Design  ", "Design", "Design"),
+            (
+                "# #12 follow-up\n\nBody",
+                "#12 follow-up",
+                "12 follow-up",
+                "12 follow-up",
+            ),
+            // The laptop took one more `#` off a title that still had one.
+            ("Body", "## Plan", "# Plan", "Plan"),
+            ("Body", "# # Plan", "# Plan", "Plan"),
+        ];
+        for (draft, argument, shown_title, stored_title) in cases {
+            write_draft(home.path(), draft);
+            let body = draft.trim();
+            let (is_error, text) =
+                call_write_note(home.path(), &node, serde_json::json!({"title": argument}));
+            assert!(!is_error, "{argument:?}: {text}");
+            assert_eq!(
+                text,
+                crate::note_tool::saved_message(shown_title, body.len()),
+                "{argument:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(outbox.join("note.md")).unwrap(),
+                body,
+                "{argument:?}"
+            );
+            let collected = collect(&exec, "sess-1", Some("turn-1"));
+            assert_eq!(
+                collected,
+                Ok(OutboxState::Delivered(NoteSubmission {
+                    title: stored_title.into(),
+                    body: body.into(),
+                    suggested_next_steps: None,
+                    source: NoteSubmissionSource::Outbox,
+                })),
+                "{argument:?}"
+            );
+            assert_eq!(
+                collected,
+                collected_from_version_7(shown_title, body),
+                "{argument:?}"
+            );
+        }
+
+        // A title that is only `#` marks was saved on the workstation and
+        // refused by the collector. It still is, in the same words.
+        write_draft(home.path(), "Body");
+        let (is_error, text) =
+            call_write_note(home.path(), &node, serde_json::json!({"title": "##"}));
+        assert!(!is_error, "{text}");
+        assert_eq!(text, crate::note_tool::saved_message("#", "Body".len()));
+        let collected = collect(&exec, "sess-1", Some("turn-1"));
+        assert_eq!(
+            collected,
+            Err("outbox note is invalid: `title` must not be empty".to_string())
+        );
+        assert_eq!(collected, collected_from_version_7("#", "Body"));
+
+        // The rejections of a bad `title` read as before, and a heading in
+        // the draft does not stand in for it.
+        write_draft(home.path(), "# Draft heading\n\nBody");
+        let before = outbox_files(home.path());
+        for (argument, text) in [
+            (
+                serde_json::json!(""),
+                "write_note rejected: `title` must not be empty. Call it again with a non-empty \
+one-line title.",
+            ),
+            (
+                serde_json::json!("# "),
+                "write_note rejected: `title` must not be empty. Call it again with a non-empty \
+one-line title.",
+            ),
+            (
+                serde_json::json!("Two\nlines"),
+                "write_note rejected: `title` must be a single line. Call it again with a \
+one-line title.",
+            ),
+            (
+                serde_json::json!(12),
+                "write_note rejected: `title` must be a string. Call it again with a non-empty \
+one-line title.",
+            ),
+        ] {
+            let (is_error, result) =
+                call_write_note(home.path(), &node, serde_json::json!({"title": argument}));
+            assert!(is_error, "{argument}");
+            assert_eq!(result, text, "{argument}");
+            assert_eq!(outbox_files(home.path()), before, "{argument}");
+        }
+    }
+
+    /// A turn that outlives its connection keeps the script it started
+    /// with, so the laptop still meets outboxes a version 7 script wrote:
+    /// the `title` argument in `meta.json`, the whole draft in `note.md`.
+    /// They collect as they did, the title normalized by the laptop and a
+    /// heading at the top of the body left where it is.
+    #[test]
+    fn an_outbox_written_by_a_version_7_script_still_collects() {
+        let home = tempfile::tempdir().unwrap();
+        let exec = local_exec(home.path());
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        std::fs::create_dir_all(&outbox).unwrap();
+
+        let write_outbox = |title: &str, body: &str, version: Option<u32>| {
+            let mut meta = serde_json::json!({
+                "title": title,
+                "suggestedNextSteps": {"suggestedNextCommitStep": "Ship", "suggestedNextNoteStep": null},
+                "turn": "turn-1",
+                "writtenAt": 1,
+            });
+            if let Some(version) = version {
+                meta["helperVersion"] = version.into();
+            }
+            std::fs::write(outbox.join("note.md"), body).unwrap();
+            std::fs::write(outbox.join("meta.json"), meta.to_string()).unwrap();
+            std::fs::write(outbox.join("done"), "0123456789abcdef0123456789abcdef").unwrap();
+        };
+        let collected = |title: &str, body: &str| {
+            Ok(OutboxState::Delivered(NoteSubmission {
+                title: title.into(),
+                body: body.into(),
+                suggested_next_steps: Some(SuggestedNextSteps {
+                    suggested_next_commit_step: Some("Ship".into()),
+                    suggested_next_note_step: None,
+                }),
+                source: NoteSubmissionSource::Outbox,
+            }))
+        };
+
+        // (title in meta.json, note.md, collected title)
+        let cases = [
+            ("Plan", "Body", "Plan"),
+            // The body is the whole draft: its heading is not a title.
+            ("Plan", "# Draft heading\n\nBody", "Plan"),
+            // The laptop strips one `#` from an earlier script's title.
+            ("# Plan", "Body", "Plan"),
+            ("#12 follow-up", "## Section\n\nText", "12 follow-up"),
+        ];
+        for (title, body, stored) in cases {
+            // Versions before 8, and the first outboxes, which named none.
+            for version in [Some(7), Some(3), None] {
+                write_outbox(title, body, version);
+                assert_eq!(
+                    collect(&exec, "sess-1", Some("turn-1")),
+                    collected(stored, body),
+                    "{title:?} at {version:?}"
+                );
+                // The sweep, which has no turn of its own, reads it alike.
+                assert_eq!(
+                    collect(&exec, "sess-1", None),
+                    collected(stored, body),
+                    "{title:?} at {version:?}"
+                );
+            }
+        }
+
+        // The same files stamped by a version 8 script keep the title.
+        write_outbox("#12 follow-up", "Body", Some(8));
+        assert_eq!(
+            collect(&exec, "sess-1", Some("turn-1")),
+            collected("#12 follow-up", "Body")
+        );
+
+        // The run-start recovery ingests a version 7 note the same way.
+        write_outbox("# Plan", "# Draft heading\n\nBody", Some(7));
+        let mut ingested = Vec::new();
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |submission| {
+                ingested.push((submission.title, submission.body));
+                true
+            },
+            &mut || None,
+        )
+        .unwrap();
+        assert_eq!(recovery.outbox, OutboxRecovery::Ingested);
+        assert_eq!(
+            ingested,
+            [("Plan".to_string(), "# Draft heading\n\nBody".to_string())]
         );
     }
 
@@ -2885,18 +3535,100 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
         Unreadable,
     }
 
-    /// What `write_note` answered: the result text, and the body it
-    /// published when it accepted the draft.
+    /// What `write_note` answered: the result text, and the title and body
+    /// of the note it handed on when it accepted the draft.
     #[derive(Debug, PartialEq, Eq)]
     struct DraftOutcome {
         text: String,
+        title: Option<String>,
         body: Option<String>,
+    }
+
+    /// Remove everything in the session directory, whatever kind of file.
+    fn empty_session_dir(outbox: &std::path::Path) {
+        for entry in std::fs::read_dir(outbox).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+    }
+
+    /// One `write_note` call with `arguments` on each transport, over the
+    /// draft at `~/.staged/sessions/sess-1/draft.md`: the laptop's handler
+    /// first, then the script. Returns `(laptop, script)`.
+    ///
+    /// The laptop's note is what its handler put in the slot. The script's
+    /// is what the laptop's collector makes of the outbox the script wrote,
+    /// so the comparison covers the whole remote path to the slot, not only
+    /// the files. The session directory must hold no earlier outbox.
+    fn write_note_on_both_transports(
+        home: &std::path::Path,
+        node: &str,
+        arguments: &serde_json::Value,
+        what: &str,
+    ) -> (DraftOutcome, DraftOutcome) {
+        let outbox = home.join(".staged/sessions/sess-1");
+
+        let slot = crate::note_tool::new_submission_slot();
+        let result = crate::note_tool::handle_write_note(
+            "sess-1",
+            &slot,
+            &outbox.join("draft.md"),
+            serde_json::from_value(arguments.clone()).unwrap(),
+        );
+        let content = serde_json::to_value(&result.content).unwrap();
+        let submission = crate::note_tool::current_submission(&slot);
+        let laptop = DraftOutcome {
+            text: content[0]["text"].as_str().unwrap().to_string(),
+            title: submission.as_ref().map(|s| s.title.clone()),
+            body: submission.map(|s| s.body),
+        };
+        assert_eq!(
+            result.is_error == Some(true),
+            laptop.body.is_none(),
+            "{what}"
+        );
+
+        let (is_error, text) = call_write_note(home, node, arguments.clone());
+        let collected = match collect(&local_exec(home), "sess-1", Some("turn-1")) {
+            Ok(OutboxState::Delivered(submission)) => Some(submission),
+            Ok(OutboxState::Pending) => None,
+            other => panic!("{what}: {other:?}"),
+        };
+        assert_eq!(is_error, collected.is_none(), "{what}: {text}");
+        assert_eq!(
+            outbox.join("done").exists(),
+            !is_error,
+            "{what}: a rejected draft leaves the outbox untouched"
+        );
+        // The collector hands on the body file as the script wrote it.
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("note.md")).ok(),
+            collected.as_ref().map(|s| s.body.clone()),
+            "{what}"
+        );
+        let script = DraftOutcome {
+            text,
+            title: collected.as_ref().map(|s| s.title.clone()),
+            body: collected.map(|s| s.body),
+        };
+        (laptop, script)
     }
 
     /// `write_note` has two implementations of the draft read: the laptop's
     /// (`note_draft::read_draft` behind `note_tool::handle_write_note`) and
     /// the script's `readDraft`. They must accept and reject the same files,
     /// in the same words, and publish the same body.
+    ///
+    /// The same holds for the split of a draft into its title and body,
+    /// which a call without `title` asks for (`note_draft::split_title` and
+    /// the script's `splitDraftTitle`): the same result and error texts,
+    /// and the same title and body in the slot. The script's side of each
+    /// comparison is the note as the laptop collects it from the outbox.
     #[cfg(unix)]
     #[test]
     fn write_note_reads_the_same_drafts_on_both_transports() {
@@ -2995,19 +3727,17 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
                 DraftFixture::Unreadable,
                 Err("could not be read: "),
             ),
+            (
+                // With a `title`, a heading is body text on both.
+                "a heading under a passed title",
+                DraftFixture::Bytes("# Heading\n\nBody\n".into()),
+                Ok("# Heading\n\nBody"),
+            ),
         ];
 
         for (what, fixture, expected) in cases {
             // A clean session directory holding only the fixture.
-            for entry in std::fs::read_dir(&outbox).unwrap() {
-                let path = entry.unwrap().path();
-                let meta = std::fs::symlink_metadata(&path).unwrap();
-                if meta.is_dir() {
-                    std::fs::remove_dir_all(&path).unwrap();
-                } else {
-                    std::fs::remove_file(&path).unwrap();
-                }
-            }
+            empty_session_dir(&outbox);
             match &fixture {
                 DraftFixture::Missing => {}
                 DraftFixture::Bytes(bytes) => std::fs::write(&draft, bytes).unwrap(),
@@ -3035,53 +3765,17 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
                 }
             }
 
-            // The laptop's handler.
-            let slot = crate::note_tool::new_submission_slot();
-            let result = crate::note_tool::handle_write_note(
-                "sess-1",
-                &slot,
-                &draft,
-                WriteNoteParams {
-                    title: Some("Title".to_string()),
-                    suggested_next_steps: None,
-                },
-            );
-            let content = serde_json::to_value(&result.content).unwrap();
-            let laptop = DraftOutcome {
-                text: content[0]["text"].as_str().unwrap().to_string(),
-                body: crate::note_tool::current_submission(&slot).map(|s| s.body),
-            };
-            assert_eq!(
-                result.is_error == Some(true),
-                laptop.body.is_none(),
-                "{what}"
-            );
-
-            // The script, on the same file.
-            let responses = run_script(
+            // The laptop's handler, then the script, on the same file.
+            let (laptop, script) = write_note_on_both_transports(
                 home.path(),
                 &node,
-                &[
-                    serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Title"}}}),
-                ],
-            );
-            let is_error = responses[0]["result"]["isError"] == true;
-            let script = DraftOutcome {
-                text: responses[0]["result"]["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .to_string(),
-                body: std::fs::read_to_string(outbox.join("note.md")).ok(),
-            };
-            assert_eq!(is_error, script.body.is_none(), "{what}: {script:?}");
-            assert_eq!(
-                outbox.join("done").exists(),
-                !is_error,
-                "{what}: a rejected draft leaves the outbox untouched"
+                &serde_json::json!({"title": "Title"}),
+                what,
             );
 
             match expected {
                 Ok(body) => {
+                    assert_eq!(laptop.title.as_deref(), Some("Title"), "{what}");
                     assert_eq!(laptop.body.as_deref(), Some(body), "{what}");
                     assert_eq!(script, laptop, "{what}");
                 }
@@ -3107,8 +3801,187 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
             }
         }
 
+        // A call without `title`: the draft's first line is the title.
+        // (what, the draft or None for no file, the title and body both
+        // transports hand on or the rejection)
+        use crate::note_draft::DraftError;
+        type Split = Result<(&'static str, &'static str), DraftError>;
+        let cases: Vec<(&str, Option<&str>, Split)> = vec![
+            (
+                "a heading and a body",
+                Some("# Design the outbox\n\nFirst body\n\n## Details\n"),
+                Ok(("Design the outbox", "First body\n\n## Details")),
+            ),
+            (
+                "blank lines and a byte order mark above the heading",
+                Some("\u{feff}\n\n# Marked\n\nBody\n"),
+                Ok(("Marked", "Body")),
+            ),
+            (
+                "CRLF line endings",
+                Some("# Marked\r\n\r\nBody\r\nmore\r\n"),
+                Ok(("Marked", "Body\r\nmore")),
+            ),
+            (
+                "only the first line is consumed",
+                Some("# Title\n\n# Section\n\nText"),
+                Ok(("Title", "# Section\n\nText")),
+            ),
+            (
+                "a body right under the heading",
+                Some("# Title\nBody"),
+                Ok(("Title", "Body")),
+            ),
+            (
+                // The laptop must not strip this `#` when it collects the
+                // outbox: the handler does not strip it either.
+                "a title that starts with its own hash",
+                Some("# #12 follow-up\nBody"),
+                Ok(("#12 follow-up", "Body")),
+            ),
+            (
+                "a title that starts with a hash and a space",
+                Some("# # Spaced\nBody"),
+                Ok(("# Spaced", "Body")),
+            ),
+            (
+                "a title that is one hash",
+                Some("# #\nBody"),
+                Ok(("#", "Body")),
+            ),
+            (
+                "inline markdown and a closing hash are kept",
+                Some("# Use `foo` for [bar](x) #\nBody"),
+                Ok(("Use `foo` for [bar](x) #", "Body")),
+            ),
+            (
+                "a tab after the hash",
+                Some("#\t Tabbed \t\nBody"),
+                Ok(("Tabbed", "Body")),
+            ),
+            (
+                "quotes and non-ASCII text, counted in bytes",
+                Some("# Fix \"quoted\" titles: résumé → 日本語\n\né→ in the body"),
+                Ok(("Fix \"quoted\" titles: résumé → 日本語", "é→ in the body")),
+            ),
+            (
+                // U+3000 and U+0085 are whitespace to Rust; JavaScript's own
+                // `trim` would keep the second.
+                "unicode whitespace around the title is trimmed alike",
+                Some("# \u{3000}Wide\u{85}\n\u{85}Body\u{2028}"),
+                Ok(("Wide", "Body")),
+            ),
+            (
+                // U+FEFF is not whitespace to Rust; JavaScript's own `trim`
+                // would strip it.
+                "a mark inside the title line is text",
+                Some("# \u{feff}Marked\u{feff}\nBody"),
+                Ok(("\u{feff}Marked\u{feff}", "Body")),
+            ),
+            ("no file", None, Err(DraftError::Missing)),
+            ("whitespace only", Some("  \n\t\n"), Err(DraftError::Empty)),
+            (
+                "plain text",
+                Some("Plain text\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a level-2 heading",
+                Some("## Section\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a deeper heading",
+                Some("### Deeper\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a bare hash",
+                Some("#\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a hash and spaces",
+                Some("#   \nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a hash and unicode whitespace only",
+                Some("# \u{3000}\u{85}\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "no space after the hash",
+                Some("#Title\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a no-break space after the hash",
+                Some("#\u{a0}Title\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a note reference",
+                Some("#note:6c48d5ac\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a setext heading",
+                Some("Title\n=====\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "front matter",
+                Some("---\ntitle: T\n---\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a line above the heading",
+                Some("Intro line\n# Title\n\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a heading alone",
+                Some("# Title"),
+                Err(DraftError::TitleOnly),
+            ),
+            (
+                "a heading over blank lines",
+                Some("\n# Title\r\n\n  \n"),
+                Err(DraftError::TitleOnly),
+            ),
+        ];
+        for (what, text, expected) in cases {
+            // `title` left out, and `title` null.
+            for arguments in [serde_json::json!({}), serde_json::json!({"title": null})] {
+                empty_session_dir(&outbox);
+                if let Some(text) = text {
+                    std::fs::write(&draft, text).unwrap();
+                }
+                let (laptop, script) =
+                    write_note_on_both_transports(home.path(), &node, &arguments, what);
+                // Result or error text, title and body: all three alike.
+                assert_eq!(script, laptop, "{what} with {arguments}");
+                match &expected {
+                    Ok((title, body)) => {
+                        assert_eq!(laptop.title.as_deref(), Some(*title), "{what}");
+                        assert_eq!(laptop.body.as_deref(), Some(*body), "{what}");
+                        assert_eq!(
+                            laptop.text,
+                            crate::note_tool::saved_message(title, body.len()),
+                            "{what}"
+                        );
+                    }
+                    Err(error) => {
+                        assert_eq!(laptop.text, error.describe(&shown), "{what}");
+                        assert_eq!((&laptop.title, &laptop.body), (&None, &None), "{what}");
+                    }
+                }
+            }
+        }
+
         // A draft exactly at the cap is published whole by both.
-        std::fs::remove_file(&draft).unwrap();
+        empty_session_dir(&outbox);
         std::fs::write(&draft, vec![b'x'; max as usize]).unwrap();
         let slot = crate::note_tool::new_submission_slot();
         crate::note_tool::handle_write_note(

@@ -191,7 +191,10 @@ impl NoteSubmission {
     /// The title is kept as written: unlike [`Self::from_parts`], a `#` the
     /// title text itself starts with is not stripped, so `# #12 follow-up`
     /// is titled `#12 follow-up`. `split_title` already returns a one-line,
-    /// non-empty title and a non-empty body, both trimmed.
+    /// non-empty title and a non-empty body, both trimmed. A remote session
+    /// gets the same title: the script splits the draft by the same rule
+    /// and the outbox reader takes its title through
+    /// [`Self::from_parts_as_written`].
     pub(crate) fn from_draft(
         draft: &str,
         suggested_next_steps: Option<SuggestedNextSteps>,
@@ -216,6 +219,10 @@ impl NoteSubmission {
     /// The title and body must both be non-empty after trimming; a title that
     /// was written as a markdown H1 anyway has its `# ` stripped so the stored
     /// title stays plain text.
+    ///
+    /// That strip is for a title that was a tool argument. A title that was
+    /// parsed from the draft's heading must not pass through here: see
+    /// [`Self::from_parts_as_written`].
     pub(crate) fn from_parts(
         title: &str,
         body: &str,
@@ -223,7 +230,25 @@ impl NoteSubmission {
         source: NoteSubmissionSource,
     ) -> Result<Self, String> {
         let title = title.trim();
-        let title = title.strip_prefix('#').unwrap_or(title).trim();
+        let title = title.strip_prefix('#').unwrap_or(title);
+        Self::from_parts_as_written(title, body, suggested_next_steps, source)
+    }
+
+    /// [`Self::from_parts`] for a title that is already the one to store:
+    /// it is trimmed and checked, and a `#` it starts with is kept.
+    ///
+    /// The outbox reader uses this for an outbox whose writer settled the
+    /// title (the Staged MCP on Blox from version 8). Such a title may be
+    /// the draft's heading text, which [`Self::from_draft`] keeps as written
+    /// for a local session, so `# #12 follow-up` is titled `#12 follow-up`
+    /// on both transports. The rejection reasons are `from_parts`' own.
+    pub(crate) fn from_parts_as_written(
+        title: &str,
+        body: &str,
+        suggested_next_steps: Option<SuggestedNextSteps>,
+        source: NoteSubmissionSource,
+    ) -> Result<Self, String> {
+        let title = title.trim();
         if title.is_empty() {
             return Err("`title` must not be empty".to_string());
         }
@@ -651,6 +676,83 @@ question, answer it before making this call."
         assert_eq!(reject("# ", "body"), "`title` must not be empty");
         assert_eq!(reject("a\nb", "body"), "`title` must be a single line");
         assert_eq!(reject("Title", "  \n"), "the note body must not be empty");
+    }
+
+    /// `from_parts_as_written` is `from_parts` without the `#` strip: the
+    /// same submission for a title that does not start with `#`, the same
+    /// rejections, and for a draft that opens with its title the submission
+    /// `from_draft` builds from the draft itself. That last equality is what
+    /// gives a note the same title whether the laptop split the draft (a
+    /// local session) or the script did and the outbox carried the parts.
+    #[test]
+    fn from_parts_as_written_keeps_a_leading_hash_and_matches_from_draft() {
+        let as_written = |title: &str, body: &str| {
+            NoteSubmission::from_parts_as_written(title, body, None, NoteSubmissionSource::Outbox)
+        };
+        let title_of = |title: &str| as_written(title, "Body").unwrap().title;
+        assert_eq!(title_of("#12 follow-up"), "#12 follow-up");
+        assert_eq!(title_of("  # Design  "), "# Design");
+        assert_eq!(title_of("## Deeper"), "## Deeper");
+        assert_eq!(title_of("#"), "#");
+
+        // Nothing to strip: the two agree, steps and body included.
+        let steps = Some(SuggestedNextSteps {
+            suggested_next_commit_step: Some("  Fix it ".to_string()),
+            suggested_next_note_step: Some("   ".to_string()),
+        });
+        for (title, body) in [
+            ("Plain title", "Body"),
+            ("  Padded  ", "\nBody text.\n"),
+            ("Ends with a hash #", "# Section\n\nText"),
+            ("", "body"),
+            ("  ", "body"),
+            ("a\nb", "body"),
+            ("Title", "  \n"),
+        ] {
+            for source in [NoteSubmissionSource::Tool, NoteSubmissionSource::Outbox] {
+                assert_eq!(
+                    NoteSubmission::from_parts_as_written(title, body, steps.clone(), source),
+                    NoteSubmission::from_parts(title, body, steps.clone(), source),
+                    "title {title:?}, body {body:?}"
+                );
+            }
+        }
+        assert_eq!(
+            as_written("", "body").unwrap_err(),
+            "`title` must not be empty"
+        );
+        assert_eq!(
+            as_written("a\nb", "body").unwrap_err(),
+            "`title` must be a single line"
+        );
+        assert_eq!(
+            as_written("Title", " \n").unwrap_err(),
+            "the note body must not be empty"
+        );
+
+        // The parts of a split draft, carried separately, give the
+        // submission the draft itself gives.
+        for draft in [
+            "# Plan\n\nBody",
+            "# #12 follow-up\nBody",
+            "# # Spaced\n\n# Section\n\nText",
+            "# Use `foo` for [bar](x) #\nBody",
+            "#\t Tabbed \t\r\n\r\nBody",
+        ] {
+            let (title, body) = crate::note_draft::split_title(draft).unwrap();
+            assert_eq!(
+                NoteSubmission::from_parts_as_written(
+                    &title,
+                    &body,
+                    steps.clone(),
+                    NoteSubmissionSource::Outbox
+                )
+                .unwrap(),
+                NoteSubmission::from_draft(draft, steps.clone(), NoteSubmissionSource::Outbox)
+                    .unwrap(),
+                "{draft:?}"
+            );
+        }
     }
 
     #[test]

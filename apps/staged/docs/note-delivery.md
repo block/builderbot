@@ -121,7 +121,8 @@ same rule (`note_draft::split_title` on the laptop, `splitDraftTitle` in
 `staged-mcp.cjs`), applied to the text the read above returns, so a leading
 byte order mark and the surrounding whitespace are already gone:
 
-1. The first line is the text up to the first `\n`.
+1. The first line is the text up to the first line ending. A line ending
+   is a `\n`, a `\r\n` or a `\r` on its own, as in CommonMark.
 2. It must be one `#` followed by a space or a tab. The title is the rest of
    that line, trimmed, and must not be empty.
 3. The body is everything below that line, trimmed, and must not be empty.
@@ -142,11 +143,25 @@ twice.
 | ``# Use `foo` for [bar](x)``                     | Accepted. The title text is kept as written, inline markdown included.           |
 | `# Title #`                                      | Accepted as `Title #`. A closing `#` is not stripped.                            |
 | `# #12 follow-up`                                | Accepted as `#12 follow-up`. A `#` the title text starts with is kept.           |
+| `# Two  spaces`, or a title with a tab in it     | Accepted with that spacing. Whitespace inside the title is kept as written.      |
+| `# Title`, a `\r` on its own, then the body      | Accepted as `Title`. The `\r` ends the title line.                               |
+| `# One`, U+2028, `Two` on the same line          | Accepted as one title that holds the U+2028. It does not end a line in markdown. |
 | `# Title` and nothing below it                   | Rejected as a note with no body.                                                 |
 | A second `# Heading` further down                | Body text, untouched.                                                            |
 
-A draft with CRLF line endings splits the same way: the `\r` that ends the
-title line is trimmed off.
+The three line endings are read alike. A draft with CRLF line endings splits
+the same way as one with line feeds. So does a draft with CR-only line
+endings: its title line ends at the first `\r` and the rest is the body,
+with its own line endings kept. A title therefore never holds a `\r` or a
+`\n`.
+
+The title text is not normalized. Tabs, runs of spaces, no-break and
+ideographic spaces inside it are stored as written; only the ends are
+trimmed. The characters that are a line break elsewhere but not in markdown
+(U+2028, U+2029, U+0085, a vertical tab, a form feed) do not end the title
+line either. Inside the title they are title text, and at its ends they are
+trimmed with the other whitespace. A draft whose only line break is one of
+them is a single line, so it is rejected as holding only the title line.
 
 The two rejections use the frame of the other draft errors and name the
 file by absolute path, word for word the same on both transports:
@@ -221,21 +236,40 @@ What the file holds at run start depends on the stored note
   seeded with the stored note before the agent starts, so the agent reads
   it and edits only what changes. The seed is the stored title as the title
   line, a blank line, then the stored body verbatim
-  (`note_draft::title_heading`). Verbatim includes a heading the body opens
+  (`note_draft::seed_body`, which gets the title line from
+  `note_draft::title_heading`). Verbatim includes a heading the body opens
   with and every `staged-media://` reference. The seed and the publish
   mirror each other: the store keeps the body without the title, the seed
   adds exactly one line above it, and `write_note` takes exactly one line
-  off. A seeded draft published untouched therefore gives the stored title
-  and body back, so the store sees an identical republish and keeps
-  `updated_at`. A body that opens with `# Section` keeps that heading: it
-  is the draft's third line and never its first.
+  off. A body that opens with `# Section` keeps that heading: it is the
+  draft's third line and never its first.
 
   The title is made to fit on one line before it is written
-  (`heading_safe_title`): every run of whitespace, line breaks included,
-  becomes one space, and a title with nothing left becomes `Untitled Note`.
-  A stored title that is already one trimmed line with single spaces comes
-  through unchanged. Whether there is a seed still depends on the body
-  alone: a note whose stub row has a title and no body is a fresh note.
+  (`heading_safe_title`), and only what the split could not read back is
+  changed: a line break (a run of `\r` and `\n`, with any whitespace that
+  touches it) becomes one space, the ends are trimmed, and a title with
+  nothing left becomes `Untitled Note`. All other whitespace inside the
+  title is written as stored, U+2028 and the like included. Whether there
+  is a seed still depends on the body alone: a note whose stub row has a
+  title and no body is a fresh note.
+
+  A seeded draft published untouched gives the stored title and body back,
+  so the store sees an identical republish and keeps `updated_at`. For the
+  title this holds for every title `write_note` stores. Such a title is
+  trimmed, not empty and holds no `\r` or `\n`, so the seed writes it
+  unchanged and the split reads the same text back. There is one exception,
+  on the body side, and it is older than the title line: a stored body with
+  whitespace at its ends is seeded as stored and published trimmed.
+  `write_note` stores a trimmed body, so this too concerns only a body
+  stored some other way.
+
+  A title stored some other way can still need the seed's change: one with
+  a line break in it, with whitespace at its ends or with no text. Sources
+  include an outbox from a version 7 or earlier script, whose `title`
+  argument could hold a `\r` on its own, and the `---` fallback, which ends
+  the title at a `\n` only and can fall back to the start of the prompt.
+  Such a title is changed by the first seed, to one that later seeds leave
+  alone.
 
 - **Repair of a waiting note** (remote only): when the start-of-run
   recovery finds a published note with a Pikchr block that does not parse,
@@ -848,7 +882,13 @@ unchanged and work with either script.
   an outbox is collected as it always was.
 
 Both paths reject an empty or multi-line title and an empty body, with the
-same reasons (`outbox note is invalid: …`). The gate is needed because
+same reasons (`outbox note is invalid: …`). They differ in what makes a
+title multi-line. From version 8 it is a `\n` or a `\r`: either one ends a
+draft's title line, so a title read from a draft holds neither, and one
+that does could not be seeded back unchanged. A script from version 10
+never writes such a title. For version 7 or earlier it is a `\n` only,
+which is all those scripts rejected in the argument, so a title of theirs
+with a `\r` on its own is collected as it always was. The gate is needed because
 outboxes of the earlier shape are still written after an update. A running
 `node` process keeps the script it was started from, so a turn that
 outlives its connection, or is taken over, finishes on the script and the
@@ -2126,11 +2166,14 @@ workstation outbox; storing it`, the note fills in on the timeline, the
 Automated coverage: `note_draft::tests` (paths, each bad-draft case and its
 error text, one leading byte order mark dropped before the trim, a symlink
 followed, a FIFO rejected without blocking, an unreadable file,
-`split_title` over every row of the table in _The title line_, CRLF line
-endings and the two title error texts, the seed with the title line above
+`split_title` over every row of the table in _The title line_, CRLF and
+CR-only line endings, U+2028 and its kind kept in the title, and the two
+title error texts, the seed with the title line above
 the stored body and a leading heading and media references kept, the
-heading-safe seed title, a seeded draft published untouched giving the
-stored title and body back, seeding and removal, the prompt path, the
+heading-safe seed title changing line breaks only, every title the split
+returns seeded as written, a seeded draft published untouched giving the
+stored title and body back for titles with tabs, runs of spaces, no-break
+and ideographic spaces and U+2028, seeding and removal, the prompt path, the
 unresolved-home placeholder and the home epilogue), `note_tool::tests`
 (schema with `suggested_next_steps` only, no `title`, no `body` and nothing
 required, the tool texts putting the title in the draft and not in the
@@ -2140,14 +2183,16 @@ each bad draft rejected by path without touching the slot, a draft with no
 title line or only a title line rejected the same way, a stale `title`
 accepted when it agrees with the title line and rejected when it does not,
 and `from_parts` beside `from_parts_as_written` for the two outbox title
-rules),
+rules, a `\r` in the title included),
 `session_runner::tests::note_draft` (a fresh local run removes a stale draft
 and creates none, an amending run seeds it with the title line and the body
 for branch and project notes and with the same text on both transports, a
 body that opens with `# Section` survives seed, untouched republish and
-store twice over with its timestamp unchanged, an edit of the title line or
+store twice over with its timestamp unchanged, and so does a title with
+tabs, runs of spaces, no-break or ideographic spaces or U+2028 in it, an
+edit of the title line or
 of the body changes what is stored, a stored title that is not one line
-seeds a draft that publishes, the
+seeds a draft that publishes and is left alone by the next seed, the
 draft is removed at run end, a remote run start costs the same two commands
 with or without a seed, a failed seed leaves the recovery settled and so
 does a rejected waiting note, only a rejected recovery carries a note to
@@ -2173,7 +2218,8 @@ injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),
 marker that changed between the reads and a marker whose token changed
 between them, with equal, differing, empty and half-empty tokens,
 `outbox_state` keeping a version 8 title as written and normalizing the
-title of an earlier or unversioned outbox, the
+title of an earlier or unversioned outbox, and rejecting a title with a
+`\r` from version 8 while still collecting one from an earlier script, the
 collect script printing the token on both marker lines under a local `sh`,
 a whole rewrite made to land between the script's two file reads never
 collected as one note, two `write_note` calls writing different tokens,
@@ -2200,9 +2246,10 @@ Rust tool, and `write_note_reads_the_same_drafts_on_both_transports`, which
 runs the laptop's handler and the script over the same draft
 files — missing, blank, byte order mark cases, Unicode whitespace, not
 UTF-8, over and at the cap, a directory, a FIFO, a symlink, an unreadable
-file, drafts with a title line, with none and with only a title line, and a
-table of stale `title` calls — and requires the same result text, title and
-published body), `session_runner::tests::detached_recovery` (claim-first
+file, drafts with a title line, with none and with only a title line,
+drafts with CR-only and mixed line endings, a table of stale `title` calls,
+and seeded drafts published untouched — and requires the same result text,
+title and published body), `session_runner::tests::detached_recovery` (claim-first
 sweep: one winner, resume during collection; the poll window and its marker;
 a poll that finds the note claims with the storing marker, then ingests once,
 then completes; two instances that read the row before either claimed settle

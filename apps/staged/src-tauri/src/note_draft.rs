@@ -252,19 +252,27 @@ pub(crate) fn read_draft(path: &Path) -> Result<String, DraftError> {
 /// whitespace are already gone, so its first line is the file's first
 /// non-blank line.
 ///
-/// 1. The first line is the text up to the first `\n`.
+/// 1. The first line is the text up to the first line ending, which is a
+///    `\n`, a `\r\n` or a `\r` on its own, as in CommonMark
+///    ([`split_first_line`]).
 /// 2. It must be one `#` followed by a space or a tab. The title is the rest
 ///    of the line, trimmed, and must not be empty
 ///    ([`DraftError::MissingTitle`] otherwise).
-/// 3. The body is everything after that line, trimmed, and must not be empty
-///    ([`DraftError::TitleOnly`] otherwise).
+/// 3. The body is everything after that line ending, trimmed, and must not
+///    be empty ([`DraftError::TitleOnly`] otherwise).
 ///
 /// Only that one line is consumed. A `##` heading is a section and never a
-/// title, the title text is kept as written (inline markdown and a closing
-/// `#` included), and a later `# Heading` is body text. Putting
-/// `# {title}`, a blank line and a body together and splitting the result
-/// therefore gives the same title and body back, whatever the body opens
-/// with.
+/// title, the title text is kept as written (inline markdown, a closing
+/// `#` and the whitespace inside it included), and a later `# Heading` is
+/// body text. Putting `# {title}`, a blank line and a body together and
+/// splitting the result therefore gives the same title and body back,
+/// whatever the body opens with.
+///
+/// A title never holds a `\r` or a `\n`, because either one ends the line.
+/// Other characters that look like a line break (U+2028, U+2029, U+0085, a
+/// vertical tab, a form feed) do not end a line in markdown: inside the
+/// title they are kept as written, and at its ends they are trimmed with
+/// the other whitespace.
 ///
 /// The local `write_note` handler calls this for every call
 /// (`NoteSubmission::from_draft`): the title is never an argument.
@@ -273,7 +281,7 @@ pub(crate) fn read_draft(path: &Path) -> Result<String, DraftError> {
 /// session; `write_note_reads_the_same_drafts_on_both_transports` in
 /// `remote_staged_mcp::note_outbox` runs both over the same drafts.
 pub(crate) fn split_title(draft: &str) -> Result<(String, String), DraftError> {
-    let (first_line, rest) = draft.split_once('\n').unwrap_or((draft, ""));
+    let (first_line, rest) = split_first_line(draft);
     let title = first_line
         .strip_prefix('#')
         .filter(|after_marker| after_marker.starts_with([' ', '\t']))
@@ -287,21 +295,51 @@ pub(crate) fn split_title(draft: &str) -> Result<(String, String), DraftError> {
     Ok((title.to_string(), body.to_string()))
 }
 
+/// `text` as its first line and what follows that line's ending. A line
+/// ends at a `\n`, a `\r\n` or a `\r` that no `\n` follows, whichever
+/// comes first; the ending belongs to neither part. Text with no line
+/// ending is all first line.
+fn split_first_line(text: &str) -> (&str, &str) {
+    match text.find(['\r', '\n']) {
+        None => (text, ""),
+        Some(end) => {
+            let after = &text[end..];
+            let rest = after.strip_prefix("\r\n").unwrap_or(&after[1..]);
+            (&text[..end], rest)
+        }
+    }
+}
+
 /// The title a note gets when it has none to show. The `---` fallback in
 /// `session_runner` (`resolve_note_title_and_body`) ends on the same text.
 const UNTITLED_NOTE_TITLE: &str = "Untitled Note";
 
-/// `title` as text that fits on a draft's title line: every run of
-/// whitespace, line breaks included, becomes one space, the ends are
-/// trimmed, and a title with nothing left is `Untitled Note`.
+/// `title` as text that fits on a draft's title line. Only what
+/// [`split_title`] could not read back is changed:
 ///
-/// [`split_title`] reads the title back from one line and trims it, so a
-/// title that held a line break or was blank could not be read back at all.
-/// A stored title that is already one trimmed line with single spaces comes
-/// through unchanged, which is what keeps an untouched republish of a seeded
-/// draft a no-op in the store.
+/// - a line break (a run of `\r` and `\n`, with any whitespace that touches
+///   it) becomes one space;
+/// - the ends are trimmed;
+/// - a title with nothing left is `Untitled Note`.
+///
+/// Everything else is kept as stored: tabs, runs of spaces, no-break and
+/// ideographic spaces, and U+2028 and the like, which do not end a line in
+/// markdown.
+///
+/// `split_title` returns a title that is trimmed, not empty and has no `\r`
+/// or `\n`, and none of the three changes applies to such a title. Every
+/// title `write_note` stores therefore comes through unchanged, which is
+/// what keeps an untouched republish of a seeded draft a no-op in the
+/// store. A title that some other path stored with a line break, with
+/// whitespace at its ends or with no text is changed once, to a title that
+/// then comes through unchanged.
 fn heading_safe_title(title: &str) -> String {
-    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = title
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     if title.is_empty() {
         UNTITLED_NOTE_TITLE.to_string()
     } else {
@@ -327,7 +365,10 @@ pub(crate) fn title_heading(title: &str) -> String {
 /// `write_note` takes exactly one line off ([`split_title`]). So a seeded
 /// draft published untouched gives the stored title and body back, and a
 /// body that opens with `# Section` keeps that heading: it is the draft's
-/// third line, never its first.
+/// third line, never its first. That holds for every title `write_note`
+/// stores ([`heading_safe_title`]). The one exception is on the body side
+/// and older than the title line: a stored body with whitespace at its
+/// ends is seeded as stored and published trimmed.
 pub(crate) fn seed_body(stored_title: &str, stored_content: &str) -> Option<String> {
     (!stored_content.trim().is_empty())
         .then(|| format!("{}\n\n{stored_content}", title_heading(stored_title)))
@@ -696,7 +737,14 @@ mod tests {
 
     #[test]
     fn split_title_rejects_a_draft_that_is_only_the_title_line() {
-        for draft in ["# Title", "# Title\n", "# Title\n\n  \n\t\n", "# Title\r\n"] {
+        for draft in [
+            "# Title",
+            "# Title\n",
+            "# Title\n\n  \n\t\n",
+            "# Title\r\n",
+            "# Title\r",
+            "# Title\r\r \r\n\t\r",
+        ] {
             assert_eq!(split_title(draft), Err(DraftError::TitleOnly), "{draft:?}");
         }
     }
@@ -739,6 +787,104 @@ mod tests {
         assert_eq!(split_title("# Title\r\n\r\n"), Err(DraftError::TitleOnly));
     }
 
+    /// A carriage return on its own ends a line in CommonMark, so it ends
+    /// the title line as a line feed does. A draft with CR-only line endings
+    /// is split into its title and body, and a title never holds a `\r`.
+    #[test]
+    fn split_title_ends_the_title_line_at_a_bare_carriage_return() {
+        // (draft, title, body)
+        let cases = [
+            // CR-only line endings throughout: the body keeps its own.
+            ("# Title\rBody\rMore", "Title", "Body\rMore"),
+            (
+                "# Title\r\rBody.\r\r## Section\rMore.",
+                "Title",
+                "Body.\r\r## Section\rMore.",
+            ),
+            // A bare CR after the title and line feeds below it.
+            ("# Title\rBody line\n\nMore", "Title", "Body line\n\nMore"),
+            // Each kind of ending in turn; only the first ends the title.
+            ("# Title\n\rBody", "Title", "Body"),
+            ("# Title\r\n\rBody\r\nMore", "Title", "Body\r\nMore"),
+            ("# Title\r\r\nBody", "Title", "Body"),
+            // The title is trimmed up to the CR, and the body may open with
+            // its own heading.
+            ("#\tTitle \t\r# Section\rText", "Title", "# Section\rText"),
+            // A CR further down is body text.
+            ("# Title\nBody\rMore", "Title", "Body\rMore"),
+        ];
+        for (draft, title, body) in cases {
+            assert_eq!(split_ok(draft), parts(title, body), "{draft:?}");
+        }
+
+        // The same rejections as with line feeds. The title has to be on
+        // the marker's own line.
+        for draft in [
+            "#\rBody.",
+            "# \rTitle\nBody.",
+            "# \t\rTitle\rBody.",
+            "## Title\rBody.",
+            "#Title\rBody.",
+            "Title\r===\rBody.",
+            "Body first.\r# Title\rMore.",
+        ] {
+            assert_eq!(
+                split_title(draft),
+                Err(DraftError::MissingTitle),
+                "{draft:?}"
+            );
+        }
+    }
+
+    /// U+2028 and the other characters that only look like a line break do
+    /// not end a line in markdown. Inside the title they are title text; at
+    /// its ends they are whitespace and trimmed.
+    #[test]
+    fn split_title_keeps_other_line_break_characters_in_the_title() {
+        assert_eq!(
+            split_ok("# One\u{2028}Two\nBody."),
+            parts("One\u{2028}Two", "Body.")
+        );
+        assert_eq!(
+            split_ok("# A\u{2029}B\u{85}C\u{b}D\u{c}E\r\nBody."),
+            parts("A\u{2029}B\u{85}C\u{b}D\u{c}E", "Body.")
+        );
+        assert_eq!(
+            split_ok("# \u{2028}Title\u{85}\nBody."),
+            parts("Title", "Body.")
+        );
+        // With no real line ending the draft is one line: title only.
+        assert_eq!(
+            split_title("# One\u{2028}Two\u{2029}Three"),
+            Err(DraftError::TitleOnly)
+        );
+    }
+
+    /// Whatever title `split_title` returns, the seed writes it back
+    /// unchanged: it is trimmed, not empty and holds no `\r` or `\n`.
+    #[test]
+    fn every_title_split_title_returns_is_seeded_as_written() {
+        for draft in [
+            "# Title\n\nBody.",
+            "#\tTitle \t\r\nBody.",
+            "# Title\rBody line\n\nMore",
+            "# Title\rBody\rMore",
+            "# Two  spaces\tand a tab\nBody.",
+            "# No\u{a0}break\u{3000}wide\u{2003}em\nBody.",
+            "# One\u{2028}Two\u{2029}Three\u{85}Four\u{b}Five\u{c}Six\nBody.",
+            "# \u{feff}Mark inside\nBody.",
+            "# # Title #\nBody.",
+            "# \u{a0}Padded\u{3000}\nBody.",
+        ] {
+            let (title, body) = split_ok(draft);
+            assert!(!title.contains(['\r', '\n']), "{draft:?}");
+            assert_eq!(heading_safe_title(&title), title, "{draft:?}");
+            let seed = seed_body(&title, &body).unwrap();
+            assert_eq!(seed, format!("# {title}\n\n{body}"), "{draft:?}");
+            assert_eq!(split_ok(&seed), (title, body), "{draft:?}");
+        }
+    }
+
     #[test]
     fn seed_body_puts_the_title_line_above_the_stored_body() {
         // A blank stored body is a fresh note: no file, whatever the title.
@@ -772,10 +918,11 @@ mod tests {
         );
     }
 
-    /// A stored title that could not sit on one heading line is made to:
-    /// whitespace runs, line breaks included, collapse to one space, and a
-    /// title with nothing in it becomes `Untitled Note`. Whatever comes out
-    /// is what `split_title` reads back.
+    /// A stored title that could not sit on one heading line is made to: a
+    /// line break and the whitespace touching it become one space, the ends
+    /// are trimmed, and a title with nothing in it becomes `Untitled Note`.
+    /// All other whitespace is kept as stored. Whatever comes out is what
+    /// `split_title` reads back.
     #[test]
     fn the_seed_title_is_made_heading_safe() {
         // (stored title, the title on the seed's first line)
@@ -788,20 +935,44 @@ mod tests {
             // Multi-line titles become one line.
             ("Two\nlines", "Two lines"),
             ("Two\r\nlines", "Two lines"),
+            ("Two\rlines", "Two lines"),
             ("Three\n\n\nblank lines\nlater", "Three blank lines later"),
+            ("Mixed\r\n\r\rbreaks", "Mixed breaks"),
+            // Whitespace that touches a line break goes with it, a blank
+            // line between two breaks included. Whitespace elsewhere in the
+            // title stays.
+            ("Break \t\n\t with  two   runs", "Break with  two   runs"),
+            ("Blank\n \t \nline", "Blank line"),
+            ("Wide\u{a0}\n\u{3000}break", "Wide break"),
+            // Whitespace that is not a line break is kept as stored: tabs,
+            // runs of spaces, no-break and ideographic spaces, and the
+            // characters that are a line break elsewhere but not in
+            // markdown.
+            ("Tab\tand   spaces", "Tab\tand   spaces"),
+            (
+                "No\u{a0}break and\u{3000}wide",
+                "No\u{a0}break and\u{3000}wide",
+            ),
             (
                 "Line separator\u{2028}here\u{85}too",
-                "Line separator here too",
+                "Line separator\u{2028}here\u{85}too",
             ),
-            // Other whitespace runs collapse, and the ends are trimmed.
+            (
+                "Paragraph\u{2029}tab\u{b}feed\u{c}end",
+                "Paragraph\u{2029}tab\u{b}feed\u{c}end",
+            ),
+            // The ends are trimmed, as `split_title` trims the line.
             ("  Padded  ", "Padded"),
-            ("Tab\tand   spaces", "Tab and spaces"),
+            ("\u{2028}Padded\u{a0}", "Padded"),
             ("\nLeading break", "Leading break"),
             ("Trailing break\n", "Trailing break"),
+            ("Trailing return\r", "Trailing return"),
             // Nothing to show.
             ("", "Untitled Note"),
             ("   ", "Untitled Note"),
             ("\n\t\n", "Untitled Note"),
+            ("\r", "Untitled Note"),
+            ("\u{a0}\r\n\u{2028}", "Untitled Note"),
         ];
         for (stored, safe) in cases {
             assert_eq!(heading_safe_title(stored), safe, "{stored:?}");
@@ -850,6 +1021,23 @@ mod tests {
                 "# #12 follow-up\n\nA body that repeats it.",
             ),
             ("# Spaced", "Body"),
+            // Whitespace inside the title is title text and is not
+            // normalized: two spaces, a tab, a no-break space, an
+            // ideographic space, and U+2028 and its kind, which do not end
+            // a line in markdown.
+            ("Two  spaces", "Body"),
+            ("Tab\tand   spaces", "Body"),
+            ("No\u{a0}break", "Body"),
+            ("Ideographic\u{3000}space", "Body"),
+            ("Line\u{2028}separator", "Body"),
+            (
+                "Paragraph\u{2029}next\u{85}tab\u{b}feed\u{c}end",
+                "# Section\n\nBody",
+            ),
+            (
+                "Tab\tand   spaces\u{3000}wide",
+                "Body with\ttabs  and\u{a0}spaces\u{2028}of its own.",
+            ),
         ] {
             let seed = seed_body(title, body).unwrap();
             assert_eq!(seed, format!("# {title}\n\n{body}"));

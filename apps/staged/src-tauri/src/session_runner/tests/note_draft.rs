@@ -305,14 +305,67 @@ fn an_amendment_edits_the_title_line_or_the_body_and_the_store_follows() {
     }
 }
 
+/// A stored title with whitespace of any kind inside it is a title
+/// `write_note` can store, and the seed writes it as stored. Seeded,
+/// published untouched and stored, twice over, the note keeps its title,
+/// its body and its timestamp: the republish renames nothing.
+#[test]
+fn a_title_with_inner_whitespace_survives_seed_republish_and_store() {
+    for stored_title in [
+        "Two  spaces",
+        "Tab\tand   spaces",
+        "No\u{a0}break",
+        "Ideographic\u{3000}space",
+        "Line\u{2028}separator",
+        "Paragraph\u{2029}next\u{85}tab\u{b}feed\u{c}end",
+    ] {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = Session::new_running("write a note", std::path::Path::new("."));
+        store.create_session(&session).unwrap();
+        let project = Project::new("test/note-draft");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "notes", "main");
+        store.create_branch(&branch).unwrap();
+        let note = Note::new(&branch.id, stored_title, "Body.").with_session(&session.id);
+        store.create_note(&note).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let draft = dir.path().join("staged-note-draft.md");
+        let (_, _, stamped) = stored_note_content(&store, &session.id, false);
+        // A write from here on would carry a later timestamp.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        for round in 1..=2 {
+            let what = format!("round {round}, {stored_title:?}");
+            let published = seed_edit_publish_and_store(&store, &session.id, &draft, |seeded| {
+                assert_eq!(seeded, format!("# {stored_title}\n\nBody."), "{what}");
+                // The agent changes nothing.
+                seeded
+            });
+            assert_eq!(
+                published,
+                (stored_title.to_string(), "Body.".to_string()),
+                "{what}"
+            );
+            assert_eq!(
+                stored_note_content(&store, &session.id, false),
+                (stored_title.to_string(), "Body.".to_string(), stamped),
+                "{what}"
+            );
+        }
+    }
+}
+
 /// A stored title that does not fit on one line still seeds a draft
-/// `write_note` accepts: the line breaks become spaces, and an empty title
-/// becomes `Untitled Note`. The publish stores that title.
+/// `write_note` accepts: a line break becomes a space, with the whitespace
+/// touching it, and an empty title becomes `Untitled Note`. Whitespace
+/// elsewhere in the title is kept. The publish stores that title, and the
+/// next seed leaves it alone.
 #[test]
 fn a_stored_title_that_is_not_one_line_seeds_a_draft_that_publishes() {
     // (stored title, the title the seeded draft publishes)
     let cases = [
-        ("Two\nlines  of title", "Two lines of title"),
+        ("Two\nlines  of title", "Two lines  of title"),
+        ("Return\rin \r\n the\ttitle", "Return in the\ttitle"),
         ("", "Untitled Note"),
         ("  \n", "Untitled Note"),
     ];
@@ -346,6 +399,29 @@ fn a_stored_title_that_is_not_one_line_seeds_a_draft_that_publishes() {
         assert_eq!(
             (stored.title.as_str(), stored.content.as_str()),
             (safe_title, "Body."),
+            "{stored_title:?}"
+        );
+
+        // The title the first publish stored is one the seed writes back
+        // unchanged, so a second, untouched run restamps nothing.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let republished = seed_edit_publish_and_store(&store, &session.id, &draft, |seeded| {
+            assert_eq!(
+                seeded,
+                format!("# {safe_title}\n\nBody."),
+                "{stored_title:?}"
+            );
+            seeded
+        });
+        assert_eq!(
+            republished,
+            (safe_title.to_string(), "Body.".to_string()),
+            "{stored_title:?}"
+        );
+        let again = store.get_note_by_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            (again.title, again.content, again.updated_at),
+            (stored.title, stored.content, stored.updated_at),
             "{stored_title:?}"
         );
     }

@@ -250,11 +250,18 @@ is to store it, and the laptop reads this version to tell such a title from
 an earlier script's, which it still normalizes itself; version 9: `title`
 is no longer an argument of `write_note`, the title is always the draft's
 first line, and the schema, the description and the instructions say so.
-A call without `title` writes into the outbox what it wrote in version 8).
+A call without `title` writes into the outbox what it wrote in version 8;
+version 10: the draft's title line ends at the first line ending of any
+kind, a `\r` on its own included, where it ended only at a `\n` before. A
+draft with CR-only line endings is split into its title and body, which
+was rejected as holding only the title line, and a title never holds a
+`\r`. The outbox format is unchanged).
 
-Versions 8 and 9 are the two cases of that rule. Version 8 marks output the
-laptop has to read differently. Version 9 changes the tool's contract and
-leaves the output alone, so no reader on the laptop looks for it.
+Versions 8, 9 and 10 are the two cases of that rule. Version 8 marks output
+the laptop has to read differently. Versions 9 and 10 change the tool's
+contract and leave the output alone, so no reader on the laptop looks for
+them: the laptop rejects a title with a `\r` in it from every script from
+version 8 on, and a version 10 script never writes one.
 
 On the laptop:
 

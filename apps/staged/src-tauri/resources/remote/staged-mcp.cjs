@@ -70,7 +70,13 @@ const readline = require("readline");
 // Version 9: `title` is no longer an argument of `write_note`. The title is
 // always the draft's first line, and the tool's schema, description and
 // instructions say so. What a call writes into the outbox is unchanged.
-const SERVER_VERSION = 9;
+//
+// Version 10: the draft's title line ends at the first line ending of any
+// kind, a "\r" on its own included, where it ended only at a "\n" before. A
+// draft with CR-only line endings is split into title and body (it was
+// rejected as holding only the title line), and a title never holds a "\r".
+// The outbox format is unchanged.
+const SERVER_VERSION = 10;
 const SERVER_NAME = "staged";
 
 // MCP protocol revisions this server implements (newest first). `initialize`
@@ -394,23 +400,28 @@ function readDraft(context) {
  * The same rule as `note_draft::split_title`, which the laptop's handler
  * applies to every call:
  *
- *   1. The first line is the text up to the first "\n".
+ *   1. The first line is the text up to the first line ending, which is a
+ *      "\n", a "\r\n" or a "\r" on its own, as in CommonMark.
  *   2. It must be one `#` followed by a space or a tab. The title is the rest
  *      of the line, trimmed as Rust trims, and must not be empty.
- *   3. The body is everything after that line, trimmed, and must not be
- *      empty.
+ *   3. The body is everything after that line ending, trimmed, and must not
+ *      be empty.
  *
  * Only that line is consumed: `##` is a section and never a title, the title
- * text is kept as written (inline markdown and a `#` of its own included),
- * and a later `# Heading` is body text.
+ * text is kept as written (inline markdown, a `#` of its own and the
+ * whitespace inside it included), and a later `# Heading` is body text. A
+ * title never holds a "\r" or a "\n". U+2028 and the like do not end a line
+ * in markdown and are title text.
  * `write_note_reads_the_same_drafts_on_both_transports` runs both
  * implementations over the same drafts.
  */
 function splitDraftTitle(context, draft) {
   const filePath = draftPath(context);
-  const newline = draft.indexOf("\n");
-  const firstLine = newline === -1 ? draft : draft.slice(0, newline);
-  const rest = newline === -1 ? "" : draft.slice(newline + 1);
+  const lineEnd = draft.search(/[\r\n]/);
+  const firstLine = lineEnd === -1 ? draft : draft.slice(0, lineEnd);
+  // A "\r\n" is one line ending, not two.
+  const lineEndLength = draft.startsWith("\r\n", lineEnd) ? 2 : 1;
+  const rest = lineEnd === -1 ? "" : draft.slice(lineEnd + lineEndLength);
   const afterMarker = firstLine.charCodeAt(1);
   const title =
     firstLine.charCodeAt(0) === 0x23 && (afterMarker === 0x20 || afterMarker === 0x09)

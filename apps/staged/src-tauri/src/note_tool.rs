@@ -276,6 +276,10 @@ impl NoteSubmission {
     /// That strip is for a title that was a tool argument. A title that was
     /// parsed from the draft's heading must not pass through here: see
     /// [`Self::from_parts_as_written`].
+    ///
+    /// A title is a single line here when it holds no `\n`. A `\r` on its
+    /// own is let through, as the scripts that wrote these outboxes let it
+    /// through, so what they wrote is collected as it always was.
     pub(crate) fn from_parts(
         title: &str,
         body: &str,
@@ -284,7 +288,7 @@ impl NoteSubmission {
     ) -> Result<Self, String> {
         let title = title.trim();
         let title = title.strip_prefix('#').unwrap_or(title);
-        Self::from_parts_as_written(title, body, suggested_next_steps, source)
+        Self::from_checked_parts(title, &['\n'], body, suggested_next_steps, source)
     }
 
     /// [`Self::from_parts`] for a title that is already the one to store:
@@ -295,8 +299,27 @@ impl NoteSubmission {
     /// the draft's heading text, which [`Self::from_draft`] keeps as written
     /// for a local session, so `# #12 follow-up` is titled `#12 follow-up`
     /// on both transports. The rejection reasons are `from_parts`' own.
+    ///
+    /// A title is a single line here when it holds neither a `\n` nor a
+    /// `\r`: either one ends the draft's title line
+    /// ([`crate::note_draft::split_title`]), so a title read from a draft
+    /// holds neither, and one that does could not be seeded back into a
+    /// draft unchanged.
     pub(crate) fn from_parts_as_written(
         title: &str,
+        body: &str,
+        suggested_next_steps: Option<SuggestedNextSteps>,
+        source: NoteSubmissionSource,
+    ) -> Result<Self, String> {
+        Self::from_checked_parts(title, &['\r', '\n'], body, suggested_next_steps, source)
+    }
+
+    /// The checks [`Self::from_parts`] and [`Self::from_parts_as_written`]
+    /// share. `line_endings` are the characters a one-line title must not
+    /// hold.
+    fn from_checked_parts(
+        title: &str,
+        line_endings: &[char],
         body: &str,
         suggested_next_steps: Option<SuggestedNextSteps>,
         source: NoteSubmissionSource,
@@ -305,7 +328,7 @@ impl NoteSubmission {
         if title.is_empty() {
             return Err("`title` must not be empty".to_string());
         }
-        if title.contains('\n') {
+        if title.contains(line_endings) {
             return Err("`title` must be a single line".to_string());
         }
         let body = body.trim();
@@ -740,8 +763,16 @@ you passed. Edit that line if the title should change, then call write_note agai
         assert_eq!(reject("", "body"), "`title` must not be empty");
         assert_eq!(reject("# ", "body"), "`title` must not be empty");
         assert_eq!(reject("a\nb", "body"), "`title` must be a single line");
+        assert_eq!(reject("a\r\nb", "body"), "`title` must be a single line");
         assert_eq!(reject("Title", "  \n"), "the note body must not be empty");
         assert_eq!(reject("", ""), "`title` must not be empty");
+
+        // A carriage return on its own is let through, as it was by the
+        // scripts whose outboxes come this way.
+        let bare_return =
+            NoteSubmission::from_parts("# a\rb", "Body", None, NoteSubmissionSource::Outbox)
+                .unwrap();
+        assert_eq!(bare_return.title, "a\rb");
     }
 
     /// `from_parts_as_written` is `from_parts` without the `#` strip: the
@@ -750,6 +781,9 @@ you passed. Edit that line if the title should change, then call write_note agai
     /// `from_draft` builds from the draft itself. That last equality is what
     /// gives a note the same title whether the laptop split the draft (a
     /// local session) or the script did and the outbox carried the parts.
+    /// The one title the two treat differently is one with a `\r` on its
+    /// own: a title read from a draft cannot hold it, so the as-written
+    /// path rejects it as it rejects a `\n`.
     #[test]
     fn from_parts_as_written_keeps_a_leading_hash_and_matches_from_draft() {
         let as_written = |title: &str, body: &str| {
@@ -787,10 +821,29 @@ you passed. Edit that line if the title should change, then call write_note agai
             as_written("", "body").unwrap_err(),
             "`title` must not be empty"
         );
+        for title in ["a\nb", "a\rb", "a\r\nb", "Title\rBody line", "a\n\rb"] {
+            assert_eq!(
+                as_written(title, "body").unwrap_err(),
+                "`title` must be a single line",
+                "{title:?}"
+            );
+        }
+        // A line ending at the ends is trimmed off and is no second line.
+        assert_eq!(title_of("Title\r"), "Title");
+        assert_eq!(title_of("\r\nTitle\r\n"), "Title");
         assert_eq!(
-            as_written("a\nb", "body").unwrap_err(),
-            "`title` must be a single line"
+            as_written("\r", "body").unwrap_err(),
+            "`title` must not be empty"
         );
+        // Other whitespace, and what is a line break elsewhere but not in
+        // markdown, is title text and is kept.
+        for title in [
+            "Tab\tand   spaces",
+            "No\u{a0}break and\u{3000}wide",
+            "One\u{2028}Two\u{2029}Three\u{85}Four\u{b}Five\u{c}Six",
+        ] {
+            assert_eq!(title_of(title), title, "{title:?}");
+        }
         assert_eq!(
             as_written("Title", " \n").unwrap_err(),
             "the note body must not be empty"
@@ -804,6 +857,11 @@ you passed. Edit that line if the title should change, then call write_note agai
             "# # Spaced\n\n# Section\n\nText",
             "# Use `foo` for [bar](x) #\nBody",
             "#\t Tabbed \t\r\n\r\nBody",
+            // A carriage return on its own ends the title line, so the
+            // title the split returns passes the as-written check.
+            "# Title\rBody\rMore",
+            "# Title\rBody line\n\nMore",
+            "# Tab\tand   spaces\u{3000}wide\u{2028}here\rBody",
         ] {
             let (title, body) = crate::note_draft::split_title(draft).unwrap();
             assert_eq!(

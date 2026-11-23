@@ -533,6 +533,13 @@ impl<'a> MarkerLine<'a> {
 /// and `#12 follow-up` for a local one. So the collector takes such a title
 /// as written ([`NoteSubmission::from_parts_as_written`]).
 ///
+/// The two paths also differ in what they call a one-line title. A title
+/// read from a draft holds neither a `\n` nor a `\r`, since either ends the
+/// draft's title line, so the as-written path rejects both. The earlier
+/// path rejects a `\n` only, which is all the scripts before version 8
+/// rejected in the argument, so a title of theirs with a `\r` on its own is
+/// still collected.
+///
 /// An outbox with an earlier version, or none, is collected as it always
 /// was: a turn that outlives its connection keeps the script it started
 /// with, so such outboxes are still written after an update.
@@ -1444,13 +1451,54 @@ mod tests {
                     "{version:?} {written:?}"
                 );
             }
-            for version in [Some(8), Some(9)] {
+            for version in [Some(8), Some(9), Some(10)] {
                 assert_eq!(
                     title_of(version, written),
                     from_8,
                     "{version:?} {written:?}"
                 );
             }
+        }
+
+        // Whitespace inside a title is title text at every version: nothing
+        // is collapsed, and U+2028 is not a line ending.
+        for written in [
+            "Tab\tand   spaces",
+            "No\u{a0}break and\u{3000}wide",
+            "Line\u{2028}separator\u{85}here",
+        ] {
+            for version in [None, Some(7), Some(8), Some(10)] {
+                assert_eq!(
+                    title_of(version, written),
+                    written,
+                    "{version:?} {written:?}"
+                );
+            }
+        }
+
+        // A carriage return on its own. An earlier script let it through
+        // in the `title` argument, and its outbox is collected as it always
+        // was. From version 8 the title is a draft's title line, which a
+        // carriage return ends, so one inside the title is a second line.
+        for written in ["Title\rBody line", "a\r\rb"] {
+            for version in [None, Some(1), Some(7)] {
+                assert_eq!(
+                    title_of(version, written),
+                    written,
+                    "{version:?} {written:?}"
+                );
+            }
+            for version in [8, 9, 10] {
+                assert_eq!(
+                    outbox_state(snapshot(Some(version), written, "Body"), Some("t1")).unwrap_err(),
+                    "outbox note is invalid: `title` must be a single line",
+                    "{version} {written:?}"
+                );
+            }
+        }
+        // At the ends it is whitespace and trimmed, at every version.
+        for version in [None, Some(7), Some(8), Some(10)] {
+            assert_eq!(title_of(version, "Title\r"), "Title", "{version:?}");
         }
 
         // The body and the steps are read the same way at every version.
@@ -1485,6 +1533,10 @@ mod tests {
         );
         assert_eq!(
             rejected("a\nb", "Body"),
+            "outbox note is invalid: `title` must be a single line"
+        );
+        assert_eq!(
+            rejected("a\r\nb", "Body"),
             "outbox note is invalid: `title` must be a single line"
         );
         assert_eq!(
@@ -2332,7 +2384,7 @@ mod tests {
                 .unwrap();
         assert_eq!(meta["title"], "Plan");
         assert_eq!(meta["turn"], "turn-1");
-        assert_eq!(meta["helperVersion"], 9);
+        assert_eq!(meta["helperVersion"], 10);
         assert_eq!(
             meta["suggestedNextSteps"]["suggestedNextCommitStep"],
             "Fix it"
@@ -2481,7 +2533,10 @@ mod tests {
             ]
         );
         let version = meta["helperVersion"].as_u64().expect("a version");
-        assert_eq!(version, 9, "the version of the script that reads the title");
+        assert_eq!(
+            version, 10,
+            "the version of the script that reads the title"
+        );
         assert!(
             version >= u64::from(TITLE_AS_WRITTEN_SERVER_VERSION),
             "the collector's as-written rule covers this script"
@@ -2938,6 +2993,10 @@ without `title`."
             // The laptop strips one `#` from an earlier script's title.
             ("# Plan", "Body", "Plan"),
             ("#12 follow-up", "## Section\n\nText", "12 follow-up"),
+            // A carriage return on its own was never rejected in the
+            // `title` argument, and whitespace inside it was never touched.
+            ("Title\rsecond line", "Body", "Title\rsecond line"),
+            ("Tab\tand   spaces", "Body", "Tab\tand   spaces"),
         ];
         for (title, body, stored) in cases {
             // Versions before 8, and the first outboxes, which named none.
@@ -2959,11 +3018,19 @@ without `title`."
 
         // The same files stamped by a version 8 script, or by this one,
         // keep the title.
-        for version in [8, 9] {
+        for version in [8, 9, 10] {
             write_outbox("#12 follow-up", "Body", Some(version));
             assert_eq!(
                 collect(&exec, "sess-1", Some("turn-1")),
                 collected("#12 follow-up", "Body"),
+                "version {version}"
+            );
+            // A title that could not have been a draft's title line is not
+            // stored.
+            write_outbox("Title\rsecond line", "Body", Some(version));
+            assert_eq!(
+                collect(&exec, "sess-1", Some("turn-1")),
+                Err("outbox note is invalid: `title` must be a single line".to_string()),
                 "version {version}"
             );
         }
@@ -4079,6 +4146,60 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
                 Ok(("Marked", "Body\r\nmore")),
             ),
             (
+                // A carriage return on its own ends a line in markdown, so
+                // it ends the title line. Both transports used to read a
+                // CR-only draft as one long title line with no body.
+                "CR-only line endings",
+                Some("# Marked\r\rBody\rmore\r"),
+                Ok(("Marked", "Body\rmore")),
+            ),
+            (
+                "CR-only line endings and the body right under the heading",
+                Some("# Title\rBody\rMore"),
+                Ok(("Title", "Body\rMore")),
+            ),
+            (
+                // The title used to be `Title\rBody line`.
+                "a bare CR after the title and line feeds below it",
+                Some("# Title\rBody line\n\nMore"),
+                Ok(("Title", "Body line\n\nMore")),
+            ),
+            (
+                "a line feed and then a bare CR",
+                Some("# Title\n\rBody"),
+                Ok(("Title", "Body")),
+            ),
+            (
+                "a CRLF and then a bare CR",
+                Some("# Title\r\n\rBody\r\nmore"),
+                Ok(("Title", "Body\r\nmore")),
+            ),
+            (
+                "a bare CR and then a CRLF",
+                Some("# Title\r\r\nBody"),
+                Ok(("Title", "Body")),
+            ),
+            (
+                "a tab, a padded title and a bare CR above the body's own heading",
+                Some("#\t Tabbed \t\r# Section\rText"),
+                Ok(("Tabbed", "# Section\rText")),
+            ),
+            (
+                // U+2028, U+2029, U+0085, a vertical tab and a form feed
+                // are not line endings in markdown.
+                "characters that only look like a line break stay in the title",
+                Some("# One\u{2028}Two\u{2029}Three\u{85}Four\u{b}Five\u{c}Six\nBody"),
+                Ok((
+                    "One\u{2028}Two\u{2029}Three\u{85}Four\u{b}Five\u{c}Six",
+                    "Body",
+                )),
+            ),
+            (
+                "whitespace inside the title is kept as written",
+                Some("# Tab\tand   spaces\u{3000}wide\u{a0}here\nBody"),
+                Ok(("Tab\tand   spaces\u{3000}wide\u{a0}here", "Body")),
+            ),
+            (
                 "only the first line is consumed",
                 Some("# Title\n\n# Section\n\nText"),
                 Ok(("Title", "# Section\n\nText")),
@@ -4205,6 +4326,39 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
                 "a heading over blank lines",
                 Some("\n# Title\r\n\n  \n"),
                 Err(DraftError::TitleOnly),
+            ),
+            (
+                "a heading over blank lines that end in a bare CR",
+                Some("# Title\r\r \r\t\r"),
+                Err(DraftError::TitleOnly),
+            ),
+            (
+                // No line ending at all: the draft is one line.
+                "a heading with a line separator and nothing under it",
+                Some("# One\u{2028}Two\u{2029}Three"),
+                Err(DraftError::TitleOnly),
+            ),
+            (
+                "a bare hash before a bare CR",
+                Some("#\rBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                // The title has to be on the marker's own line. It used to
+                // be read from the next one.
+                "a hash, a bare CR and the title on the next line",
+                Some("# \rTitle\nBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a level-2 heading with CR-only line endings",
+                Some("## Section\rBody"),
+                Err(DraftError::MissingTitle),
+            ),
+            (
+                "a setext heading with CR-only line endings",
+                Some("Title\r=====\r\rBody"),
+                Err(DraftError::MissingTitle),
             ),
         ];
         for (what, text, expected) in cases {
@@ -4448,6 +4602,46 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
                 Stale::Differs("Plan"),
             ),
             (
+                // A bare CR ends the title line, so the title is `Title`.
+                "a bare CR after the title, and the title alone",
+                Some("# Title\rBody line\n\nMore"),
+                json("Title"),
+                Stale::Agrees("Title", "Body line\n\nMore"),
+            ),
+            (
+                "a bare CR after the title, and everything up to the line feed",
+                Some("# Title\rBody line\n\nMore"),
+                json("Title\rBody line"),
+                Stale::Differs("Title"),
+            ),
+            (
+                "CR-only line endings, and the heading line",
+                Some("# Title\rBody\rMore"),
+                json("# Title\r"),
+                Stale::Agrees("Title", "Body\rMore"),
+            ),
+            (
+                "a title with a tab and a run of spaces, as written",
+                Some("# Tab\tand   spaces\nBody"),
+                json("Tab\tand   spaces"),
+                Stale::Agrees("Tab\tand   spaces", "Body"),
+            ),
+            (
+                "a title with a tab and a run of spaces, with single spaces",
+                Some("# Tab\tand   spaces\nBody"),
+                json("Tab and spaces"),
+                Stale::Differs("Tab\tand   spaces"),
+            ),
+            (
+                // The argument itself holds no U+2028: the script reads its
+                // requests with Node's `readline`, which ends a line at a
+                // raw U+2028, so such a request never reaches the tool.
+                "a title with a line separator, with a space in its place",
+                Some("# One\u{2028}Two\nBody"),
+                json("One Two"),
+                Stale::Differs("One\u{2028}Two"),
+            ),
+            (
                 "quotes and non-ASCII text",
                 Some("# Fix \"quoted\" titles: résumé → 日本語\n\nBody"),
                 json("Fix \"quoted\" titles: résumé → 日本語"),
@@ -4579,6 +4773,48 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
                     assert_eq!((&laptop.title, &laptop.body), (&None, &None), "{what}");
                 }
             }
+        }
+
+        // A seeded draft published untouched gives the stored title and
+        // body back on both transports, whatever whitespace the title
+        // holds: the seed writes such a title as stored and neither split
+        // normalizes it. A second seed, from what was published, is the
+        // same file, so an untouched republish changes nothing.
+        for (title, body) in [
+            ("Plan the title move", "## Summary\n\nText."),
+            ("Two  spaces", "Body"),
+            ("Tab\tand   spaces", "Body"),
+            ("No\u{a0}break", "Body"),
+            ("Ideographic\u{3000}space", "Body"),
+            ("Line\u{2028}separator", "Body"),
+            (
+                "Paragraph\u{2029}next\u{85}tab\u{b}feed\u{c}end",
+                "# Section\n\nBody",
+            ),
+            (
+                "#12 follow-up",
+                "# #12 follow-up\n\nA body that repeats it.",
+            ),
+            ("\u{feff}Marked\u{feff}", "Body with\ttabs  and\rreturns."),
+        ] {
+            let what = format!("the seed of {title:?}");
+            let seed = crate::note_draft::seed_body(title, body).unwrap();
+            assert_eq!(seed, format!("# {title}\n\n{body}"), "{what}");
+            empty_session_dir(&outbox);
+            std::fs::write(&draft, &seed).unwrap();
+            let (laptop, script) =
+                write_note_on_both_transports(home.path(), &node, &serde_json::json!({}), &what);
+            assert_eq!(script, laptop, "{what}");
+            assert_eq!(laptop.title.as_deref(), Some(title), "{what}");
+            assert_eq!(laptop.body.as_deref(), Some(body), "{what}");
+            assert_eq!(
+                crate::note_draft::seed_body(
+                    script.title.as_deref().unwrap(),
+                    script.body.as_deref().unwrap()
+                ),
+                Some(seed),
+                "{what}"
+            );
         }
 
         // A draft exactly at the cap is published whole by both: the cap

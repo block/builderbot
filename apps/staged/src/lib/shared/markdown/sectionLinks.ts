@@ -19,7 +19,7 @@
  * any other and matches no heading, since a slug never holds a `:`.
  */
 
-import { createHeadingSlugger } from './headingSlug';
+import { createHeadingSlugger, lowercase } from './headingSlug';
 
 const HEADINGS = 'h1, h2, h3, h4, h5, h6';
 
@@ -71,11 +71,12 @@ export function headingSlugText(node: Node): string {
  *
  * Every heading is slugged in document order with one slugger, so repeated
  * heading text resolves as on GitHub: the first is `notes`, the next
- * `notes-1`. Slugs are lowercase, so the fragment is matched lowercased and
- * `#Ordered-Steps` finds the same heading as `#ordered-steps`.
+ * `notes-1`. Slugs are lowercase, so the fragment is matched lowercased, the
+ * way a slug is, and `#Ordered-Steps` finds the same heading as
+ * `#ordered-steps`.
  */
 export function findSectionHeading(content: Element, fragment: string): HTMLElement | null {
-  const wanted = fragment.toLowerCase();
+  const wanted = lowercase(fragment);
   if (!wanted) return null;
   const slug = createHeadingSlugger();
   for (const heading of content.querySelectorAll<HTMLElement>(HEADINGS)) {
@@ -164,6 +165,28 @@ const FOLLOW_LIMIT_MS = 5000;
 const SHIFT_PX = 1;
 /** The reader scrolling, clicking or typing in the scroll box: the position is theirs again. */
 const TAKEOVER_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+/** A move of the scroll position in one frame that is a scroll, not rounding. */
+const STRAY_PX = 2;
+/** How long a smooth scroll is left to get going before it is aimed again. */
+const REAIM_GAP_MS = 100;
+/**
+ * The frames after an aim in which the scroll position can still be going
+ * the old way: a smooth scroll that replaces one in flight takes effect a
+ * frame late (seen in Chromium and WebKit), so the first frame shows the old
+ * one carrying on. Two, to be clear of it.
+ */
+const AIM_LAG_FRAMES = 2;
+
+/**
+ * How much further from `to` the scroll position is at `top` than it was at
+ * `from`, in px; negative when it has come nearer. Measured to the nearest
+ * the box can get to `to`: a target near the end of the note rests short of
+ * the top edge, and the end itself moves when the content's height does.
+ */
+function movedAway(from: number, top: number, to: number, scroller: HTMLElement): number {
+  const reach = Math.min(to, scroller.scrollHeight - scroller.clientHeight);
+  return Math.abs(top - reach) - Math.abs(from - reach);
+}
 
 /** The scroll boxes that are following a target, each with the way to stop. */
 const following = new WeakMap<HTMLElement, () => void>();
@@ -181,10 +204,24 @@ const following = new WeakMap<HTMLElement, () => void>();
  * engine does it at all.
  *
  * So the resting position is taken again on each frame and, when it has
- * moved, the scroll is aimed at the new one. This ends when the target and
- * the scroll have held still for `SETTLED_MS`, when the reader takes over,
- * when another target is followed in the same box, when the target leaves
- * the document, or after `FOLLOW_LIMIT_MS`.
+ * moved, the scroll is aimed at the new one. A smooth scroll starts slowly,
+ * and one aimed again on every frame never gets going, so a smooth scroll is
+ * aimed again no sooner than `REAIM_GAP_MS` after the last time: a target
+ * that keeps moving is caught up with at the first frame after the gap.
+ *
+ * This ends when the target and the scroll have held still for
+ * `SETTLED_MS`, when the reader takes over, when another target is followed
+ * in the same box, when the target leaves the document, or after
+ * `FOLLOW_LIMIT_MS`.
+ *
+ * The reader has taken over when they scroll, click or type in the box
+ * (`TAKEOVER_EVENTS`), and when the box is scrolled by anything else, such
+ * as the note's find bringing a match into view. That shows as the scroll
+ * position moving away from where this loop sent it. The loop's own scroll
+ * only ever nears its aim once it is under way (`AIM_LAG_FRAMES`), and the
+ * engine holding the target in place as content above it grows (scroll
+ * anchoring) moves the position away from the aim but towards where the
+ * target now rests, so a move away from both is someone else's.
  */
 function followTarget(
   target: HTMLElement,
@@ -198,6 +235,8 @@ function followTarget(
 
   const started = performance.now();
   let stillSince = started;
+  let aimedAt = started;
+  let lag = AIM_LAG_FRAMES;
   let lastTop = scroller.scrollTop;
   let frame = 0;
 
@@ -214,9 +253,22 @@ function followTarget(
     }
     const top = scroller.scrollTop;
     const resting = restingScrollTop(target, scroller, margin);
+    if (lag > 0) {
+      lag -= 1;
+    } else if (
+      movedAway(lastTop, top, aim, scroller) > STRAY_PX &&
+      movedAway(lastTop, top, resting, scroller) > STRAY_PX
+    ) {
+      stop();
+      return;
+    }
     if (Math.abs(resting - aim) > SHIFT_PX) {
-      aim = resting;
-      scroller.scrollTo({ top: aim, behavior });
+      if (behavior !== 'smooth' || now - aimedAt >= REAIM_GAP_MS) {
+        aim = resting;
+        aimedAt = now;
+        lag = AIM_LAG_FRAMES;
+        scroller.scrollTo({ top: aim, behavior });
+      }
       stillSince = now;
     } else if (top !== lastTop) {
       stillSince = now;

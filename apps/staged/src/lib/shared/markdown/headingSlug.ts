@@ -27,9 +27,10 @@ const DROPPED = /[^\p{Alphabetic}\p{M}\p{Nd}\p{Pc}\p{Join_Control}\- ]/gu;
 /**
  * Lowercase as GitHub does, one character at a time. `toLowerCase` alone
  * writes a capital sigma that ends a word as `ς`; GitHub writes `σ` wherever
- * it stands.
+ * it stands. A fragment is matched to a slug whatever its case, so it is
+ * lowercased with this too.
  */
-function lowercase(text: string): string {
+export function lowercase(text: string): string {
   return text.replace(/Σ/g, 'σ').toLowerCase();
 }
 

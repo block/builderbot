@@ -25,11 +25,15 @@ import {
 
 /** Where the scroll box's top edge sits in the viewport. */
 const PORT_TOP = 100;
+/** The height of the scroll box. */
+const PORT_HEIGHT = 500;
 
 interface Note {
   scroller: HTMLElement;
   content: HTMLElement;
   scrollTo: Mock<(options: ScrollToOptions) => void>;
+  /** Set how far the box can be scrolled: the `scrollTop` at the end of the note. */
+  endsAt(scrollTop: number): void;
   /** What `followSectionLink` returned for each click, and whether it prevented the default. */
   clicks: { handled: boolean; defaultPrevented: boolean }[];
   link(href: string): HTMLAnchorElement;
@@ -43,7 +47,8 @@ function at(el: Element, top: number) {
 /**
  * A note as a viewer mounts it: a scroll box around the element the markdown
  * is rendered into, with a delegated click handler on the box. Headings are
- * laid out 400px apart, the first at the top of the box.
+ * laid out 400px apart, the first at the top of the box, in a note long
+ * enough that no scroll here comes to its end unless `endsAt` shortens it.
  */
 function mountNote(markdown: string, html = renderMarkdown(markdown)): Note {
   const scroller = document.createElement('div');
@@ -54,6 +59,13 @@ function mountNote(markdown: string, html = renderMarkdown(markdown)): Note {
   document.body.append(scroller);
 
   at(scroller, PORT_TOP);
+  const endsAt = (scrollTop: number) =>
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      value: scrollTop + PORT_HEIGHT,
+    });
+  Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: PORT_HEIGHT });
+  endsAt(100_000);
   content
     .querySelectorAll('h1, h2, h3, h4, h5, h6')
     .forEach((heading, i) => at(heading, PORT_TOP + i * 400));
@@ -73,6 +85,7 @@ function mountNote(markdown: string, html = renderMarkdown(markdown)): Note {
     scroller,
     content,
     scrollTo,
+    endsAt,
     clicks,
     link(href) {
       const link = [...content.querySelectorAll('a')].find((a) => a.getAttribute('href') === href);
@@ -213,6 +226,14 @@ describe('followSectionLink', () => {
   it('matches the fragment whatever its case', () => {
     const note = mountNote('[steps](#Ordered-Steps)\n\n## Ordered steps');
     expect(followed(note, '#Ordered-Steps')).toBe(note.heading('Ordered steps'));
+  });
+
+  it('lowercases the fragment as a slug is: a capital sigma that ends a word is σ', () => {
+    const note = mountNote('[plan](#plan) [road](#ΟΔΟΣ)\n\n# Plan\n\n## ΟΔΟΣ');
+    const href = note.content.querySelectorAll('a')[1].getAttribute('href')!;
+    expect(decodeURIComponent(href)).toBe('#ΟΔΟΣ');
+
+    expect(followed(note, href)).toBe(note.heading('ΟΔΟΣ'));
   });
 
   it('numbers repeated headings as GitHub does, the title heading included', () => {
@@ -692,9 +713,9 @@ describe('a target that moves after the scroll was aimed', () => {
     note.link('#ordered-steps').click();
     expect(note.scrollTo.mock.calls).toEqual([[{ top: 400, behavior: SMOOTH }]]);
 
-    // A frame into the scroll: nothing else has moved.
+    // Part-way through the scroll: nothing else has moved.
     layout(note, target, 400, 150);
-    frame();
+    vi.advanceTimersByTime(200);
     expect(note.scrollTo).toHaveBeenCalledTimes(1);
 
     // An image above the heading loads and takes up 300px.
@@ -733,7 +754,7 @@ describe('a target that moves after the scroll was aimed', () => {
     const target = note.heading('Ordered steps');
     note.link('#ordered-steps').click();
     layout(note, target, 400, 400);
-    frame();
+    vi.advanceTimersByTime(300);
 
     // Scroll anchoring: the content grew and the box was scrolled with it.
     layout(note, target, 400, 700, 300);
@@ -752,16 +773,166 @@ describe('a target that moves after the scroll was aimed', () => {
       const target = note.heading('Ordered steps');
       note.link('#ordered-steps').click();
       layout(note, target, 400, 150);
-      frame();
+      vi.advanceTimersByTime(200);
 
+      // The event alone: the scroll position has not moved when the target does.
       note.content.querySelector('p')!.dispatchEvent(new Event(type, { bubbles: true }));
-      layout(note, target, 400, 100, 300);
-      frame();
-      frame();
+      layout(note, target, 400, 150, 300);
+      vi.advanceTimersByTime(200);
 
       expect(note.scrollTo).toHaveBeenCalledTimes(1);
     }
   );
+
+  it('leaves the position alone after a scroll that raised no event in the note', () => {
+    const note = mountNote(NOTE);
+    const target = note.heading('Ordered steps');
+    note.link('#ordered-steps').click();
+    layout(note, target, 400, 400);
+    vi.advanceTimersByTime(300);
+
+    // The note's find glides a match into view: the box sees no input for it.
+    layout(note, target, 400, 330);
+    frame();
+    expect(vi.getTimerCount()).toBe(0);
+    layout(note, target, 400, 150);
+    frame();
+
+    // Then an image between the match and the heading loads.
+    layout(note, target, 400, 150, 300);
+    vi.advanceTimersByTime(300);
+
+    expect(note.scrollTo).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the position alone when such a scroll takes over part-way through the glide', () => {
+    const note = mountNote(NOTE);
+    const target = note.heading('Ordered steps');
+    note.link('#ordered-steps').click();
+    layout(note, target, 400, 150);
+    vi.advanceTimersByTime(200);
+
+    layout(note, target, 400, 90);
+    frame();
+    layout(note, target, 400, 90, 300);
+    vi.advanceTimersByTime(300);
+
+    expect(note.scrollTo).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not take the scroll stopping at the end of the note for the reader', () => {
+    const note = mountNote(NOTE);
+    const target = note.heading('Ordered steps');
+    // The heading lies 400px down a note that scrolls no further than 250.
+    note.endsAt(250);
+    note.link('#ordered-steps').click();
+    layout(note, target, 400, 250);
+    vi.advanceTimersByTime(300);
+
+    // Content below the heading goes, and the engine pulls the scroll back with the end.
+    note.endsAt(200);
+    layout(note, target, 400, 200);
+    frame();
+
+    // Still followed: content above the heading grows.
+    note.endsAt(500);
+    layout(note, target, 400, 200, 300);
+    frame();
+
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 700, behavior: SMOOTH }]);
+  });
+
+  it('lets a glide get going before aiming it again, however often the target moves', () => {
+    const note = mountNote(NOTE);
+    const target = note.heading('Ordered steps');
+    note.link('#ordered-steps').click();
+
+    // Half a second in which every frame finds the target 10px further down.
+    for (let i = 1; i <= 30; i++) {
+      layout(note, target, 400, i * 5, i * 10);
+      frame();
+    }
+    // Not an aim a frame, which would be 31: one for each tenth of a second.
+    expect(note.scrollTo.mock.calls.length).toBeGreaterThan(3);
+    expect(note.scrollTo.mock.calls.length).toBeLessThan(8);
+
+    // The target stops moving, and the next aim is where it stopped.
+    vi.advanceTimersByTime(150);
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 700, behavior: SMOOTH }]);
+  });
+
+  it('does not take the engine keeping the target in place between two aims for the reader', () => {
+    const note = mountNote(NOTE);
+    const target = note.heading('Ordered steps');
+    note.link('#ordered-steps').click();
+    layout(note, target, 400, 400);
+    vi.advanceTimersByTime(300);
+
+    // Content above grows frame after frame, and the engine scrolls the box with it.
+    layout(note, target, 400, 450, 50);
+    frame();
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 450, behavior: SMOOTH }]);
+    for (let grown = 100; grown <= 300; grown += 50) {
+      layout(note, target, 400, 400 + grown, grown);
+      frame();
+    }
+    expect(note.scrollTo).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(150);
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 700, behavior: SMOOTH }]);
+    expect(note.scrollTo).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not take the glide it replaced, carrying on for a frame, for the reader', () => {
+    const note = mountNote(NOTE);
+    const plan = note.heading('Plan');
+    note.link('#ordered-steps').click();
+    layout(note, note.heading('Ordered steps'), 400, 150);
+    vi.advanceTimersByTime(200);
+
+    // Back up to the first heading, while the glide down is still running.
+    layout(note, plan, 0, 150);
+    note.link('#plan').click();
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 0, behavior: SMOOTH }]);
+    // The engine turns a frame late: first further down, then back up.
+    layout(note, plan, 0, 190);
+    frame();
+    layout(note, plan, 0, 170);
+    frame();
+    layout(note, plan, 0, 120);
+    frame();
+
+    // Still followed: content above the heading grows.
+    layout(note, plan, 0, 60, 80);
+    vi.advanceTimersByTime(150);
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 80, behavior: SMOOTH }]);
+  });
+
+  it('nor its own glide when the target moves behind it, before or after it is aimed back', () => {
+    const note = mountNote(NOTE);
+    const target = note.heading('Ordered steps');
+    note.link('#ordered-steps').click();
+    layout(note, target, 400, 300);
+    vi.advanceTimersByTime(200);
+
+    // Content above the heading goes while the glide moves on: the heading now
+    // rests behind it, and the glide is still nearing where it was sent.
+    layout(note, target, 400, 320, -300);
+    frame();
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 100, behavior: SMOOTH }]);
+    layout(note, target, 400, 340, -300);
+    frame();
+    layout(note, target, 400, 310, -300);
+    frame();
+    layout(note, target, 400, 250, -300);
+    frame();
+
+    // Still followed.
+    layout(note, target, 400, 250, -200);
+    vi.advanceTimersByTime(150);
+    expect(note.scrollTo.mock.calls.at(-1)).toEqual([{ top: 200, behavior: SMOOTH }]);
+  });
 
   it('stops watching once the target has held still for a second', () => {
     const note = mountNote(NOTE);
@@ -807,14 +978,14 @@ describe('a target that moves after the scroll was aimed', () => {
     const target = note.heading('Ordered steps');
     note.link('#ordered-steps').click();
 
-    for (let step = 1; step <= 70; step++) {
+    for (let step = 1; step <= 40; step++) {
       layout(note, target, 400, 0, step * 10);
-      vi.advanceTimersByTime(100);
+      vi.advanceTimersByTime(200);
     }
 
     // One aim at the click, then one for each move in the first five seconds.
-    expect(note.scrollTo.mock.calls.length).toBeGreaterThan(45);
-    expect(note.scrollTo.mock.calls.length).toBeLessThan(55);
+    expect(note.scrollTo.mock.calls.length).toBeGreaterThan(22);
+    expect(note.scrollTo.mock.calls.length).toBeLessThan(28);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -837,6 +1008,18 @@ describe('a target that moves after the scroll was aimed', () => {
     note.link('#ordered-steps').click();
 
     note.content.innerHTML = '';
+    expect(() => frame()).not.toThrow();
+
+    expect(note.scrollTo).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops when the note is closed and its scroll box leaves the document', () => {
+    const note = mountNote(NOTE);
+    note.link('#ordered-steps').click();
+
+    // The box still holds the target; neither is in the document.
+    note.scroller.remove();
     expect(() => frame()).not.toThrow();
 
     expect(note.scrollTo).toHaveBeenCalledTimes(1);

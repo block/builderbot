@@ -6,7 +6,9 @@
  * browser's synthesized `click` on whatever is under it — the trigger's own
  * button or row, or the menu that just appeared — so the item activates (or a
  * menu entry fires) and the menu is unusable on mobile web. This controller
- * owns the touch gesture instead:
+ * owns the touch gesture instead, and the trigger keeps bits-ui's timer from
+ * starting (see context-menu-trigger.svelte), so a press declined or dropped
+ * here opens nothing:
  *
  * - a single touch that stays within `moveThreshold` for `delay` ms fires
  *   `onLongPress`; the trigger turns that into a synthetic `contextmenu` so

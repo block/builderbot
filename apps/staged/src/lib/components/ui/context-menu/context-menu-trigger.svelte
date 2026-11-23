@@ -9,6 +9,7 @@
     class: className,
     disabled = false,
     oncontextmenu,
+    onpointerdown,
     ontouchstart,
     ...restProps
   }: ContextMenuPrimitive.TriggerProps = $props();
@@ -51,6 +52,18 @@
     // (merged after these props) bails on the defaultPrevented event.
     if (longPress.oncontextmenu(e)) return;
     oncontextmenu?.(e);
+  }}
+  onpointerdown={(e) => {
+    onpointerdown?.(e);
+    // bits-ui runs a touch long press of its own: a 700 ms timer started here
+    // that opens the menu unless a pointermove, pointerup or pointercancel
+    // reaches the trigger first. Ours fires sooner and opens the menu through
+    // `contextmenu`, but when ours declines or drops a press (a finger
+    // catching a moving list, a scroll under a still finger) nothing would
+    // stop theirs. Its handler is merged after these props and is skipped for
+    // a default-prevented event, so its timer never starts. Mouse presses
+    // start no timer and keep their default (focus, text selection, drag).
+    if (!disabled && e.pointerType !== 'mouse') e.preventDefault();
   }}
   ontouchstart={(e) => {
     ontouchstart?.(e);

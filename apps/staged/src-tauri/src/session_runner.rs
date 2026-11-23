@@ -6253,13 +6253,37 @@ fn rate_limit_recovery_details(
     let mut details = RateLimitRecovery::default();
 
     if let Some(metadata) = provider_metadata {
-        if let Some(rate_limit) = metadata
-            .pointer("/acp/usageUpdate/_meta")
-            .and_then(|meta| meta.get("_claude/rateLimit"))
-        {
-            details.resets_at = timestamp_field(rate_limit, &["resetsAt", "resetAt"], now_millis);
-            details.kind = string_field(rate_limit, &["rateLimitType", "type", "status"]);
-        }
+        // claude-agent-acp reports the SDK's `rate_limit_info` in two places,
+        // read here in order of preference:
+        //
+        // 1. `data.rateLimit` on the failed prompt's error: the failing
+        //    turn's latest info, and the only copy a turn refused before its
+        //    first model response gets, which is every message sent while
+        //    already over the limit and every refused auto-resume.
+        // 2. `_meta["_claude/rateLimit"]` on a `usage_update`, which the
+        //    bridge sends only once the turn has usage to report.
+        //
+        // Each field is taken from the first place that has it, and a
+        // limit type from either place is preferred to a bare `status`.
+        let reported: Vec<&serde_json::Value> = [
+            metadata.pointer("/acp/promptError/data/rateLimit"),
+            metadata
+                .pointer("/acp/usageUpdate/_meta")
+                .and_then(|meta| meta.get("_claude/rateLimit")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let first_string = |names: &[&str]| {
+            reported
+                .iter()
+                .find_map(|rate_limit| string_field(rate_limit, names))
+        };
+        details.resets_at = reported.iter().find_map(|rate_limit| {
+            timestamp_field(rate_limit, &["resetsAt", "resetAt"], now_millis)
+        });
+        details.kind =
+            first_string(&["rateLimitType", "type"]).or_else(|| first_string(&["status"]));
 
         if details.resets_at.is_none() {
             details.resets_at = metadata.pointer("/acp/promptError/data").and_then(|data| {
@@ -11359,6 +11383,138 @@ draft file (its path is in your instructions), counting from the first non-blank
             ),
             None
         );
+    }
+
+    /// Provider metadata for a turn claude-agent-acp failed on a usage limit.
+    ///
+    /// The prompt error is shaped as the bridge builds it (`turnErrorData`
+    /// with `RequestError.internalError`, 0.109.0): `data.rateLimit` is the
+    /// SDK's `rate_limit_info` from the turn's latest `rate_limit_event`,
+    /// with `resetsAt` in epoch seconds.
+    fn claude_limit_metadata(
+        rate_limit: Option<serde_json::Value>,
+        usage_update_rate_limit: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut data = serde_json::json!({ "errorKind": "rate_limit" });
+        if let Some(rate_limit) = rate_limit {
+            data["rateLimit"] = rate_limit;
+        }
+        let mut acp = serde_json::json!({
+            "promptError": {
+                "code": -32603,
+                "message": "Internal error: You've hit your session limit · resets 3:45pm (UTC)",
+                "data": data,
+            }
+        });
+        if let Some(rate_limit) = usage_update_rate_limit {
+            acp["usageUpdate"] = serde_json::json!({
+                "sessionUpdate": "usage_update",
+                "used": 51_234,
+                "size": 200_000,
+                "_meta": { "_claude/rateLimit": rate_limit },
+            });
+        }
+        serde_json::json!({ "acp": acp })
+    }
+
+    /// The `rate_limit_info` of a rejected five-hour limit that resets at
+    /// 2026-06-24T15:45:00Z.
+    fn rejected_five_hour_limit() -> serde_json::Value {
+        serde_json::json!({
+            "status": "rejected",
+            "resetsAt": 1_782_315_900,
+            "rateLimitType": "five_hour",
+            "overageStatus": "rejected",
+            "overageDisabledReason": "org_level_disabled",
+            "isUsingOverage": false,
+        })
+    }
+
+    #[test]
+    fn rate_limit_recovery_details_reads_the_reset_nested_in_the_prompt_error() {
+        // A turn refused before its first model response: the bridge sends
+        // no `usage_update`, so the prompt error is the only place the reset
+        // arrives.
+        let metadata = claude_limit_metadata(Some(rejected_five_hour_limit()), None);
+        let error = "Prompt failed: You've hit your session limit · resets 3:45pm (UTC)";
+        assert!(is_rate_limit_error(error, Some(&metadata)));
+
+        let details = rate_limit_recovery_details(error, Some(&metadata), RESET_TEST_NOW_MILLIS);
+
+        assert_eq!(
+            details.resets_at.as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+        assert_eq!(details.kind.as_deref(), Some("five_hour"));
+    }
+
+    #[test]
+    fn rate_limit_recovery_details_prefers_the_prompt_error_over_the_usage_update() {
+        // The usage update was sent mid-turn, while the five-hour window was
+        // only close to its limit; the turn then failed on the weekly one.
+        // The prompt error carries the turn's latest info, so it wins.
+        let metadata = claude_limit_metadata(
+            Some(serde_json::json!({
+                "status": "rejected",
+                "resetsAt": 1_782_402_300,
+                "rateLimitType": "seven_day",
+            })),
+            Some(serde_json::json!({
+                "status": "allowed_warning",
+                "resetsAt": 1_782_315_900,
+                "rateLimitType": "five_hour",
+                "utilization": 0.93,
+            })),
+        );
+
+        let details =
+            rate_limit_recovery_details("Prompt failed", Some(&metadata), RESET_TEST_NOW_MILLIS);
+
+        assert_eq!(
+            details.resets_at.as_deref(),
+            Some("2026-06-25T15:45:00.000Z")
+        );
+        assert_eq!(details.kind.as_deref(), Some("seven_day"));
+    }
+
+    #[test]
+    fn rate_limit_recovery_details_falls_back_per_field_to_the_usage_update() {
+        // A prompt error whose `rateLimit` has no reset or limit type leaves
+        // both to the usage update; its bare `status` is the last resort.
+        let metadata = claude_limit_metadata(
+            Some(serde_json::json!({ "status": "rejected" })),
+            Some(rejected_five_hour_limit()),
+        );
+        let details =
+            rate_limit_recovery_details("Prompt failed", Some(&metadata), RESET_TEST_NOW_MILLIS);
+        assert_eq!(
+            details.resets_at.as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+        assert_eq!(details.kind.as_deref(), Some("five_hour"));
+
+        let status_only =
+            claude_limit_metadata(Some(serde_json::json!({ "status": "rejected" })), None);
+        let details =
+            rate_limit_recovery_details("Prompt failed", Some(&status_only), RESET_TEST_NOW_MILLIS);
+        assert_eq!(details.resets_at, None);
+        assert_eq!(details.kind.as_deref(), Some("rejected"));
+    }
+
+    #[test]
+    fn rate_limit_recovery_details_has_no_reset_for_a_bare_error_kind() {
+        // A turn refused before its first usage by a bridge that sends no
+        // `rateLimit` (before claude-agent-acp #1610, or with no
+        // `rate_limit_event` in the turn): there is nothing structured to
+        // read, and the reset in the message text is not parsed.
+        let metadata = claude_limit_metadata(None, None);
+        let error = "Prompt failed: You've hit your session limit · resets 3:45pm (UTC)";
+        assert!(is_rate_limit_error(error, Some(&metadata)));
+
+        let details = rate_limit_recovery_details(error, Some(&metadata), RESET_TEST_NOW_MILLIS);
+
+        assert_eq!(details.resets_at, None);
+        assert_eq!(details.kind.as_deref(), Some("rate_limit"));
     }
 
     #[test]

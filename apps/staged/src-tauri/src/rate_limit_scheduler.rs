@@ -60,6 +60,9 @@ const NETWORK_WAIT_REASON: &str = "network_wait";
 /// The bookkeeping `reason` of a network pause given up on because the
 /// session's own probes kept failing with a network present.
 const PROBE_LIMIT_REASON: &str = "probe_limit_exceeded";
+/// The bookkeeping `reason` of a retry scheduled for a provider-reported
+/// reset, as opposed to the backoff.
+const RESET_AT_REASON: &str = "reset_at";
 
 /// How one pause is charged to its session's retry budget.
 ///
@@ -680,7 +683,10 @@ fn is_actionable_for_auto_resume(session: &Session) -> bool {
 /// The retry state after one more pause.
 ///
 /// `accounting` applies to a network pause (`kind` of
-/// [`NETWORK_PAUSE_KIND`]) only; an API-limit pause is always counted.
+/// [`NETWORK_PAUSE_KIND`]) only. An API-limit pause is counted, with one
+/// exception: a pause that reports no usable reset while the session's last
+/// retry is still waiting for one keeps that retry and is not counted (see
+/// [`pending_reset_retry`]).
 ///
 /// - [`PauseAccounting::Waiting`]: the failure came while the network gate
 ///   was not open. The row keeps its `attempt`, is due at once so the gate
@@ -747,6 +753,16 @@ fn build_recovery_state(
         };
     }
 
+    let reset_at = plausible_reset_millis(resets_at, now);
+    if !network && reset_at.is_none() {
+        if let Some(waiting) = pending_reset_retry(existing, now) {
+            return RateLimitAutoRecovery {
+                updated_at: now,
+                ..waiting.clone()
+            };
+        }
+    }
+
     let attempt = existing.map(|s| s.attempt.saturating_add(1)).unwrap_or(1);
     let first_limited_at = if network && (attempt == 1 || last_pause_was_uncounted(existing)) {
         now
@@ -778,14 +794,14 @@ fn build_recovery_state(
         };
     }
 
-    let reset_retry_at = plausible_reset_millis(resets_at, now).map(|reset_at| {
+    let reset_retry_at = reset_at.map(|reset_at| {
         reset_at
             .saturating_add(RESET_GRACE_MS)
             .saturating_add(jitter_ms)
     });
 
     let (next_retry_at, reason) = if let Some(next_retry_at) = reset_retry_at {
-        (next_retry_at, "reset_at")
+        (next_retry_at, RESET_AT_REASON)
     } else {
         let bounded_jitter_ms = jitter_ms.min(retry_delay_bound_ms(attempt));
         (
@@ -804,6 +820,37 @@ fn build_recovery_state(
         unsafe_to_auto_resume: false,
         reason: Some(reason.to_string()),
     }
+}
+
+/// The bookkeeping of a retry that is still waiting for a provider-reported
+/// reset: scheduled from one (`reason` of [`RESET_AT_REASON`]) and not yet
+/// due.
+///
+/// A pause that lands in this state with no usable reset of its own keeps
+/// waiting for the known one. The claim for an auto-resume clears the row's
+/// reset column, and a turn refused before its first model response may
+/// report no reset at all, so without this the session would drop onto the
+/// minute-scale backoff and spend its attempts before the limit resets. The
+/// retry time is the reset the session already knows, so it stands, and the
+/// pause is not charged to the attempt cap or the 24 hour window.
+///
+/// Once the retry is due the reset it waited for has passed, and a refusal
+/// after that is a new limit: it is counted and scheduled like any other.
+/// The tick claims a row only when its retry is due, so a resume it starts
+/// is refused in that second case; this one holds for a pause recorded
+/// while the retry is still ahead, however the run came to start early.
+fn pending_reset_retry(
+    existing: Option<&RateLimitAutoRecovery>,
+    now: i64,
+) -> Option<&RateLimitAutoRecovery> {
+    existing.filter(|state| {
+        state.reason.as_deref() == Some(RESET_AT_REASON)
+            && state.gave_up_at.is_none()
+            && !state.unsafe_to_auto_resume
+            && state
+                .next_retry_at
+                .is_some_and(|next_retry_at| next_retry_at > now)
+    })
 }
 
 /// Whether the bookkeeping left by the pause before this one shows that it
@@ -1141,6 +1188,9 @@ fn parse_rfc3339_millis(value: &str) -> Option<i64> {
         .checked_sub(time::Duration::seconds(offset_seconds.into()))?;
     Some(offset_datetime.unix_timestamp().saturating_mul(1_000) + i64::from(millis))
 }
+
+#[cfg(test)]
+mod reset_wait_tests;
 
 #[cfg(test)]
 mod tests {

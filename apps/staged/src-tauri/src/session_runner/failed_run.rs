@@ -208,6 +208,127 @@ mod tests {
         assert!(!bookkeeping.unsafe_to_auto_resume);
     }
 
+    const LIMIT_MESSAGE: &str = "Internal error: You've hit your session limit · resets 11am (UTC)";
+    /// 2026-11-12T11:00:00Z in epoch seconds, three hours after [`NOW_MS`].
+    const LIMIT_RESETS_AT_SECS: i64 = 1_794_481_200;
+
+    /// A Claude session refused before its first model response: the limit
+    /// was already reached when the prompt was sent, as it is on a refused
+    /// auto-resume. The bridge sends no `usage_update` for such a turn, so
+    /// the row holds the prompt error alone. `rate_limit` is the error's
+    /// `data.rateLimit`, which a bridge older than claude-agent-acp #1610
+    /// does not send.
+    fn session_refused_before_usage(rate_limit: Option<serde_json::Value>) -> Session {
+        let mut metadata = prompt_error_metadata("rate_limit", LIMIT_MESSAGE);
+        if let Some(rate_limit) = rate_limit {
+            metadata["acp"]["promptError"]["data"]["rateLimit"] = rate_limit;
+        }
+        let mut session = Session::new_running("work", Path::new("/tmp")).with_provider("claude");
+        session.provider_metadata = Some(metadata);
+        session
+    }
+
+    fn rejected_five_hour_limit() -> serde_json::Value {
+        json!({
+            "status": "rejected",
+            "resetsAt": LIMIT_RESETS_AT_SECS,
+            "rateLimitType": "five_hour",
+            "overageStatus": "rejected",
+            "overageDisabledReason": "org_level_disabled",
+            "isUsingOverage": false,
+        })
+    }
+
+    #[test]
+    fn a_turn_refused_before_usage_pauses_until_the_reset_in_its_prompt_error() {
+        let session = session_refused_before_usage(Some(rejected_five_hour_limit()));
+
+        let decision = decide_failed_run(
+            Some(&session),
+            None,
+            &driver_error(LIMIT_MESSAGE),
+            true,
+            NOW_MS,
+        );
+
+        assert_eq!(decision.status(), "paused");
+        assert_eq!(decision.completion_reason, CompletionReason::RateLimited);
+        assert_eq!(
+            decision.recovery,
+            Some(RateLimitRecovery {
+                resets_at: Some("2026-11-12T11:00:00.000Z".to_string()),
+                kind: Some("five_hour".to_string()),
+            })
+        );
+        assert_eq!(decision.network_failure, None);
+    }
+
+    /// The decision carried through the write `finish_session_run` makes with
+    /// it: the retry is scheduled for the reset, not on the backoff.
+    #[test]
+    fn a_turn_refused_before_usage_parks_the_row_for_its_reset() {
+        let store = Store::in_memory().unwrap();
+        let session =
+            session_refused_before_usage(Some(rejected_five_hour_limit())).with_agent("agent-1");
+        store.create_session(&session).unwrap();
+        let row = store.get_session(&session.id).unwrap().unwrap();
+
+        let decision =
+            decide_failed_run(Some(&row), None, &driver_error(LIMIT_MESSAGE), true, NOW_MS);
+        let recovery = decision.recovery.expect("a usage limit pauses");
+        assert!(crate::rate_limit_scheduler::pause_for_rate_limit(
+            &store,
+            None,
+            &session.id,
+            Some("You've hit your session limit · resets 11am (UTC)"),
+            recovery.resets_at.as_deref(),
+            recovery.kind.as_deref(),
+            NOW_MS,
+        )
+        .unwrap());
+
+        let parked = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(parked.status, SessionStatus::Paused);
+        assert_eq!(parked.rate_limit_kind.as_deref(), Some("five_hour"));
+        assert_eq!(
+            parked.rate_limit_resets_at.as_deref(),
+            Some("2026-11-12T11:00:00.000Z")
+        );
+        let bookkeeping = crate::rate_limit_scheduler::auto_recovery_from_metadata(
+            parked.provider_metadata.as_ref(),
+        )
+        .expect("the pause writes retry bookkeeping");
+        assert_eq!(bookkeeping.attempt, 1);
+        assert_eq!(bookkeeping.reason.as_deref(), Some("reset_at"));
+        let retry_at = bookkeeping.next_retry_at.expect("a retry is scheduled");
+        assert!(
+            retry_at > LIMIT_RESETS_AT_SECS * 1_000,
+            "the retry waits for the reset: {retry_at}"
+        );
+    }
+
+    #[test]
+    fn a_turn_refused_before_usage_with_no_reset_pauses_on_the_backoff() {
+        let session = session_refused_before_usage(None);
+
+        let decision = decide_failed_run(
+            Some(&session),
+            None,
+            &driver_error(LIMIT_MESSAGE),
+            true,
+            NOW_MS,
+        );
+
+        assert_eq!(decision.status(), "paused");
+        assert_eq!(
+            decision.recovery,
+            Some(RateLimitRecovery {
+                resets_at: None,
+                kind: Some("rate_limit".to_string()),
+            })
+        );
+    }
+
     #[test]
     fn a_pipeline_session_with_the_same_error_fails_as_crashed() {
         for kind in [PipelineKind::Push, PipelineKind::Pull] {

@@ -894,8 +894,7 @@ fn build_recovery_state_on(
 
 /// Whether the pause before this one was scheduled for a provider-reported
 /// reset, so the time since it was spent waiting for that reset and not on a
-/// backoff. Holds for a retry that came due as much as for one still ahead:
-/// either way the wait was for the reset.
+/// backoff.
 fn last_pause_waited_for_reset(existing: Option<&RateLimitAutoRecovery>) -> bool {
     existing
         .and_then(|state| state.reason.as_deref())

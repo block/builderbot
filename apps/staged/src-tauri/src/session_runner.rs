@@ -6356,20 +6356,14 @@ fn rate_limit_recovery_details(
 ///
 /// - info whose window is still open (`allowed`, `allowed_warning`);
 /// - info with no `status`, which says nothing either way;
-/// - info of an account drawing on extra usage (`isUsingOverage` or
-///   `overageInUse`): its turns run, whatever the base window's status.
-///
-/// The last also skips the info of an extra-usage allowance that has itself
-/// run out, if the SDK still flags it as in use. That limit is then known
-/// by its wording alone and takes the slow schedule.
+/// - info of an account drawing on extra usage (`isUsingOverage`): its
+///   turns run, whatever the base window's status.
 fn rate_limit_info_reports_a_reached_limit(rate_limit: &serde_json::Value) -> bool {
-    let flagged = |name: &str| {
-        rate_limit
-            .get(name)
-            .and_then(|flag| flag.as_bool())
-            .unwrap_or(false)
-    };
-    if flagged("isUsingOverage") || flagged("overageInUse") {
+    let is_using_overage = rate_limit
+        .get("isUsingOverage")
+        .and_then(|flag| flag.as_bool())
+        .unwrap_or(false);
+    if is_using_overage {
         return false;
     }
     rate_limit

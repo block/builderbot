@@ -189,12 +189,12 @@ fn the_info_of_a_window_still_open_gives_no_reset_and_no_kind() {
 }
 
 /// The weekly window of an account drawing on extra usage: the base window
-/// stays `rejected` while the account's turns run.
-fn weekly_window_on_extra_usage(flag: &str) -> serde_json::Value {
+/// stays `rejected` while the account's turns run. The CLI sets
+/// `isUsingOverage` from the other two fields (0.3.328), so they agree.
+fn weekly_window_on_extra_usage() -> serde_json::Value {
     let mut window = rejected_weekly_limit();
     window["overageStatus"] = serde_json::json!("allowed");
-    window["isUsingOverage"] = serde_json::json!(false);
-    window[flag] = serde_json::json!(true);
+    window["isUsingOverage"] = serde_json::json!(true);
     window
 }
 
@@ -211,43 +211,46 @@ fn usage_update_with(rate_limit: serde_json::Value) -> serde_json::Value {
 fn the_info_of_an_account_on_extra_usage_gives_no_reset_and_no_kind() {
     // The turn ran on extra usage and died on an API 429 or a 529. The base
     // window's end, six days on, is not when either clears.
-    for flag in ["isUsingOverage", "overageInUse"] {
-        for (error_kind, message) in [
-            ("rate_limit", API_429_MESSAGE),
-            ("overloaded", OVERLOADED_MESSAGE),
-        ] {
-            let mut metadata = prompt_error(error_kind, message);
-            metadata["acp"]["usageUpdate"] = usage_update_with(weekly_window_on_extra_usage(flag));
-
-            let details = recovery("Prompt failed", Some(&metadata));
-
-            assert_eq!(details.resets_at, None, "{flag} {error_kind}");
-            assert_eq!(
-                details.kind.as_deref(),
-                Some(error_kind),
-                "{flag} {error_kind}"
-            );
-        }
-
-        // The same info on the prompt error itself.
-        let mut metadata = prompt_error("rate_limit", API_429_MESSAGE);
-        metadata["acp"]["promptError"]["data"]["rateLimit"] = weekly_window_on_extra_usage(flag);
+    for (error_kind, message) in [
+        ("rate_limit", API_429_MESSAGE),
+        ("overloaded", OVERLOADED_MESSAGE),
+    ] {
+        let mut metadata = prompt_error(error_kind, message);
+        metadata["acp"]["usageUpdate"] = usage_update_with(weekly_window_on_extra_usage());
 
         let details = recovery("Prompt failed", Some(&metadata));
 
-        assert_eq!(details.resets_at, None, "{flag}");
-        assert_eq!(details.kind.as_deref(), Some("rate_limit"), "{flag}");
+        assert_eq!(details.resets_at, None, "{error_kind}");
+        assert_eq!(details.kind.as_deref(), Some(error_kind), "{error_kind}");
     }
 
-    // With both flags false the same window is a reached limit.
-    let mut reached = weekly_window_on_extra_usage("isUsingOverage");
-    reached["isUsingOverage"] = serde_json::json!(false);
-    reached["overageInUse"] = serde_json::json!(false);
-    let metadata = claude_limit_metadata(Some(reached), None);
+    // The same info on the prompt error itself.
+    let mut metadata = prompt_error("rate_limit", API_429_MESSAGE);
+    metadata["acp"]["promptError"]["data"]["rateLimit"] = weekly_window_on_extra_usage();
+
+    let details = recovery("Prompt failed", Some(&metadata));
+
+    assert_eq!(details.resets_at, None);
+    assert_eq!(details.kind.as_deref(), Some("rate_limit"));
+}
+
+#[test]
+fn a_refusal_flagged_overage_in_use_keeps_its_reset_and_limit_type() {
+    // `overageInUse` is the provider's raw header, sent on only when true.
+    // With `isUsingOverage` false and the extra usage itself `rejected`,
+    // nothing is letting the request through: the turn was refused, and its
+    // reset is the one to wait for.
+    let mut refused = rejected_weekly_limit();
+    refused["overageInUse"] = serde_json::json!(true);
+    let metadata = claude_limit_metadata(Some(refused), None);
+
+    let details = recovery("Prompt failed", Some(&metadata));
+
     assert_eq!(
-        recovery("Prompt failed", Some(&metadata)).kind.as_deref(),
-        Some("seven_day")
+        details.resets_at.as_deref(),
+        Some("2026-06-30T19:00:00.000Z")
     );
+    assert_eq!(details.kind.as_deref(), Some("seven_day"));
 }
 
 #[test]

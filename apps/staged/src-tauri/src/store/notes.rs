@@ -3,7 +3,19 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::Note;
+use super::note_versions::is_revision;
 use super::{now_timestamp, Store, StoreChange, StoreError};
+
+/// What the session runner's write reads of the row it is about to replace,
+/// in `notes` or `project_notes`: enough to tell a republish from a change,
+/// and to keep the outgoing text as a version.
+pub(super) struct StoredNoteText {
+    pub title: String,
+    pub content: String,
+    pub suggested_next_commit_step: Option<String>,
+    pub suggested_next_note_step: Option<String>,
+    pub updated_at: i64,
+}
 
 impl Store {
     pub fn create_note(&self, note: &Note) -> Result<(), StoreError> {
@@ -184,6 +196,10 @@ impl Store {
     /// until the user sees the new content. A change to the suggested next
     /// steps alone leaves it read. User edits go through
     /// [`Store::update_written_note`], which leaves it alone.
+    ///
+    /// The text a revision replaces is kept as a version in the same
+    /// transaction (see `note_versions`), unless it was the empty body of a
+    /// stub this write is filling for the first time.
     pub fn update_note_title_and_content(
         &self,
         id: &str,
@@ -192,33 +208,36 @@ impl Store {
         suggested_next_commit_step: Option<&str>,
         suggested_next_note_step: Option<&str>,
     ) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         // The session runner extracts the note from each completed turn's output, and a
         // turn can legitimately re-emit an identical note. Without this short-circuit,
         // `updated_at` would advance on such turns, defeating any freshness comparison
         // that relies on it.
-        let existing: Option<(String, String, Option<String>, Option<String>)> = conn
-            .query_row(
-                "SELECT title, content, suggested_next_commit_step, suggested_next_note_step
-                 FROM notes WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        if let Some((cur_title, cur_content, cur_sncs, cur_snns)) = existing {
-            if cur_title == title
-                && cur_content == content
-                && cur_sncs.as_deref() == suggested_next_commit_step
-                && cur_snns.as_deref() == suggested_next_note_step
+        if let Some(current) = Self::stored_note_text(&tx, "notes", id)? {
+            if current.title == title
+                && current.content == content
+                && current.suggested_next_commit_step.as_deref() == suggested_next_commit_step
+                && current.suggested_next_note_step.as_deref() == suggested_next_note_step
             {
                 return Ok(());
             }
+            if is_revision(&current.title, &current.content, title, content) {
+                Self::snapshot_note_version(
+                    &tx,
+                    id,
+                    &current.title,
+                    &current.content,
+                    current.updated_at,
+                )?;
+            }
         }
         let now = now_timestamp();
-        conn.execute(
+        tx.execute(
             "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6, read_at = CASE WHEN title = ?1 AND content = ?2 THEN read_at ELSE NULL END WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
+        tx.commit()?;
         self.publish_with(|| StoreChange::Notes {
             branch_id: Self::lookup_id(&conn, "SELECT branch_id FROM notes WHERE id = ?1", id),
             project_id: None,
@@ -226,6 +245,8 @@ impl Store {
         Ok(())
     }
 
+    /// Replace a note's body alone. Only tests call this; unlike the two
+    /// writes the app uses it keeps no version of the body it replaces.
     pub fn update_note_content(&self, id: &str, content: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
@@ -247,14 +268,19 @@ impl Store {
     /// re-extraction — and leaves the suggested next steps alone, since nothing
     /// regenerates them for a written note. Notes an agent produced are rejected:
     /// their content belongs to the session that wrote it.
+    ///
+    /// A save that changes the title or body keeps the text it replaces as a
+    /// version, as the session runner's write does. A save that changes
+    /// neither still advances `updated_at` but keeps nothing.
     pub fn update_written_note(
         &self,
         id: &str,
         title: &str,
         content: &str,
     ) -> Result<Note, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let existing = conn
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing = tx
             .query_row(
                 "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
                  FROM notes WHERE id = ?1",
@@ -273,18 +299,30 @@ impl Store {
         let title = if title.is_empty() {
             title.to_string()
         } else {
-            Self::resolve_unique_note_title(&conn, &existing.branch_id, title, Some(id))?
+            Self::resolve_unique_note_title(&tx, &existing.branch_id, title, Some(id))?
         };
+        // Compared against the title as it will be stored, so a save under a
+        // name another note holds is judged by the suffixed title it gets.
+        if is_revision(&existing.title, &existing.content, &title, content) {
+            Self::snapshot_note_version(
+                &tx,
+                id,
+                &existing.title,
+                &existing.content,
+                existing.updated_at,
+            )?;
+        }
         let now = now_timestamp();
         // A written note is complete as soon as it is saved: no session will
         // fill it in later, and editing one down to a bare title (the whole
         // text in the title column, an empty body) must not make it look
         // pending to the consumers that skip generating notes.
         let completed_at = existing.completed_at.or(Some(now));
-        conn.execute(
+        tx.execute(
             "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = ?4 WHERE id = ?5",
             params![title, content, now, completed_at, id],
         )?;
+        tx.commit()?;
         self.publish(StoreChange::Notes {
             branch_id: Some(existing.branch_id.clone()),
             project_id: None,
@@ -339,6 +377,33 @@ impl Store {
             });
         }
         Ok(note)
+    }
+
+    /// The text, suggested steps and `updated_at` a note holds now, from
+    /// `table` (`notes` or `project_notes`). `None` when no row has the id.
+    pub(super) fn stored_note_text(
+        conn: &rusqlite::Connection,
+        table: &'static str,
+        id: &str,
+    ) -> Result<Option<StoredNoteText>, StoreError> {
+        conn.query_row(
+            &format!(
+                "SELECT title, content, suggested_next_commit_step, suggested_next_note_step, updated_at
+                 FROM {table} WHERE id = ?1"
+            ),
+            params![id],
+            |row| {
+                Ok(StoredNoteText {
+                    title: row.get(0)?,
+                    content: row.get(1)?,
+                    suggested_next_commit_step: row.get(2)?,
+                    suggested_next_note_step: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// The `read_at` write behind [`Store::set_note_read`] and its project-note

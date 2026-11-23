@@ -10,7 +10,7 @@
 //! Tables: app_metadata, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, project_notes, reviews, images,
 //! action_contexts, repo_actions, repo_affinities, queued_session_messages,
-//! tag_groups, tags, project_tags.
+//! tag_groups, tags, project_tags, note_versions.
 
 pub mod models;
 
@@ -23,6 +23,7 @@ pub mod images;
 mod messages;
 mod migrations;
 mod note_transfer;
+mod note_versions;
 mod notes;
 mod project_activity;
 mod project_notes;
@@ -49,6 +50,8 @@ mod workdirs;
 mod images_tests;
 #[cfg(test)]
 mod migration_tests;
+#[cfg(test)]
+mod note_versions_tests;
 #[cfg(test)]
 mod tags_tests;
 #[cfg(test)]

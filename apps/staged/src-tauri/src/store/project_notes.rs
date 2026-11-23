@@ -3,6 +3,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::ProjectNote;
+use super::note_versions::is_revision;
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
 /// Sessions left behind by [`Store::delete_project_note`].
@@ -121,7 +122,8 @@ impl Store {
     }
 
     /// The project-note twin of [`Store::update_note_title_and_content`]: a new
-    /// title or body is the agent revising the note, so it clears `read_at`.
+    /// title or body is the agent revising the note, so it clears `read_at`
+    /// and keeps the text it replaces as a version.
     pub fn update_project_note_title_and_content(
         &self,
         id: &str,
@@ -130,36 +132,39 @@ impl Store {
         suggested_next_commit_step: Option<&str>,
         suggested_next_note_step: Option<&str>,
     ) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         // The session runner extracts the note from each completed turn's output, and a
         // turn can legitimately re-emit an identical note. Without this short-circuit,
         // `updated_at` would advance on such turns, defeating any freshness comparison
         // that relies on it.
-        let existing: Option<(String, String, Option<String>, Option<String>)> = conn
-            .query_row(
-                "SELECT title, content, suggested_next_commit_step, suggested_next_note_step
-                 FROM project_notes WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        if let Some((cur_title, cur_content, cur_sncs, cur_snns)) = existing {
-            if cur_title == title
-                && cur_content == content
-                && cur_sncs.as_deref() == suggested_next_commit_step
-                && cur_snns.as_deref() == suggested_next_note_step
+        if let Some(current) = Self::stored_note_text(&tx, "project_notes", id)? {
+            if current.title == title
+                && current.content == content
+                && current.suggested_next_commit_step.as_deref() == suggested_next_commit_step
+                && current.suggested_next_note_step.as_deref() == suggested_next_note_step
             {
                 return Ok(());
             }
+            if is_revision(&current.title, &current.content, title, content) {
+                Self::snapshot_note_version(
+                    &tx,
+                    id,
+                    &current.title,
+                    &current.content,
+                    current.updated_at,
+                )?;
+            }
         }
         let now = now_timestamp();
-        conn.execute(
+        tx.execute(
             "UPDATE project_notes
              SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6,
                  read_at = CASE WHEN title = ?1 AND content = ?2 THEN read_at ELSE NULL END
              WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
+        tx.commit()?;
         self.publish_with(|| StoreChange::Notes {
             branch_id: None,
             project_id: Self::lookup_id(

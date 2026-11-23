@@ -1304,6 +1304,27 @@ impl ProjectNote {
 }
 
 // =============================================================================
+// Note versions
+// =============================================================================
+
+/// The title and body a note or project note held before a write replaced
+/// them (`note_versions`). The note's current text is never stored as one, so
+/// a note that has not been revised has none; see `store/note_versions.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteVersion {
+    pub id: String,
+    /// The `notes.id` or `project_notes.id` this was a version of.
+    pub note_id: String,
+    pub title: String,
+    pub content: String,
+    /// When this text was written: the note's `updated_at` at the moment it
+    /// was replaced. Nudged forward where needed so that a note's versions
+    /// order by it, oldest first.
+    pub saved_at: i64,
+}
+
+// =============================================================================
 // Images
 // =============================================================================
 

@@ -3,7 +3,9 @@
 //! Phase 1 restarts every repo session (resume, or re-queue when there is no
 //! conversation to load or the branch is busy — a re-queued row that has a
 //! conversation is resumed by the drain when its turn comes, see
-//! `session_commands::QueuedStartKind`) and waits, within a bound, until each
+//! `session_commands::QueuedStartKind`; a pipeline row with no conversation
+//! that cannot safely run again is left alone, see
+//! `plan::restart_blocked_reason`) and waits, within a bound, until each
 //! is `running` and live, `queued`, or terminal. Phase 2 then
 //! resumes the project sessions, so a parent that polls
 //! `wait_for_repo_session` on relaunch finds its children queued or running

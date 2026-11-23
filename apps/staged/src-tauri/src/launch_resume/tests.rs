@@ -5,8 +5,10 @@ use std::time::Duration;
 use tauri::Manager;
 
 use super::plan::{
-    action_for, plan_launch_resume, CandidateKind, LaunchAction, LaunchCandidate,
-    PROJECT_NEVER_STARTED_REASON, PROJECT_SESSION_RESUME_PROMPT,
+    action_for, classify_candidate, plan_launch_resume, CandidateKind, LaunchAction,
+    LaunchCandidate, PROJECT_NEVER_STARTED_REASON, PROJECT_SESSION_RESUME_PROMPT,
+    PR_NOT_CREATED_REASON, REBASE_CUT_OFF_REASON, REBASE_NOT_STARTED_REASON, SQUASH_CUT_OFF_REASON,
+    SQUASH_NOT_STARTED_REASON,
 };
 use super::run::{run_project_phase, run_repo_phase, wait_until_settled, PhaseOutcome};
 use super::{build_recovery, handled_through_from_preferences, LaunchResumeState};
@@ -15,7 +17,7 @@ use crate::session_commands::{
     QueuedStartKind,
 };
 use crate::session_runner::SessionRegistry;
-use crate::store::{self, CompletionReason, Session, SessionStatus, Store};
+use crate::store::{self, CompletionReason, PipelineKind, Session, SessionStatus, Store};
 
 fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
     tauri::test::mock_builder()
@@ -99,6 +101,75 @@ fn interrupted_rebase(store: &Store, branch_id: &str, created_at: i64, agent_id:
     session
 }
 
+/// How far a conversation-less pipeline row had got when the quit ended it.
+#[derive(Clone, Copy)]
+enum CutOff {
+    /// Still queued, or refused at the start: no step began.
+    BeforeAnyStep,
+    /// The quit cancelled it during its second step, as the runner records
+    /// that: the step and the ones after it `skipped`, `started_at` kept.
+    MidStep,
+    /// The process died during its second step: the step still reads
+    /// `running`, and dead-owner recovery ended the row.
+    Crashed,
+}
+
+/// A pipeline row with no conversation that the quit ended, with three
+/// command steps. `kind` is `None` for the create-PR pipeline. Rebase and
+/// squash get the pending commit they are created with unless
+/// `pending_commit` is false, which is what the runner leaves behind when a
+/// pipeline ends without its agent (`resolve_pipeline_artifacts_without_ai`).
+fn interrupted_pipeline(
+    store: &Store,
+    branch_id: &str,
+    kind: Option<PipelineKind>,
+    cut_off: CutOff,
+    pending_commit: bool,
+) -> Session {
+    let step = |label: &str| store::PipelineStep::Command {
+        label: label.to_string(),
+        command: "true".to_string(),
+        on_failure: store::FailureStrategy::Continue,
+    };
+    let mut pipeline =
+        store::PipelineExecution::from_steps(&[step("first"), step("second"), step("third")]);
+    pipeline.kind = kind.clone();
+    match cut_off {
+        CutOff::BeforeAnyStep => {}
+        CutOff::MidStep | CutOff::Crashed => {
+            pipeline.current_step = 1;
+            pipeline.steps[0].status = store::StepStatus::Succeeded;
+            pipeline.steps[0].started_at = Some(1);
+            pipeline.steps[0].completed_at = Some(2);
+            pipeline.steps[1].started_at = Some(3);
+            if matches!(cut_off, CutOff::MidStep) {
+                pipeline.steps[1].status = store::StepStatus::Skipped;
+                pipeline.steps[1].error = Some("Cancelled by user".to_string());
+                pipeline.steps[1].completed_at = Some(4);
+                pipeline.steps[2].status = store::StepStatus::Skipped;
+            } else {
+                pipeline.steps[1].status = store::StepStatus::Running;
+            }
+        }
+    }
+
+    let mut session = Session::new_running("pipeline", Path::new("/tmp")).with_branch(branch_id);
+    session.pipeline = Some(pipeline);
+    store.create_session(&session).unwrap();
+    let commit_pipeline = matches!(kind, Some(PipelineKind::Rebase | PipelineKind::Squash));
+    if commit_pipeline && pending_commit {
+        let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+    }
+    let status = if matches!(cut_off, CutOff::Crashed) {
+        SessionStatus::Error
+    } else {
+        SessionStatus::Cancelled
+    };
+    end_with_app_quit(store, &session.id, status);
+    store.get_session(&session.id).unwrap().unwrap()
+}
+
 fn interrupted_project_session(
     store: &Store,
     project_id: &str,
@@ -145,6 +216,7 @@ fn candidate(
         created_at,
         kind,
         agent_resumable: agent,
+        restart_blocked: None,
     }
 }
 
@@ -178,6 +250,155 @@ fn action_depends_on_kind_and_conversation() {
         action_for(&candidate("a", None, 1, CandidateKind::Internal, true)),
         LaunchAction::Skip { .. }
     ));
+
+    // A row that may not be restarted is left alone, unless it has a
+    // conversation: resuming a turn runs no pipeline step again.
+    let blocked = |agent| LaunchCandidate {
+        restart_blocked: Some(REBASE_CUT_OFF_REASON),
+        ..candidate("a", Some("b"), 1, REPO, agent)
+    };
+    assert_eq!(
+        action_for(&blocked(false)),
+        LaunchAction::Skip {
+            reason: REBASE_CUT_OFF_REASON
+        }
+    );
+    assert_eq!(action_for(&blocked(true)), LaunchAction::Resume);
+}
+
+/// The action for one conversation-less pipeline row, as the plan decides it
+/// from the store.
+fn pipeline_action(
+    kind: Option<PipelineKind>,
+    cut_off: CutOff,
+    pending_commit: bool,
+) -> LaunchAction {
+    let (store, _project, branch) = store_with_branch();
+    let session = interrupted_pipeline(&store, &branch.id, kind, cut_off, pending_commit);
+    let candidate = classify_candidate(&store, &session);
+    assert_eq!(candidate.kind, REPO);
+    assert!(!candidate.agent_resumable);
+    action_for(&candidate)
+}
+
+fn skip(reason: &'static str) -> LaunchAction {
+    LaunchAction::Skip { reason }
+}
+
+/// A rebase or squash that had begun a step is never run again from the
+/// start, whether the quit cancelled it (which also deletes its pending
+/// commit) or the process died under it (which leaves the commit).
+#[test]
+fn a_rebase_or_squash_cut_off_mid_run_is_left_for_the_user() {
+    for (kind, reason) in [
+        (PipelineKind::Rebase, REBASE_CUT_OFF_REASON),
+        (PipelineKind::Squash, SQUASH_CUT_OFF_REASON),
+    ] {
+        assert_eq!(
+            pipeline_action(Some(kind.clone()), CutOff::MidStep, false),
+            skip(reason)
+        );
+        assert_eq!(
+            pipeline_action(Some(kind.clone()), CutOff::Crashed, true),
+            skip(reason)
+        );
+        // The advice is about the operation itself, not the old pipeline
+        // catch-all ("run the push or PR again").
+        assert!(reason.contains("git status"), "{reason}");
+        assert!(
+            !reason.contains("push") && !reason.contains("PR"),
+            "{reason}"
+        );
+    }
+}
+
+/// A rebase or squash the quit caught while it was still queued never ran a
+/// step and still has its pending commit: it goes back on the queue like any
+/// other queued row. Without the commit the branch queue could not schedule
+/// it, so it is left with advice to run it again.
+#[test]
+fn a_rebase_or_squash_that_never_ran_restarts_only_while_it_has_its_commit() {
+    for (kind, reason) in [
+        (PipelineKind::Rebase, REBASE_NOT_STARTED_REASON),
+        (PipelineKind::Squash, SQUASH_NOT_STARTED_REASON),
+    ] {
+        assert_eq!(
+            pipeline_action(Some(kind.clone()), CutOff::BeforeAnyStep, true),
+            LaunchAction::Requeue
+        );
+        assert_eq!(
+            pipeline_action(Some(kind), CutOff::BeforeAnyStep, false),
+            skip(reason)
+        );
+    }
+}
+
+/// Push and pull run again from the start wherever the quit landed: both are
+/// safe to repeat, and neither is scheduled through an artifact.
+#[test]
+fn a_push_or_pull_restarts_wherever_it_was_cut_off() {
+    for kind in [PipelineKind::Push, PipelineKind::Pull] {
+        for cut_off in [CutOff::BeforeAnyStep, CutOff::MidStep, CutOff::Crashed] {
+            assert_eq!(
+                pipeline_action(Some(kind.clone()), cut_off, false),
+                LaunchAction::Requeue
+            );
+        }
+    }
+}
+
+/// The create-PR pipeline has no kind and no queued form.
+#[test]
+fn a_pr_pipeline_without_a_conversation_is_left_for_the_user() {
+    for cut_off in [CutOff::BeforeAnyStep, CutOff::MidStep, CutOff::Crashed] {
+        assert_eq!(
+            pipeline_action(None, cut_off, false),
+            skip(PR_NOT_CREATED_REASON)
+        );
+    }
+}
+
+/// Why the plan above does not re-queue those rows: the drain schedules a
+/// rebase or squash by its pending commit and has no schedule for a
+/// kind-less pipeline, so a re-queued one is stepped over on every pass and
+/// stays `queued`. A push or pull is scheduled by the row's own branch.
+#[test]
+fn the_drain_never_starts_a_requeued_pipeline_row_it_cannot_schedule() {
+    let (store, _project, branch) = store_with_branch();
+    let rebase = interrupted_pipeline(
+        &store,
+        &branch.id,
+        Some(PipelineKind::Rebase),
+        CutOff::MidStep,
+        false,
+    );
+    let pr = interrupted_pipeline(&store, &branch.id, None, CutOff::MidStep, false);
+    for stranded in [&rebase, &pr] {
+        assert!(store.transition_app_quit_to_queued(&stranded.id).unwrap());
+    }
+    assert!(claim_startable_queued_sessions(&store, &branch.id)
+        .unwrap()
+        .is_empty());
+    for stranded in [&rebase, &pr] {
+        assert_eq!(status_of(&store, &stranded.id), SessionStatus::Queued);
+    }
+
+    let push = interrupted_pipeline(
+        &store,
+        &branch.id,
+        Some(PipelineKind::Push),
+        CutOff::MidStep,
+        false,
+    );
+    assert!(store.transition_app_quit_to_queued(&push.id).unwrap());
+    assert_eq!(
+        queued_start_kind(&store.get_session(&push.id).unwrap().unwrap()),
+        QueuedStartKind::Fresh
+    );
+    assert_eq!(
+        claim_startable_queued_sessions(&store, &branch.id).unwrap(),
+        vec![push.id.clone()]
+    );
 }
 
 /// A resumed project session may continue an `app_quit` repo session only
@@ -251,6 +472,23 @@ fn build_recovery_partitions_labels_and_excludes_internal_rows() {
     end_with_app_quit(&store, &push.id, SessionStatus::Cancelled);
     let rebase = interrupted_rebase(&store, &branch.id, 27, "acp-6");
 
+    // Pipeline rows with no conversation. The rebase was cut off mid-run and
+    // is listed with what to do about it; the pull runs again.
+    let cut_off_rebase = interrupted_pipeline(
+        &store,
+        &branch.id,
+        Some(PipelineKind::Rebase),
+        CutOff::MidStep,
+        false,
+    );
+    let pull = interrupted_pipeline(
+        &store,
+        &branch.id,
+        Some(PipelineKind::Pull),
+        CutOff::MidStep,
+        false,
+    );
+
     // A Pikchr child: no branch, no project note. Never offered.
     let pikchr = Session::new_running("diagram", Path::new("/tmp")).with_agent("acp-4");
     store.create_session(&pikchr).unwrap();
@@ -278,15 +516,34 @@ fn build_recovery_partitions_labels_and_excludes_internal_rows() {
         .iter()
         .map(|s| s.session_id.as_str())
         .collect();
+    // The two conversation-less pipeline rows were created just now, so they
+    // follow the rows with a fixed `created_at`.
     assert_eq!(
-        repo_ids,
-        vec![
+        repo_ids[..4],
+        [
             repo.id.as_str(),
             queued.id.as_str(),
             push.id.as_str(),
             rebase.id.as_str()
         ]
     );
+    assert_eq!(repo_ids.len(), 6);
+    let offered = |id: &str| {
+        recovery
+            .repo_sessions
+            .iter()
+            .find(|s| s.session_id == id)
+            .expect("offered")
+    };
+    let offered_rebase = offered(&cut_off_rebase.id);
+    assert_eq!(offered_rebase.disposition, "manual");
+    assert_eq!(offered_rebase.reason, Some(REBASE_CUT_OFF_REASON));
+    // Labelled by its kind even with its pending commit gone.
+    assert_eq!(offered_rebase.label, "rebase on fix-login");
+    let offered_pull = offered(&pull.id);
+    assert_eq!(offered_pull.disposition, "restart");
+    assert_eq!(offered_pull.reason, None);
+    assert_eq!(offered_pull.label, "pull on fix-login");
     assert_eq!(recovery.repo_sessions[0].disposition, "resume");
     assert_eq!(recovery.repo_sessions[0].label, "commit on fix-login");
     assert_eq!(
@@ -336,8 +593,10 @@ fn build_recovery_partitions_labels_and_excludes_internal_rows() {
 
     let resumable = recovery.resumable_ids();
     assert!(resumable.contains(&push.id) && resumable.contains(&rebase.id));
+    assert!(resumable.contains(&pull.id));
     assert!(!resumable.contains(&project_never_started.id));
-    assert_eq!(resumable.len(), 5);
+    assert!(!resumable.contains(&cut_off_rebase.id));
+    assert_eq!(resumable.len(), 6);
 
     // The marker is the newest row offered; nothing is offered past it.
     let max_updated = recovery

@@ -20,6 +20,7 @@ import {
   interruptedCount,
   rowSelectable,
   selectedSessionIds,
+  type InterruptedProjectRow,
 } from './resumeOnLaunchGroups';
 
 class ResumeOnLaunchController {
@@ -27,6 +28,12 @@ class ResumeOnLaunchController {
   private _busy = $state(false);
   /** Keys of the checked project rows; replaced, never mutated, so it stays reactive. */
   private _selected = $state<string[]>([]);
+  /** Grouped once per offer, not on every toggle or read. */
+  private _rows = $derived(this._pending ? groupByProject(this._pending) : []);
+  /** Filtered once per offer or selection change, not on every read. */
+  private _selectedSessionIds = $derived(
+    this._pending ? selectedSessionIds(this._pending, this._selected) : []
+  );
 
   /** The offer awaiting an answer, or null when the dialog is closed. */
   get pending(): LaunchRecovery | null {
@@ -38,6 +45,11 @@ class ResumeOnLaunchController {
     return this._busy;
   }
 
+  /** The offer as the dialog lists it, one row per project; empty when closed. */
+  get rows(): InterruptedProjectRow[] {
+    return this._rows;
+  }
+
   /** Keys of the checked project rows (see `groupByProject`). */
   get selected(): string[] {
     return this._selected;
@@ -45,12 +57,12 @@ class ResumeOnLaunchController {
 
   /** The session ids "Resume" would send now. */
   get selectedSessionIds(): string[] {
-    return this._pending ? selectedSessionIds(this._pending, this._selected) : [];
+    return this._selectedSessionIds;
   }
 
   /** "Resume" can be pressed: something is checked and no answer is in flight. */
   get canResume(): boolean {
-    return !this._busy && this.selectedSessionIds.length > 0;
+    return !this._busy && this._selectedSessionIds.length > 0;
   }
 
   isSelected(key: string): boolean {
@@ -65,7 +77,7 @@ class ResumeOnLaunchController {
       this._selected = without;
       return;
     }
-    const row = groupByProject(this._pending).find((r) => r.key === key);
+    const row = this._rows.find((r) => r.key === key);
     if (row && rowSelectable(row)) this._selected = [...without, key];
   }
 
@@ -99,20 +111,19 @@ class ResumeOnLaunchController {
    */
   async resume(): Promise<void> {
     if (!this.canResume) return;
-    await this.answer((recovery) => selectedSessionIds(recovery, this._selected));
+    await this.answer(this._selectedSessionIds);
   }
 
   /** Leave every row as it is; just record the offer as handled. */
   async dismiss(): Promise<void> {
-    await this.answer(() => []);
+    await this.answer([]);
   }
 
-  private async answer(sessionIds: (recovery: LaunchRecovery) => string[]): Promise<void> {
-    const recovery = this._pending;
-    if (!recovery || this._busy) return;
+  private async answer(sessionIds: string[]): Promise<void> {
+    if (!this._pending || this._busy) return;
     this._busy = true;
     try {
-      await commands.resumeInterruptedSessions(sessionIds(recovery));
+      await commands.resumeInterruptedSessions(sessionIds);
     } catch (e) {
       console.error('Failed to answer the interrupted-sessions prompt:', e);
       toast.error(`Could not resume interrupted sessions: ${e instanceof Error ? e.message : e}`);

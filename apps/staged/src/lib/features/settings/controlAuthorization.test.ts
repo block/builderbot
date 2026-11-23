@@ -31,7 +31,7 @@ async function importController() {
 beforeEach(() => {
   vi.resetModules();
   // Runes compile away in the app build; under vitest they stay plain global
-  // calls, so stub $state as identity (resumeOnLaunch.test.ts precedent).
+  // calls, so stub $state as identity (projectActions.test.ts precedent).
   vi.stubGlobal('$state', (initial: unknown) => initial);
   listPendingControlAuthorizations = vi.fn().mockResolvedValue([]);
   answerControlAuthorization = vi.fn().mockResolvedValue(undefined);

@@ -1,5 +1,9 @@
+// Runs in the "component" vitest project for its svelte plugin, not for a
+// DOM: the controller's $derived fields (its rows and the ids Resume sends)
+// have to compile for the client, as in the app, to follow the selection.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InterruptedSession, LaunchRecovery } from '../../types';
+import { readReactively } from '../../stores/testStubs/readReactively.svelte';
 
 function session(overrides: Partial<InterruptedSession>): InterruptedSession {
   return {
@@ -57,9 +61,6 @@ async function importController() {
 
 beforeEach(() => {
   vi.resetModules();
-  // Runes compile away in the app build; under vitest they stay plain global
-  // calls, so stub $state as identity (projectActions.test.ts precedent).
-  vi.stubGlobal('$state', (initial: unknown) => initial);
   getInterruptedSessions = vi.fn().mockResolvedValue(offer);
   resumeInterruptedSessions = vi.fn().mockResolvedValue(undefined);
   toastError = vi.fn();
@@ -136,6 +137,28 @@ describe('resumeOnLaunch selection', () => {
     await controller.resume();
     expect(resumeInterruptedSessions).not.toHaveBeenCalled();
     expect(controller.pending).toEqual(offer);
+  });
+
+  it('groups the offer once and re-filters only when the selection changes', async () => {
+    const controller = await importController();
+    // Read from an effect, as the dialog's template does, so the derived
+    // fields are connected and cached.
+    const stop = readReactively(() => [controller.rows, controller.selectedSessionIds]);
+    await controller.load();
+    const rows = controller.rows;
+    expect(rows.map((row) => row.key)).toEqual(['project:p1', 'project:p2', 'project:p3']);
+    const ids = controller.selectedSessionIds;
+    expect(controller.canResume).toBe(true);
+    expect(controller.selectedSessionIds).toBe(ids);
+
+    controller.setSelected('project:p1', false);
+    expect(controller.rows).toBe(rows);
+    expect(controller.selectedSessionIds).toEqual(['f']);
+
+    await controller.dismiss();
+    expect(controller.rows).toEqual([]);
+    expect(controller.selectedSessionIds).toEqual([]);
+    stop();
   });
 
   it('disables Resume when no project can be resumed', async () => {

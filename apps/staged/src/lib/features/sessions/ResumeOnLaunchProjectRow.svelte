@@ -2,9 +2,12 @@
   ResumeOnLaunchProjectRow.svelte - one project in the launch resume dialog
 
   A checkbox with the project's name and, under it, its interrupted sessions
-  (`rebase on drafts-out-of-sync`). The whole row is the checkbox's label, so
-  a click anywhere on it toggles. A project with nothing that can be resumed
-  is shown disabled and unchecked, each session with the reason it is not.
+  (`rebase on drafts-out-of-sync`). The whole row is a <label> for the
+  checkbox, so a click anywhere on it toggles. Its accessible name is the
+  project name alone (`aria-labelledby`, which outranks the <label>) and the
+  sessions are its description, so a screen reader reads the list once. A
+  project with nothing that can be resumed is shown disabled and unchecked,
+  each session with the reason it is not.
 -->
 <script lang="ts">
   import { Checkbox } from '$lib/components/ui/checkbox';
@@ -37,11 +40,12 @@
     class="mt-px data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)]"
     checked={selectable && checked}
     disabled={disabled || !selectable}
+    aria-labelledby="{id}-name"
     aria-describedby="{id}-sessions"
     onCheckedChange={(value) => onCheckedChange(value === true)}
   />
   <span class="text">
-    <span class="name">{row.name}</span>
+    <span class="name" id="{id}-name">{row.name}</span>
     <span class="sessions" id="{id}-sessions">
       {#each row.sessions as session (session.sessionId)}
         {@const note = dispositionNote(session)}

@@ -3,7 +3,7 @@
 //! runner.
 
 use crate::session_commands::{project_active_session, resumable_agent_session_id};
-use crate::store::{Session, Store};
+use crate::store::{PipelineKind, Session, Store};
 
 /// The next user turn a resumed repo session gets. Resume is SDK-native
 /// (`load_session` restores the conversation), so this only has to say what
@@ -27,16 +27,36 @@ pub(crate) const PROJECT_SESSION_RESUME_PROMPT: &str = "Staged was closed and re
 pub(crate) const PROJECT_NEVER_STARTED_REASON: &str =
     "the project session never reached its agent; start a new project session instead";
 pub(crate) const INTERNAL_SESSION_REASON: &str = "internal session; its parent re-runs it";
+/// A rebase or squash with no conversation that had started running. See
+/// [`restart_blocked_reason`] for why neither is run again.
+/// Shown as plain text in the dialog, so no markup.
+pub(crate) const REBASE_CUT_OFF_REASON: &str =
+    "the rebase was cut off part-way through; run git status in the worktree, finish or abort \
+     a rebase still in progress there, then rebase again if it is still needed";
+pub(crate) const SQUASH_CUT_OFF_REASON: &str =
+    "the squash was cut off part-way through; run git status in the worktree: if the branch's \
+     commits were already reset, their changes are staged and need committing by hand, \
+     otherwise squash again";
+/// A rebase or squash the quit stopped before its first step, whose pending
+/// commit went with it, so the branch queue has nothing to schedule it by.
+pub(crate) const REBASE_NOT_STARTED_REASON: &str =
+    "the rebase was stopped before it ran; rebase again";
+pub(crate) const SQUASH_NOT_STARTED_REASON: &str =
+    "the squash was stopped before it ran; squash again";
+/// A create-PR pipeline cut off before its agent had a conversation.
+pub(crate) const PR_NOT_CREATED_REASON: &str =
+    "cut off before the pull request was created; create it again";
 
 /// What kind of row a candidate is, as far as launch resume cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidateKind {
     /// A branch-scoped session: commit, note, or review, or a command
-    /// pipeline row (rebase, squash, push, pull, PR). Pipeline rows are
-    /// resumed like the rest: one whose agent turn the quit cut off continues
-    /// that turn, as the chat pane's Resume does, and the drain resumes a
-    /// re-queued one rather than running its steps again
-    /// (`session_commands::QueuedStartKind`).
+    /// pipeline row (rebase, squash, push, pull, PR). A pipeline row whose
+    /// agent turn the quit cut off continues that turn like the rest, as the
+    /// chat pane's Resume does, and the drain resumes a re-queued one rather
+    /// than running its steps again (`session_commands::QueuedStartKind`). One
+    /// with no conversation is only re-queued when running it from the start
+    /// is safe (see [`restart_blocked_reason`]).
     Repo,
     /// A project-level session (linked from `project_notes`).
     Project,
@@ -54,6 +74,10 @@ pub(crate) struct LaunchCandidate {
     /// The row carries a real ACP session id (not the immediate-start
     /// placeholder), so `load_session` can restore its conversation.
     pub(crate) agent_resumable: bool,
+    /// Why a row with no conversation must not be put back on its branch
+    /// queue, or `None` when re-queueing it is a safe restart
+    /// ([`restart_blocked_reason`]). Not consulted for a row that resumes.
+    pub(crate) restart_blocked: Option<&'static str>,
 }
 
 /// What launch resume does with one row.
@@ -128,6 +152,65 @@ pub(crate) fn classify_candidate(store: &Store, session: &Session) -> LaunchCand
         created_at: session.created_at,
         kind,
         agent_resumable: resumable_agent_session_id(session.agent_id.as_deref()).is_some(),
+        restart_blocked: restart_blocked_reason(store, session),
+    }
+}
+
+/// Why re-queueing `session` would not be a safe restart, or `None` when it
+/// is. Only pipeline rows are ever blocked: a commit, note or review session
+/// with no conversation never reached its agent, and the drain builds its
+/// prompt again from the row.
+///
+/// A re-queued pipeline row is rebuilt by the drain and run from its first
+/// step (`prs::start_queued_commit_pipeline_for_branch`,
+/// `prs::start_queued_git_pipeline_for_branch`). Whether that is safe depends
+/// on the kind:
+///
+/// - **Push, pull**: safe wherever the quit landed. `git push` either updated
+///   the remote ref or did not, and pushing again is a no-op or the same push;
+///   `--force-with-lease` refuses rather than overwrites if the first attempt
+///   landed without updating the tracking ref. A pull is `git fetch` then
+///   `git merge --ff-only`, which refuses a worktree the first attempt left
+///   half-updated. A force push that was waiting on a rebase is still checked
+///   against that rebase by the drain (`pipeline_dependency`).
+/// - **Rebase, squash**: only when no step had started and the pending
+///   commit is still there, which is a row the quit caught while it was still
+///   queued. Otherwise it is left alone, for two reasons found in the runner:
+///   - The quit cancels a running command step by killing its process group
+///     (`session_runner::run_pipeline_command`), so `git rebase` can die
+///     between picks, or stop on a conflict before the hand-off's agent has a
+///     conversation, leaving `.git/rebase-merge` and a detached HEAD. A rerun
+///     would record that detached HEAD as the pre-rebase head, fail in
+///     `git rebase` ("already a rebase-merge directory") and reach the agent
+///     only through the failure hand-off, whose prompt assumes a rebase
+///     stopped on a conflict. A squash cut off after its soft reset would
+///     rerun `git log origin/<base>..HEAD` against the reset branch and hand
+///     the agent an empty history to write the message from.
+///   - A pipeline that ends without its agent deletes its pending commit
+///     (`session_runner::resolve_pipeline_artifacts_without_ai`), and that
+///     commit is the only thing the branch queue schedules a rebase or squash
+///     by. Re-queued without it the row is stepped over on every drain
+///     (`BranchSessionLink::Unlinked`) and stays `queued` for good.
+/// - **No kind** (the create-PR pipeline): it has no queued form at all. The
+///   drain cannot schedule it, so it would also stay `queued` for good.
+pub(crate) fn restart_blocked_reason(store: &Store, session: &Session) -> Option<&'static str> {
+    let pipeline = session.pipeline.as_ref()?;
+    let Some(kind) = pipeline.kind.as_ref() else {
+        return Some(PR_NOT_CREATED_REASON);
+    };
+    let (cut_off, not_started) = match kind {
+        PipelineKind::Push | PipelineKind::Pull => return None,
+        PipelineKind::Rebase => (REBASE_CUT_OFF_REASON, REBASE_NOT_STARTED_REASON),
+        PipelineKind::Squash => (SQUASH_CUT_OFF_REASON, SQUASH_NOT_STARTED_REASON),
+    };
+    // `started_at` is stamped when the runner begins a step and survives the
+    // cancel, which marks the step and the ones after it `skipped`.
+    if pipeline.steps.iter().any(|step| step.started_at.is_some()) {
+        return Some(cut_off);
+    }
+    match store.get_commit_by_session(&session.id) {
+        Ok(Some(_)) => None,
+        Ok(None) | Err(_) => Some(not_started),
     }
 }
 
@@ -135,7 +218,10 @@ pub(crate) fn classify_candidate(store: &Store, session: &Session) -> LaunchCand
 pub(crate) fn action_for(candidate: &LaunchCandidate) -> LaunchAction {
     match candidate.kind {
         CandidateKind::Repo if candidate.agent_resumable => LaunchAction::Resume,
-        CandidateKind::Repo => LaunchAction::Requeue,
+        CandidateKind::Repo => match candidate.restart_blocked {
+            Some(reason) => LaunchAction::Skip { reason },
+            None => LaunchAction::Requeue,
+        },
         CandidateKind::Project if candidate.agent_resumable => LaunchAction::Resume,
         CandidateKind::Project => LaunchAction::Skip {
             reason: PROJECT_NEVER_STARTED_REASON,

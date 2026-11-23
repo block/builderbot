@@ -16,11 +16,11 @@
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { resumeOnLaunch } from './resumeOnLaunch.svelte';
   import ResumeOnLaunchProjectRow from './ResumeOnLaunchProjectRow.svelte';
-  import { groupByProject, interruptedSummary, rowSelectable } from './resumeOnLaunchGroups';
+  import { interruptedSummary, rowSelectable } from './resumeOnLaunchGroups';
 
   const selectAllId = $props.id();
 
-  const rows = $derived(resumeOnLaunch.pending ? groupByProject(resumeOnLaunch.pending) : []);
+  const rows = $derived(resumeOnLaunch.rows);
   const summary = $derived(
     resumeOnLaunch.pending ? interruptedSummary(resumeOnLaunch.pending) : ''
   );

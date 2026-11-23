@@ -31,10 +31,8 @@ const recovery: LaunchRecovery = {
       sessionId: 'c',
       branchId: 'b2',
       branchName: 'docs',
-      sessionType: 'push',
-      label: 'push on docs',
-      disposition: 'manual',
-      reason: 'pipeline sessions are not resumed automatically',
+      // A rebase pipeline: labelled by its kind, resumed like the rest.
+      label: 'rebase on docs',
     }),
   ],
   projectSessions: [
@@ -44,6 +42,15 @@ const recovery: LaunchRecovery = {
       branchName: null,
       sessionType: 'note',
       label: 'note on Widgets',
+    }),
+    session({
+      sessionId: 'e',
+      branchId: null,
+      branchName: null,
+      sessionType: 'note',
+      label: 'note on Widgets',
+      disposition: 'manual',
+      reason: 'the project session never reached its agent',
     }),
   ],
 };
@@ -59,7 +66,7 @@ describe('groupInterruptedSessions', () => {
     expect(groups.map((g) => g.sessions.map((s) => s.sessionId))).toEqual([
       ['a', 'b'],
       ['c'],
-      ['d'],
+      ['d', 'e'],
     ]);
   });
 
@@ -75,7 +82,7 @@ describe('groupInterruptedSessions', () => {
 
 describe('resumableSessionIds', () => {
   it('leaves out sessions that are listed only', () => {
-    expect(resumableSessionIds(recovery)).toEqual(['a', 'b', 'd']);
+    expect(resumableSessionIds(recovery)).toEqual(['a', 'b', 'c', 'd']);
   });
 });
 
@@ -95,7 +102,7 @@ describe('dispositionNote', () => {
 describe('interruptedSummary', () => {
   it('counts and says how many can be restarted', () => {
     expect(interruptedSummary(recovery)).toBe(
-      'Staged was closed while 4 sessions were running or waiting. 3 of them can be restarted automatically.'
+      'Staged was closed while 5 sessions were running or waiting. 4 of them can be restarted automatically.'
     );
     expect(interruptedSummary({ repoSessions: [session({})], projectSessions: [] })).toBe(
       'Staged was closed while 1 session was running or waiting.'

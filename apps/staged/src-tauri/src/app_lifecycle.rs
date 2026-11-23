@@ -577,6 +577,9 @@ pub(crate) fn session_type_label(session_type: &str) -> Option<&'static str> {
         "pr" => Some("PR"),
         "push" => Some("push"),
         "pull" => Some("pull"),
+        // Pipeline kinds, which launch resume labels its rows by.
+        "rebase" => Some("rebase"),
+        "squash" => Some("squash"),
         _ => None,
     }
 }

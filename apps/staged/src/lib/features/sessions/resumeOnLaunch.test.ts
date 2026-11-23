@@ -21,9 +21,19 @@ const offer: LaunchRecovery = {
   repoSessions: [
     session({ sessionId: 'a' }),
     session({ sessionId: 'b', disposition: 'restart' }),
-    session({ sessionId: 'c', disposition: 'manual', reason: 'pipeline' }),
+    // A rebase pipeline whose agent turn was cut off resumes like the rest.
+    session({ sessionId: 'c', label: 'rebase on fix-login' }),
   ],
-  projectSessions: [session({ sessionId: 'd', branchId: null, branchName: null })],
+  projectSessions: [
+    session({ sessionId: 'd', branchId: null, branchName: null }),
+    session({
+      sessionId: 'e',
+      branchId: null,
+      branchName: null,
+      disposition: 'manual',
+      reason: 'the project session never reached its agent',
+    }),
+  ],
 };
 
 let getInterruptedSessions: ReturnType<typeof vi.fn>;
@@ -83,7 +93,7 @@ describe('resumeOnLaunch answers', () => {
     const controller = await importController();
     await controller.load();
     await controller.resumeAll();
-    expect(resumeInterruptedSessions).toHaveBeenCalledWith(['a', 'b', 'd']);
+    expect(resumeInterruptedSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd']);
     expect(controller.pending).toBeNull();
     expect(controller.busy).toBe(false);
   });

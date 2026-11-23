@@ -33,9 +33,9 @@ use tauri::Manager;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::app_lifecycle::{quit_session_label, session_location};
-use crate::session_commands::project_active_session;
+use crate::session_commands::{project_active_session, ActiveSessionInfo};
 use crate::session_runner::SessionRegistry;
-use crate::store::{Session, Store};
+use crate::store::{PipelineKind, Session, Store};
 
 use plan::{action_for, classify_candidate, CandidateKind};
 
@@ -52,7 +52,8 @@ pub struct InterruptedSession {
     pub project_id: Option<String>,
     pub branch_id: Option<String>,
     pub session_type: Option<String>,
-    /// `commit on fix-login`, as the quit prompt labels sessions.
+    /// `commit on fix-login`, as the quit prompt labels sessions; a pipeline
+    /// row by its kind (`rebase on fix-login`).
     pub label: String,
     pub branch_name: Option<String>,
     pub project_name: Option<String>,
@@ -189,7 +190,7 @@ fn describe(store: &Store, session: &Session) -> Option<InterruptedSession> {
     let action = action_for(&candidate);
     let info = project_active_session(store, session);
     let location = session_location(store, &info);
-    let label = quit_session_label(&info, location.as_deref());
+    let label = quit_session_label(&label_info(session, &info), location.as_deref());
     let branch_name = info
         .branch_id
         .as_deref()
@@ -212,6 +213,26 @@ fn describe(store: &Store, session: &Session) -> Option<InterruptedSession> {
         reason: action.skip_reason(),
         interrupted_at: session.updated_at,
     })
+}
+
+/// The projection the row's label is built from: a pipeline row reads as its
+/// pipeline kind (`rebase on fix-login`), not as the `commit` its
+/// pending-commit artifact makes it for the busy-state projection, whose
+/// `session_type` is left as it is.
+fn label_info(session: &Session, info: &ActiveSessionInfo) -> ActiveSessionInfo {
+    let Some(kind) = session.pipeline.as_ref().and_then(|p| p.kind.as_ref()) else {
+        return info.clone();
+    };
+    let kind = match kind {
+        PipelineKind::Rebase => "rebase",
+        PipelineKind::Squash => "squash",
+        PipelineKind::Push => "push",
+        PipelineKind::Pull => "pull",
+    };
+    ActiveSessionInfo {
+        session_type: Some(kind.to_string()),
+        ..info.clone()
+    }
 }
 
 /// The interrupted set newer than `handled_through`, and the marker a launch

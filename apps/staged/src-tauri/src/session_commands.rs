@@ -6798,6 +6798,17 @@ async fn start_queued_session_for_branch(
 ) -> Result<QueuedSessionStart, String> {
     let claim = QueuedSessionClaim::new(&branch_id, &session.id, schedule.kind, mode);
 
+    // A row launch resume put back on the queue with its conversation intact
+    // is resumed in its turn, not started over (see `QueuedStartKind`). That
+    // includes a pipeline row whose agent turn the quit cut off: running its
+    // steps again would restart a rebase the agent was resolving.
+    if let QueuedStartKind::Resume { .. } = queued_start_kind(&session) {
+        return start_requeued_session_for_branch(
+            store, registry, app_handle, branch_id, session, claim,
+        )
+        .await;
+    }
+
     if matches!(schedule.kind, BranchSessionScheduleKind::CommitPipeline) {
         return crate::prs::start_queued_commit_pipeline_for_branch(
             store, registry, app_handle, branch_id, session, provider, claim,
@@ -6818,15 +6829,6 @@ async fn start_queued_session_for_branch(
             session.id
         )
     })?;
-
-    // A row launch resume put back on the queue with its conversation intact
-    // is resumed in its turn, not started over (see `QueuedStartKind`).
-    if let QueuedStartKind::Resume { .. } = queued_start_kind(&session) {
-        return start_requeued_session_for_branch(
-            store, registry, app_handle, branch_id, session, claim,
-        )
-        .await;
-    }
 
     // Use the original prompt from the queued session.
     let (prompt, launch_context) = extract_launch_context(&session.prompt)?;
@@ -9183,6 +9185,18 @@ mod tests {
             dispatch < fresh_start,
             "the re-queued resume must be dispatched before the fresh start path"
         );
+        // A re-queued pipeline row resumes its agent turn too, rather than
+        // running its steps again.
+        for pipeline_start in [
+            "start_queued_commit_pipeline_for_branch(",
+            "start_queued_git_pipeline_for_branch(",
+        ] {
+            let pipeline_dispatch = body.find(pipeline_start).expect(pipeline_start);
+            assert!(
+                dispatch < pipeline_dispatch,
+                "the re-queued resume must be dispatched before `{pipeline_start}`"
+            );
+        }
 
         let resume = "async fn start_requeued_session_for_branch(";
         let body = &source[source.find(resume).expect(resume)..];

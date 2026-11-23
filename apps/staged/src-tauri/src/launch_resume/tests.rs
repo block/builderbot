@@ -6,7 +6,7 @@ use tauri::Manager;
 
 use super::plan::{
     action_for, plan_launch_resume, CandidateKind, LaunchAction, LaunchCandidate,
-    PIPELINE_NOT_RESUMED_REASON, PROJECT_NEVER_STARTED_REASON, PROJECT_SESSION_RESUME_PROMPT,
+    PROJECT_NEVER_STARTED_REASON, PROJECT_SESSION_RESUME_PROMPT,
 };
 use super::run::{run_project_phase, run_repo_phase, wait_until_settled, PhaseOutcome};
 use super::{build_recovery, handled_through_from_preferences, LaunchResumeState};
@@ -82,6 +82,23 @@ fn interrupted_queued_commit(store: &Store, branch_id: &str, created_at: i64) ->
     session
 }
 
+/// A rebase pipeline on `branch` the quit cut off while its agent was
+/// resolving conflicts: linked through a pending commit like a commit
+/// session, with the ACP conversation the hand-off started.
+fn interrupted_rebase(store: &Store, branch_id: &str, created_at: i64, agent_id: &str) -> Session {
+    let mut session = Session::new_running("Rebase onto main", Path::new("/tmp"))
+        .with_branch(branch_id)
+        .with_agent(agent_id);
+    session.created_at = created_at;
+    session.pipeline =
+        Some(store::PipelineExecution::from_steps(&[]).with_kind(store::PipelineKind::Rebase));
+    store.create_session(&session).unwrap();
+    let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+    end_with_app_quit(store, &session.id, SessionStatus::Error);
+    session
+}
+
 fn interrupted_project_session(
     store: &Store,
     project_id: &str,
@@ -131,8 +148,7 @@ fn candidate(
     }
 }
 
-const REPO: CandidateKind = CandidateKind::Repo { pipeline: false };
-const PIPELINE: CandidateKind = CandidateKind::Repo { pipeline: true };
+const REPO: CandidateKind = CandidateKind::Repo;
 
 // ---------------------------------------------------------------------------
 // The plan
@@ -147,12 +163,6 @@ fn action_depends_on_kind_and_conversation() {
     assert_eq!(
         action_for(&candidate("a", Some("b"), 1, REPO, false)),
         LaunchAction::Requeue
-    );
-    assert_eq!(
-        action_for(&candidate("a", Some("b"), 1, PIPELINE, true)),
-        LaunchAction::Skip {
-            reason: PIPELINE_NOT_RESUMED_REASON
-        }
     );
     assert_eq!(
         action_for(&candidate("a", None, 1, CandidateKind::Project, true)),
@@ -189,7 +199,7 @@ fn plan_orders_repo_by_branch_then_created_at_and_project_after() {
         candidate("pikchr", None, 5, CandidateKind::Internal, true),
         candidate("a-early", Some("branch-a"), 10, REPO, false),
         candidate("p1", None, 20, CandidateKind::Project, false),
-        candidate("b-early", Some("branch-b"), 35, PIPELINE, true),
+        candidate("b-early", Some("branch-b"), 35, REPO, true),
     ]);
 
     let repo: Vec<(&str, &LaunchAction)> = plan
@@ -202,12 +212,7 @@ fn plan_orders_repo_by_branch_then_created_at_and_project_after() {
         vec![
             ("a-early", &LaunchAction::Requeue),
             ("a-late", &LaunchAction::Resume),
-            (
-                "b-early",
-                &LaunchAction::Skip {
-                    reason: PIPELINE_NOT_RESUMED_REASON
-                }
-            ),
+            ("b-early", &LaunchAction::Resume),
             ("b-late", &LaunchAction::Requeue),
         ]
     );
@@ -234,13 +239,17 @@ fn build_recovery_partitions_labels_and_excludes_internal_rows() {
     let project_session = interrupted_project_session(&store, &project.id, 30, Some("acp-2"));
     let project_never_started = interrupted_project_session(&store, &project.id, 40, None);
 
-    // A pipeline row: listed, not resumable automatically.
+    // Pipeline rows resume like any other: a push linked by its own branch,
+    // and a rebase linked by its pending commit, each labelled by its kind.
     let mut push = Session::new_running("Push the current branch to the remote", Path::new("/tmp"))
         .with_branch(&branch.id)
         .with_agent("acp-3");
-    push.pipeline = Some(store::PipelineExecution::from_steps(&[]));
+    push.created_at = 25;
+    push.pipeline =
+        Some(store::PipelineExecution::from_steps(&[]).with_kind(store::PipelineKind::Push));
     store.create_session(&push).unwrap();
     end_with_app_quit(&store, &push.id, SessionStatus::Cancelled);
+    let rebase = interrupted_rebase(&store, &branch.id, 27, "acp-6");
 
     // A Pikchr child: no branch, no project note. Never offered.
     let pikchr = Session::new_running("diagram", Path::new("/tmp")).with_agent("acp-4");
@@ -271,7 +280,12 @@ fn build_recovery_partitions_labels_and_excludes_internal_rows() {
         .collect();
     assert_eq!(
         repo_ids,
-        vec![repo.id.as_str(), queued.id.as_str(), push.id.as_str()]
+        vec![
+            repo.id.as_str(),
+            queued.id.as_str(),
+            push.id.as_str(),
+            rebase.id.as_str()
+        ]
     );
     assert_eq!(recovery.repo_sessions[0].disposition, "resume");
     assert_eq!(recovery.repo_sessions[0].label, "commit on fix-login");
@@ -284,14 +298,20 @@ fn build_recovery_partitions_labels_and_excludes_internal_rows() {
         Some("Widgets")
     );
     assert_eq!(recovery.repo_sessions[1].disposition, "restart");
-    assert_eq!(recovery.repo_sessions[2].disposition, "manual");
-    assert_eq!(
-        recovery.repo_sessions[2].reason,
-        Some(PIPELINE_NOT_RESUMED_REASON)
-    );
+    assert_eq!(recovery.repo_sessions[2].disposition, "resume");
+    assert_eq!(recovery.repo_sessions[2].reason, None);
+    assert_eq!(recovery.repo_sessions[2].label, "push on fix-login");
     assert_eq!(
         recovery.repo_sessions[2].session_type.as_deref(),
         Some("push")
+    );
+    assert_eq!(recovery.repo_sessions[3].disposition, "resume");
+    assert_eq!(recovery.repo_sessions[3].reason, None);
+    assert_eq!(recovery.repo_sessions[3].label, "rebase on fix-login");
+    // The busy-state projection still reads the pending commit's type.
+    assert_eq!(
+        recovery.repo_sessions[3].session_type.as_deref(),
+        Some("commit")
     );
 
     let project_ids: Vec<&str> = recovery
@@ -314,11 +334,10 @@ fn build_recovery_partitions_labels_and_excludes_internal_rows() {
         Some(PROJECT_NEVER_STARTED_REASON)
     );
 
-    assert!(!recovery
-        .resumable_ids()
-        .iter()
-        .any(|id| id == &push.id || id == &project_never_started.id));
-    assert_eq!(recovery.resumable_ids().len(), 3);
+    let resumable = recovery.resumable_ids();
+    assert!(resumable.contains(&push.id) && resumable.contains(&rebase.id));
+    assert!(!resumable.contains(&project_never_started.id));
+    assert_eq!(resumable.len(), 5);
 
     // The marker is the newest row offered; nothing is offered past it.
     let max_updated = recovery
@@ -454,6 +473,35 @@ fn launch_holds_deferred_pushes_the_offer_names_and_kicks_the_rest() {
     let mut expected = vec![branch.id.clone(), sibling.id.clone()];
     expected.sort();
     assert_eq!(held, expected);
+}
+
+/// An interrupted pipeline row holds its branch's deferred push like any
+/// other row the offer names: the push waits until the resumed rebase is back
+/// in place, so it goes out after the rebase rather than before it finishes.
+#[test]
+fn launch_holds_the_deferred_push_of_a_branch_with_an_interrupted_pipeline() {
+    let (store, project, branch) = store_with_branch();
+    let sibling = store::Branch::new(&project.id, "sibling", "main");
+    store.create_branch(&sibling).unwrap();
+    for id in [&branch.id, &sibling.id] {
+        arm_deferred_push(&store, id);
+    }
+    interrupted_rebase(&store, &branch.id, 10, "acp-1");
+
+    let kicker = Arc::new(crate::session_queue::BranchQueueKicker::recording());
+    let app = mock_app();
+    app.manage(Arc::clone(&kicker));
+    app.manage(LaunchResumeState::default());
+    super::detect_at_launch(app.handle(), &store);
+    super::kick_deferred_pushes_at_launch(app.handle(), &store);
+
+    let offer = super::get_interrupted_sessions(app.state()).expect("an offer");
+    assert_eq!(offer.repo_sessions[0].disposition, "resume");
+    assert_eq!(kicker.kicked_branches(), vec![sibling.id.clone()]);
+    assert_eq!(
+        app.state::<LaunchResumeState>().deferred_push_holds(),
+        vec![branch.id.clone()]
+    );
 }
 
 /// With nothing interrupted there is no offer to wait on: every armed branch
@@ -818,30 +866,69 @@ async fn phase_skips_rows_that_are_no_longer_interrupted() {
     assert_eq!(status_of(&store, &session.id), SessionStatus::Running);
 }
 
-/// A pipeline row is listed but never touched by the phase.
+/// A pipeline row whose agent turn the quit cut off is resumed through the
+/// gate like any other row with a conversation: claimed `running` and handed
+/// to the resume, which continues the turn rather than rerunning the steps.
 #[tokio::test]
-async fn phase_leaves_pipeline_rows_terminal() {
+async fn phase_resumes_a_pipeline_row_with_a_conversation() {
     let (store, _project, branch) = store_with_branch();
     let registry = Arc::new(SessionRegistry::new());
     let app = mock_app();
 
-    let mut push = Session::new_running("Push the current branch to the remote", Path::new("/tmp"))
-        .with_branch(&branch.id)
-        .with_agent("acp-3");
-    push.pipeline = Some(store::PipelineExecution::from_steps(&[]));
-    store.create_session(&push).unwrap();
-    end_with_app_quit(&store, &push.id, SessionStatus::Cancelled);
+    let rebase = interrupted_rebase(&store, &branch.id, 100, "acp-3");
 
     let plan = plan_launch_resume(vec![super::plan::classify_candidate(
         &store,
-        store.get_session(&push.id).unwrap().as_ref().unwrap(),
+        store.get_session(&rebase.id).unwrap().as_ref().unwrap(),
     )]);
+    assert_eq!(plan.repo[0].action, LaunchAction::Resume);
+
+    let claimed = std::sync::Mutex::new(Vec::new());
+    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, |claim| {
+        claimed.lock().unwrap().push(claim.session.id.clone());
+        async { Ok(()) }
+    })
+    .await;
+    assert_eq!(outcome.resumed, vec![rebase.id.clone()]);
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(*claimed.lock().unwrap(), vec![rebase.id.clone()]);
+    assert_eq!(status_of(&store, &rebase.id), SessionStatus::Running);
+}
+
+/// A pipeline row the gate blocks (a row re-queued ahead of it) waits its turn
+/// with its conversation intact, so the drain resumes its agent turn instead
+/// of running the pipeline's steps again.
+#[tokio::test]
+async fn blocked_pipeline_row_is_requeued_to_resume_its_turn() {
+    let (store, _project, branch) = store_with_branch();
+    let registry = Arc::new(SessionRegistry::new());
+    let app = mock_app();
+
+    let first = interrupted_queued_commit(&store, &branch.id, 100);
+    let rebase = interrupted_rebase(&store, &branch.id, 200, "acp-3");
+
+    let candidates: Vec<LaunchCandidate> = [&first, &rebase]
+        .iter()
+        .map(|s| {
+            super::plan::classify_candidate(
+                &store,
+                store.get_session(&s.id).unwrap().as_ref().unwrap(),
+            )
+        })
+        .collect();
+    let plan = plan_launch_resume(candidates);
     let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
+    assert!(outcome.resumed.is_empty(), "{:?}", outcome.resumed);
+    assert_eq!(outcome.requeued, vec![first.id.clone(), rebase.id.clone()]);
+
+    let requeued = store.get_session(&rebase.id).unwrap().unwrap();
+    assert_eq!(requeued.status, SessionStatus::Queued);
     assert_eq!(
-        outcome.skipped,
-        vec![(push.id.clone(), PIPELINE_NOT_RESUMED_REASON.to_string())]
+        queued_start_kind(&requeued),
+        QueuedStartKind::Resume {
+            agent_session_id: "acp-3".to_string()
+        }
     );
-    assert_eq!(status_of(&store, &push.id), SessionStatus::Cancelled);
 }
 
 // ---------------------------------------------------------------------------

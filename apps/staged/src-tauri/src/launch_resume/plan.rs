@@ -24,8 +24,6 @@ pub(crate) const PROJECT_SESSION_RESUME_PROMPT: &str = "Staged was closed and re
      you left off.";
 
 /// Why a session is listed but not restarted automatically.
-pub(crate) const PIPELINE_NOT_RESUMED_REASON: &str =
-    "pipeline sessions are not resumed automatically; run the push or PR again from the branch";
 pub(crate) const PROJECT_NEVER_STARTED_REASON: &str =
     "the project session never reached its agent; start a new project session instead";
 pub(crate) const INTERNAL_SESSION_REASON: &str = "internal session; its parent re-runs it";
@@ -33,9 +31,13 @@ pub(crate) const INTERNAL_SESSION_REASON: &str = "internal session; its parent r
 /// What kind of row a candidate is, as far as launch resume cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidateKind {
-    /// A branch-scoped session: commit, note, review, or a pr/push/pull
-    /// pipeline row.
-    Repo { pipeline: bool },
+    /// A branch-scoped session: commit, note, or review, or a command
+    /// pipeline row (rebase, squash, push, pull, PR). Pipeline rows are
+    /// resumed like the rest: one whose agent turn the quit cut off continues
+    /// that turn, as the chat pane's Resume does, and the drain resumes a
+    /// re-queued one rather than running its steps again
+    /// (`session_commands::QueuedStartKind`).
+    Repo,
     /// A project-level session (linked from `project_notes`).
     Project,
     /// Neither: a Pikchr child session or a row whose links are gone.
@@ -114,9 +116,7 @@ pub(crate) fn classify_candidate(store: &Store, session: &Session) -> LaunchCand
         .flatten()
         .is_some();
     let kind = if info.branch_id.is_some() {
-        CandidateKind::Repo {
-            pipeline: session.pipeline.is_some(),
-        }
+        CandidateKind::Repo
     } else if is_project_session {
         CandidateKind::Project
     } else {
@@ -134,13 +134,8 @@ pub(crate) fn classify_candidate(store: &Store, session: &Session) -> LaunchCand
 /// Decide the action for one candidate.
 pub(crate) fn action_for(candidate: &LaunchCandidate) -> LaunchAction {
     match candidate.kind {
-        CandidateKind::Repo { pipeline: true } => LaunchAction::Skip {
-            reason: PIPELINE_NOT_RESUMED_REASON,
-        },
-        CandidateKind::Repo { pipeline: false } if candidate.agent_resumable => {
-            LaunchAction::Resume
-        }
-        CandidateKind::Repo { pipeline: false } => LaunchAction::Requeue,
+        CandidateKind::Repo if candidate.agent_resumable => LaunchAction::Resume,
+        CandidateKind::Repo => LaunchAction::Requeue,
         CandidateKind::Project if candidate.agent_resumable => LaunchAction::Resume,
         CandidateKind::Project => LaunchAction::Skip {
             reason: PROJECT_NEVER_STARTED_REASON,
@@ -163,7 +158,7 @@ pub(crate) fn plan_launch_resume(candidates: Vec<LaunchCandidate>) -> LaunchResu
     let mut project: Vec<&LaunchCandidate> = Vec::new();
     for candidate in &candidates {
         match candidate.kind {
-            CandidateKind::Repo { .. } => repo.push(candidate),
+            CandidateKind::Repo => repo.push(candidate),
             CandidateKind::Project => project.push(candidate),
             CandidateKind::Internal => {}
         }

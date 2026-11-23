@@ -391,8 +391,10 @@ mark.search-match-current {
   cursor: pointer;
 }
 
-.hashtag-badge[data-hashtag-ref]:hover {
-  filter: brightness(0.96);
+@media (hover: hover) {
+  .hashtag-badge[data-hashtag-ref]:hover {
+    filter: brightness(0.96);
+  }
 }
 
 .hashtag-badge[data-hashtag-ref]:focus-visible {
@@ -680,10 +682,16 @@ mark.search-match-current {
     border-color 0.15s ease;
 }
 
-.board-toolbar-trigger:hover:not(:disabled),
 .board-toolbar-trigger[data-state='open'] {
   background: var(--bg-hover);
   border-color: var(--border-emphasis);
+}
+
+@media (hover: hover) {
+  .board-toolbar-trigger:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-emphasis);
+  }
 }
 
 .board-toolbar-trigger .trigger-label {

@@ -124,8 +124,10 @@
     cursor: pointer;
   }
 
-  .plan-header:hover .plan-title {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .plan-header:hover .plan-title {
+      text-decoration: underline;
+    }
   }
 
   .plan-caret {

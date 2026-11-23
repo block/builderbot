@@ -150,8 +150,10 @@
     contain-intrinsic-size: auto 46px;
   }
 
-  .board-card:hover {
-    background-color: var(--bg-hover);
+  @media (hover: hover) {
+    .board-card:hover {
+      background-color: var(--bg-hover);
+    }
   }
 
   /* Left behind while its copy is in hand (BoardDragGhost). */

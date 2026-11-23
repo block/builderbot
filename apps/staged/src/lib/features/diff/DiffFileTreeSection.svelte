@@ -504,8 +504,10 @@
       box-shadow 0.1s;
   }
 
-  .tree-item:hover {
-    background-color: var(--bg-hover);
+  @media (hover: hover) {
+    .tree-item:hover {
+      background-color: var(--bg-hover);
+    }
   }
 
   .tree-item.selected {
@@ -593,9 +595,11 @@
     color: var(--status-modified);
   }
 
-  .status-icon:not(.status-icon-static):hover {
-    background-color: var(--bg-hover);
-    color: var(--status-added);
+  @media (hover: hover) {
+    .status-icon:not(.status-icon-static):hover {
+      background-color: var(--bg-hover);
+      color: var(--status-added);
+    }
   }
 
   /* Finger-sized rows and review toggles on a touch screen: the rows are
@@ -629,12 +633,36 @@
     display: none;
   }
 
-  .status-icon:hover .icon-default {
-    display: none;
+  @media (hover: hover) {
+    .status-icon:hover .icon-default {
+      display: none;
+    }
+
+    .status-icon:hover .icon-hover {
+      display: flex;
+    }
   }
 
-  .status-icon:hover .icon-hover {
-    display: flex;
+  /* Nothing hovers on a touch screen, so the toggle's action would never
+     show and the status glyph gave no sign it could be tapped. It sits
+     beside the glyph instead, muted so a check reads as the control and not
+     as a file already reviewed. The glyph keeps a fixed width so the actions
+     line up down the tree whatever each file's status. */
+  @media (hover: none) {
+    .status-icon:not(.status-icon-static) {
+      width: auto;
+      gap: 4px;
+      padding-inline: 4px;
+    }
+
+    .status-icon:not(.status-icon-static) .icon-default {
+      min-width: 16px;
+    }
+
+    .icon-hover {
+      display: flex;
+      color: var(--text-muted);
+    }
   }
 
   .icon-hover-unreview {

@@ -820,9 +820,14 @@
     overflow: hidden;
   }
 
-  .hashtag-dropdown-item:hover,
   .hashtag-dropdown-item.selected {
     background: var(--bg-hover);
+  }
+
+  @media (hover: hover) {
+    .hashtag-dropdown-item:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .hashtag-item-icon {

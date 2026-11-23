@@ -153,9 +153,11 @@
       border-color 0.15s ease;
   }
 
-  :global(.icon-picker-trigger:hover) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
+  @media (hover: hover) {
+    :global(.icon-picker-trigger:hover) {
+      background: var(--bg-hover);
+      border-color: var(--border-emphasis);
+    }
   }
 
   .icon-search {
@@ -181,8 +183,10 @@
     cursor: pointer;
   }
 
-  .icon-default:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .icon-default:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .icon-default.selected {
@@ -211,9 +215,11 @@
     cursor: pointer;
   }
 
-  .icon-option:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .icon-option:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   .icon-option.selected {

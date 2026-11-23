@@ -34,6 +34,13 @@
 
   let openTimer: ReturnType<typeof setTimeout> | null = null;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // A touch never hovers, so a tap on the pill opens the popover instead and
+  // it stays until the pill is tapped again, something else is pressed, or
+  // Escape. Mouse and click events do not say what made them, so the pill
+  // notes the type of the last pointer to reach it.
+  let lastPointerType: string | null = null;
+  let pinned = $state(false);
   let loadVersion = 0;
 
   function clamp(value: number, min: number, max: number): number {
@@ -110,11 +117,22 @@
     if (open || openTimer) return;
     openTimer = setTimeout(() => {
       openTimer = null;
-      open = true;
-      positioned = false;
-      void loadCommits();
-      void placePopover();
+      show();
     }, OPEN_DELAY_MS);
+  }
+
+  function show() {
+    open = true;
+    positioned = false;
+    void loadCommits();
+    void placePopover();
+  }
+
+  function hide() {
+    cancelTimers();
+    open = false;
+    positioned = false;
+    pinned = false;
   }
 
   function scheduleClose() {
@@ -125,10 +143,54 @@
     if (!open || closeTimer) return;
     closeTimer = setTimeout(() => {
       closeTimer = null;
-      open = false;
-      positioned = false;
+      hide();
     }, CLOSE_DELAY_MS);
   }
+
+  // A touch browser makes up mouse events for a tap: the enter before the
+  // click, the leave not until the next tap elsewhere. Neither is a hover.
+  function handleMouseEnter() {
+    if (lastPointerType !== 'touch') scheduleOpen();
+  }
+
+  function handleMouseLeave() {
+    if (lastPointerType !== 'touch') scheduleClose();
+  }
+
+  function notePointer(event: PointerEvent) {
+    lastPointerType = event.pointerType;
+  }
+
+  function handleAnchorClick() {
+    if (lastPointerType !== 'touch') return;
+    if (open) {
+      hide();
+      return;
+    }
+    cancelTimers();
+    pinned = true;
+    show();
+  }
+
+  $effect(() => {
+    if (!pinned) return;
+    const handlePress = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && (anchorEl?.contains(target) || popoverEl?.contains(target))) {
+        return;
+      }
+      hide();
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') hide();
+    };
+    document.addEventListener('pointerdown', handlePress, true);
+    document.addEventListener('keydown', handleKey, true);
+    return () => {
+      document.removeEventListener('pointerdown', handlePress, true);
+      document.removeEventListener('keydown', handleKey, true);
+    };
+  });
 
   $effect(() => {
     const unlisten = onBranchGitStateUpdated(branchId, () => {
@@ -162,12 +224,15 @@
   const overflowCount = $derived(commits ? Math.max(0, count - visibleCommits.length) : 0);
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <span
   class="hover-anchor"
   bind:this={anchorEl}
-  onmouseenter={scheduleOpen}
-  onmouseleave={scheduleClose}
+  onmouseenter={handleMouseEnter}
+  onmouseleave={handleMouseLeave}
+  onpointerenter={notePointer}
+  onpointerdown={notePointer}
+  onclick={handleAnchorClick}
 >
   {@render children()}
 </span>

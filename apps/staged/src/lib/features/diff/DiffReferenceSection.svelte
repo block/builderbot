@@ -157,9 +157,11 @@
     border-radius: 0;
   }
 
-  .tree-item:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .tree-item:hover {
+      background-color: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   .tree-item.selected {

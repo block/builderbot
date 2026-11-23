@@ -299,8 +299,10 @@
       background-color 0.1s;
   }
 
-  :global(.theme-dropdown-trigger:hover) {
-    border-color: var(--border-emphasis);
+  @media (hover: hover) {
+    :global(.theme-dropdown-trigger:hover) {
+      border-color: var(--border-emphasis);
+    }
   }
 
   .trigger-swatch {
@@ -355,9 +357,11 @@
       color 0.1s;
   }
 
-  .theme-filter-btn:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .theme-filter-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   .theme-filter-btn.active {
@@ -378,8 +382,10 @@
     transition: border-color 0.1s;
   }
 
-  .theme-swatch:hover {
-    filter: brightness(1.08);
+  @media (hover: hover) {
+    .theme-swatch:hover {
+      filter: brightness(1.08);
+    }
   }
 
   .theme-swatch.active {

@@ -177,10 +177,16 @@
     cursor: pointer;
   }
 
-  .diff-collapse-row:hover,
   .diff-collapse-row:focus-visible {
     color: var(--text-muted);
     outline: none;
+  }
+
+  @media (hover: hover) {
+    .diff-collapse-row:hover {
+      color: var(--text-muted);
+      outline: none;
+    }
   }
 
   .diff-row {

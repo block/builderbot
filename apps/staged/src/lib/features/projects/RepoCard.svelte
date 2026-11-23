@@ -614,9 +614,11 @@
       box-shadow 0.15s ease;
   }
 
-  .repo-card:hover {
-    background: var(--card-bg-hover);
-    border-color: var(--card-border-hover);
+  @media (hover: hover) {
+    .repo-card:hover {
+      background: var(--card-bg-hover);
+      border-color: var(--card-border-hover);
+    }
   }
 
   .repo-card.reorderable {

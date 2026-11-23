@@ -954,8 +954,10 @@
       color 0.15s ease;
   }
 
-  .context-item:hover {
-    background: var(--repo-sidebar-hover-bg);
+  @media (hover: hover) {
+    .context-item:hover {
+      background: var(--repo-sidebar-hover-bg);
+    }
   }
 
   .context-item.selected {

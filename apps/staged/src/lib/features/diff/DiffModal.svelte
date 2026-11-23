@@ -1970,9 +1970,14 @@
     transition: background-color 0.1s;
   }
 
-  .context-option:hover,
   .context-option.focused {
     background-color: var(--bg-hover);
+  }
+
+  @media (hover: hover) {
+    .context-option:hover {
+      background-color: var(--bg-hover);
+    }
   }
 
   .context-option.selected {
@@ -2229,9 +2234,11 @@
     color: var(--diff-comment-accent);
   }
 
-  :global(.diff-viewer-container .range-btn.comment-btn:hover) {
-    color: var(--text-primary);
-    background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
+  @media (hover: hover) {
+    :global(.diff-viewer-container .range-btn.comment-btn:hover) {
+      color: var(--text-primary);
+      background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
+    }
   }
 
   /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */

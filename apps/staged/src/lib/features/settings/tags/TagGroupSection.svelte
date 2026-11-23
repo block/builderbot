@@ -292,8 +292,10 @@
     user-select: none;
   }
 
-  .drag-handle:hover {
-    color: var(--text-muted);
+  @media (hover: hover) {
+    .drag-handle:hover {
+      color: var(--text-muted);
+    }
   }
 
   .drag-handle:active {
@@ -318,8 +320,10 @@
     text-overflow: ellipsis;
   }
 
-  .group-name:hover {
-    border-color: var(--border-subtle);
+  @media (hover: hover) {
+    .group-name:hover {
+      border-color: var(--border-subtle);
+    }
   }
 
   .group-name:focus {
@@ -356,10 +360,16 @@
     cursor: pointer;
   }
 
-  :global(.tag-group-menu-trigger:hover),
   :global(.tag-group-menu-trigger[data-state='open']) {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  @media (hover: hover) {
+    :global(.tag-group-menu-trigger:hover) {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   /* As on a tag row: no drag on a phone or a touch screen, where the ⋯

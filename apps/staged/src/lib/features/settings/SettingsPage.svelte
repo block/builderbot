@@ -213,8 +213,10 @@
     outline-offset: -1px;
   }
 
-  .nav-item:hover {
-    background: var(--settings-nav-hover-bg);
+  @media (hover: hover) {
+    .nav-item:hover {
+      background: var(--settings-nav-hover-bg);
+    }
   }
 
   .nav-item.active {

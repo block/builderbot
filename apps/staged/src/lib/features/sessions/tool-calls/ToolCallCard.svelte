@@ -162,12 +162,20 @@
     cursor: pointer;
   }
 
-  .tool-body-retry:hover,
   .tool-body-retry:focus-visible {
     border-color: var(--border-emphasis);
     background: var(--bg-hover);
     color: var(--text-primary);
     outline: none;
+  }
+
+  @media (hover: hover) {
+    .tool-body-retry:hover {
+      border-color: var(--border-emphasis);
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      outline: none;
+    }
   }
 
   :global(.tool-session-button) {
@@ -181,17 +189,25 @@
     box-shadow: none;
   }
 
-  :global(.tool-session-button:hover) {
-    border-color: var(--border-emphasis);
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    :global(.tool-session-button:hover) {
+      border-color: var(--border-emphasis);
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   /* A failed generate_pikchr call keeps its session button (the child session
      records the failure); tint it so the error is visible without expanding. */
-  :global(.tool-session-button-danger),
-  :global(.tool-session-button-danger:hover) {
+  :global(.tool-session-button-danger) {
     border-color: var(--ui-danger);
     color: var(--ui-danger);
+  }
+
+  @media (hover: hover) {
+    :global(.tool-session-button-danger:hover) {
+      border-color: var(--ui-danger);
+      color: var(--ui-danger);
+    }
   }
 </style>

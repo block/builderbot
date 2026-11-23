@@ -132,8 +132,10 @@
   }
 
   /* The block is already the hover tint; the X needs a tint of its own. */
-  .composer-quote :global(.composer-quote-remove:hover) {
-    background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  @media (hover: hover) {
+    .composer-quote :global(.composer-quote-remove:hover) {
+      background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+    }
   }
 
   .composer-quote :global(.composer-quote-reply) {

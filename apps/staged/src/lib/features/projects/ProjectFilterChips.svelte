@@ -128,14 +128,16 @@
     white-space: nowrap;
   }
 
-  .filter-chip:hover:not(:disabled) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-  }
+  @media (hover: hover) {
+    .filter-chip:hover:not(:disabled) {
+      background: var(--bg-hover);
+      border-color: var(--border-emphasis);
+    }
 
-  .filter-chip.active:hover:not(:disabled) {
-    background: var(--ui-accent);
-    border-color: var(--ui-accent);
+    .filter-chip.active:hover:not(:disabled) {
+      background: var(--ui-accent);
+      border-color: var(--ui-accent);
+    }
   }
 
   .filter-chip:disabled {
@@ -158,8 +160,10 @@
     border-color: transparent;
   }
 
-  .filter-chip.repo-filter:hover:not(:disabled) {
-    background: var(--repo-bg-hover, var(--bg-hover));
+  @media (hover: hover) {
+    .filter-chip.repo-filter:hover:not(:disabled) {
+      background: var(--repo-bg-hover, var(--bg-hover));
+    }
   }
 
   .filter-chip.repo-filter.active {
@@ -178,17 +182,27 @@
     font-weight: 600;
   }
 
-  .filter-chip.tag-filter:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--tag-chip-color) 24%, transparent);
-    border-color: transparent;
+  @media (hover: hover) {
+    .filter-chip.tag-filter:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--tag-chip-color) 24%, transparent);
+      border-color: transparent;
+    }
   }
 
-  .filter-chip.tag-filter.active,
-  .filter-chip.tag-filter.active:hover:not(:disabled) {
+  .filter-chip.tag-filter.active {
     box-shadow: 0 0 0 2px var(--tag-chip-color);
     background: color-mix(in srgb, var(--tag-chip-color) 16%, transparent);
     color: var(--tag-chip-color);
     border-color: transparent;
+  }
+
+  @media (hover: hover) {
+    .filter-chip.tag-filter.active:hover:not(:disabled) {
+      box-shadow: 0 0 0 2px var(--tag-chip-color);
+      background: color-mix(in srgb, var(--tag-chip-color) 16%, transparent);
+      color: var(--tag-chip-color);
+      border-color: transparent;
+    }
   }
 
   .filter-chip.tag-filter :global(svg) {
@@ -211,8 +225,10 @@
     color: var(--text-muted);
   }
 
-  .filter-chip.clear-chip:hover {
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .filter-chip.clear-chip:hover {
+      color: var(--text-primary);
+    }
   }
 
   .filter-count {

@@ -1414,8 +1414,10 @@
     text-decoration: none;
   }
 
-  .markdown-content :global(a:hover) {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .markdown-content :global(a:hover) {
+      text-decoration: underline;
+    }
   }
 
   .markdown-content :global(strong) {

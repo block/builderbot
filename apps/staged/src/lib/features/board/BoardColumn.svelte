@@ -309,8 +309,10 @@
     cursor: pointer;
   }
 
-  .collapsed-strip:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .collapsed-strip:hover {
+      background: var(--bg-hover);
+    }
   }
 
   /* The press that drags the strip must not select its name on the way. */

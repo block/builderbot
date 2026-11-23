@@ -399,8 +399,10 @@
     transition: background-color 0.1s;
   }
 
-  .session-row:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .session-row:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .session-indicator {

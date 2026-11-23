@@ -74,8 +74,10 @@
     cursor: pointer;
   }
 
-  .tool-header-expandable:hover .tool-name {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .tool-header-expandable:hover .tool-name {
+      text-decoration: underline;
+    }
   }
 
   .tool-header:focus-visible {

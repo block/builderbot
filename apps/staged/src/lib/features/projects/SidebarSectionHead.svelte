@@ -79,9 +79,14 @@
     cursor: default;
   }
 
-  .label:not(.static):hover,
   .label.active {
     color: var(--text-primary);
+  }
+
+  @media (hover: hover) {
+    .label:not(.static):hover {
+      color: var(--text-primary);
+    }
   }
 
   .text {

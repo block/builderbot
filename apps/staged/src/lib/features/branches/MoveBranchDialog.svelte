@@ -288,8 +288,10 @@
     cursor: pointer;
   }
 
-  .project-row:hover:not(:disabled) {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .project-row:hover:not(:disabled) {
+      background: var(--bg-hover);
+    }
   }
 
   .project-row.selected {

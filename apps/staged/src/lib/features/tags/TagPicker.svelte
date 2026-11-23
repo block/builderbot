@@ -312,10 +312,12 @@
       color 0.15s ease;
   }
 
-  :global(.add-tag-button:hover:not(:disabled)) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-    color: var(--text-secondary);
+  @media (hover: hover) {
+    :global(.add-tag-button:hover:not(:disabled)) {
+      background: var(--bg-hover);
+      border-color: var(--border-emphasis);
+      color: var(--text-secondary);
+    }
   }
 
   :global(.add-tag-button:disabled) {

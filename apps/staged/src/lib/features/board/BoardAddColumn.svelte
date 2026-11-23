@@ -138,9 +138,11 @@
     width: 100%;
   }
 
-  .add-trigger:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .add-trigger:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   /* A card can't be dropped here: the whole height that refuses it says so,

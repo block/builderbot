@@ -116,9 +116,11 @@
     cursor: pointer;
   }
 
-  .tag-chip-remove:hover:not(:disabled) {
-    opacity: 1;
-    background: color-mix(in srgb, var(--tag-chip-color) 20%, transparent);
+  @media (hover: hover) {
+    .tag-chip-remove:hover:not(:disabled) {
+      opacity: 1;
+      background: color-mix(in srgb, var(--tag-chip-color) 20%, transparent);
+    }
   }
 
   .tag-chip-remove:disabled {

@@ -1388,9 +1388,11 @@
     flex-shrink: 0;
   }
 
-  .rename-project-button:hover:not(:disabled) {
-    color: var(--text-primary);
-    background-color: var(--ui-selection);
+  @media (hover: hover) {
+    .rename-project-button:hover:not(:disabled) {
+      color: var(--text-primary);
+      background-color: var(--ui-selection);
+    }
   }
 
   .rename-project-button:disabled {

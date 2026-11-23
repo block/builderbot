@@ -223,9 +223,14 @@
     transition: background-color 0.15s ease;
   }
 
-  .dialog-resize-handle:hover::after,
   .dialog-resize-handle:focus-visible::after,
   .dialog-resize-handle.active::after {
     background-color: var(--border-emphasis);
+  }
+
+  @media (hover: hover) {
+    .dialog-resize-handle:hover::after {
+      background-color: var(--border-emphasis);
+    }
   }
 </style>

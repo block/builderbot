@@ -53,8 +53,10 @@
     transition: border-color 0.1s ease;
   }
 
-  .swatch:hover {
-    border-color: var(--border-emphasis);
+  @media (hover: hover) {
+    .swatch:hover {
+      border-color: var(--border-emphasis);
+    }
   }
 
   .swatch.selected {

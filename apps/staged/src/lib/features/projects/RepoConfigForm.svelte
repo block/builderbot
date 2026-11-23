@@ -564,9 +564,11 @@
       border-color 0.15s;
   }
 
-  .recent-chip:hover {
-    background: var(--chip-bg-hover);
-    border-color: var(--chip-border-hover);
+  @media (hover: hover) {
+    .recent-chip:hover {
+      background: var(--chip-bg-hover);
+      border-color: var(--chip-border-hover);
+    }
   }
 
   .chip-name {

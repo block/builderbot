@@ -685,8 +685,10 @@
     cursor: pointer;
   }
 
-  .board-hint-action:hover {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .board-hint-action:hover {
+      text-decoration: underline;
+    }
   }
 
   /* Positions BoardScrollEdges' fades over the scroller's sides, and hands

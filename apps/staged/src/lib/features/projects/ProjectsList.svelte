@@ -863,8 +863,10 @@
     contain-intrinsic-size: auto 68px;
   }
 
-  .project-card:hover {
-    background-color: var(--bg-hover);
+  @media (hover: hover) {
+    .project-card:hover {
+      background-color: var(--bg-hover);
+    }
   }
 
   .card-header {

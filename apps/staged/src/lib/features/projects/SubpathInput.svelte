@@ -283,9 +283,14 @@
     transition: background-color 0.1s ease;
   }
 
-  .suggestion-item:hover,
   .suggestion-item.highlighted {
     background: var(--bg-hover);
+  }
+
+  @media (hover: hover) {
+    .suggestion-item:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .suggestion-item :global(svg) {

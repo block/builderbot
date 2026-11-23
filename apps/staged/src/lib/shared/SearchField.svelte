@@ -98,6 +98,15 @@
     border-color: var(--border-emphasis);
   }
 
+  /* On a touch screen the input's text is 16px (app.css), and its line 23px
+     where it was 17px. Less padding keeps the field its 35px, in line with
+     the menu triggers beside it. */
+  @media (pointer: coarse) {
+    .search-field {
+      padding-block: 5px;
+    }
+  }
+
   /* The explicit clear button replaces WebKit's native search cancel glyph. */
   .search-field :global(input[type='search'])::-webkit-search-cancel-button {
     -webkit-appearance: none;

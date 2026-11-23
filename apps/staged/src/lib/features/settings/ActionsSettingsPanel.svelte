@@ -1114,6 +1114,13 @@
     border-color: var(--ui-danger);
   }
 
+  /* Room for the six characters at the 16px a touch screen types in. */
+  @media (pointer: coarse) {
+    .badge-input {
+      width: calc(6ch + 14px);
+    }
+  }
+
   .badge-error {
     color: var(--ui-danger);
     font-size: var(--size-xs);

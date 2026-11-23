@@ -372,6 +372,13 @@
     color: var(--text-faint);
   }
 
+  /* A line that holds the 16px a touch screen types in. */
+  @media (pointer: coarse) {
+    .prompt-input {
+      line-height: 20px;
+    }
+  }
+
   .prompt-input:focus {
     border-color: var(--ui-accent);
   }

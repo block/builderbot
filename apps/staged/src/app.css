@@ -601,6 +601,33 @@ mark.search-match-current {
   }
 }
 
+/* ── Text entry on touch screens ──
+   Anything typed into is at least 16px where the pointer is a finger. The
+   app's text scale is 12-13px, which is small to type in on a phone, and a
+   browser that is allowed to zooms the page into a focused field under 16px
+   (iOS Safari is held off only by `maximum-scale=1`, which Android ignores).
+   `1em` is the parent's size, so a field in larger text (a title being
+   renamed) keeps that size. Fields set their size in component styles and
+   utilities of every specificity, so the rule is `!important` rather than
+   one override per field. Controls with no text to type are left out, as
+   are the non-editable islands inside an editor (hashtag badges, figures).
+   With a mouse nothing here applies. */
+@media (pointer: coarse) {
+  input:not(
+    [type='checkbox'],
+    [type='radio'],
+    [type='range'],
+    [type='file'],
+    [type='color'],
+    [type='hidden']
+  ),
+  textarea,
+  select,
+  [contenteditable]:not([contenteditable='false']) {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 /* ── Pointer drags (shared/pointerDrag.ts) ──
    While a drag made of pointer events is under way, the root carries
    `data-pointer-drag` and the cursor says what a release would do: grabbing,

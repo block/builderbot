@@ -250,12 +250,13 @@
 
   @media (hover: none), (pointer: coarse) {
     /* No hover or text cursor to find a gap by: each one is a finger-sized
-       row (44px, border-box) so text between quotes has a place a tap can
-       land, and an empty one shows its hint, faintly, so the row reads as a
-       place to type rather than as space. */
+       row (44px, border-box: a 24px line of the 16px text a touch screen
+       types in, plus 10px above and below) so text between quotes has a
+       place a tap can land, and an empty one shows its hint, faintly, so the
+       row reads as a place to type rather than as space. */
     .composer-draft-quotes :global(.composer-gap-input) {
       --hashtag-input-min-height: 44px;
-      padding: 12px;
+      padding: 10px 12px;
       line-height: 1.5;
     }
 

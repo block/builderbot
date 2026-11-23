@@ -8,10 +8,10 @@ import {
   withoutViewportFit,
 } from './viewportFit';
 
-// vitest runs in node: `window`, `document` and the safe-area probe are
-// stubbed down to what the module touches. Numbers are the iPhone 17 Pro
-// simulator's on iOS 27.2: an 874 pt window, an 812 pt layout viewport and a
-// 62 pt status bar and a 34 pt home indicator inset.
+// vitest runs in node: `window`, `document`, `ResizeObserver` and the guard's
+// two hidden elements are stubbed down to what the module touches. Numbers
+// are the iPhone 17 Pro simulator's on iOS 27.2: an 874 pt window, an 812 pt
+// layout viewport and a 62 pt status bar and a 34 pt home indicator inset.
 
 const CONTENT =
   'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content, viewport-fit=cover';
@@ -21,7 +21,29 @@ let safeAreaTop: number;
 let safeAreaBottom: number;
 let rootStyle: Map<string, string>;
 let meta: { content: string };
-let probe: { style: Record<string, string>; remove: ReturnType<typeof vi.fn> };
+type FakeElement = { style: Record<string, string>; remove: ReturnType<typeof vi.fn> };
+/** The elements the guard made, in order: the inset probe, then the layout span. */
+let elements: FakeElement[];
+/** Every `ResizeObserver` the guard made. */
+let observers: FakeResizeObserver[];
+
+class FakeResizeObserver {
+  readonly targets: { target: unknown; box: string | undefined }[] = [];
+  connected = true;
+  constructor(private readonly callback: () => void) {
+    observers.push(this);
+  }
+  observe(target: unknown, options?: { box?: string }): void {
+    this.targets.push({ target, box: options?.box });
+  }
+  disconnect(): void {
+    this.connected = false;
+  }
+  /** A watched element changed size. A disconnected observer says nothing. */
+  notify(): void {
+    if (this.connected) this.callback();
+  }
+}
 let fakeWindow: EventTarget & {
   outerWidth: number;
   outerHeight: number;
@@ -41,6 +63,25 @@ function resize(): void {
 function insetsArrive(top: number): void {
   safeAreaTop = top;
   resize();
+}
+
+/** One of the guard's two elements changed size, and no `resize` said so. */
+function sizeChanges(): void {
+  for (const observer of observers) observer.notify();
+}
+
+/** The insets arrive as they can on a cold launch: nothing but `env()` changes. */
+function insetsArriveQuietly(top: number): void {
+  safeAreaTop = top;
+  sizeChanges();
+}
+
+/** As `relayout`, with no `resize`. */
+function relayoutQuietly(top: number, layoutHeight: number): void {
+  safeAreaTop = top;
+  safeAreaBottom = meta.content.includes('viewport-fit') ? 34 : 0;
+  documentElement.clientHeight = layoutHeight;
+  sizeChanges();
 }
 
 /** The reading has stood for the settle time, with no `resize`. */
@@ -75,7 +116,8 @@ beforeEach(() => {
   rootStyle = new Map();
   vi.useFakeTimers();
   meta = { content: CONTENT };
-  probe = { style: {}, remove: vi.fn() };
+  elements = [];
+  observers = [];
   fakeWindow = Object.assign(new EventTarget(), {
     outerWidth: 402,
     outerHeight: 874,
@@ -93,9 +135,14 @@ beforeEach(() => {
   };
   vi.stubGlobal('window', fakeWindow);
   vi.stubGlobal('navigator', {});
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   vi.stubGlobal('document', {
     documentElement,
-    createElement: () => probe,
+    createElement: () => {
+      const element: FakeElement = { style: {}, remove: vi.fn() };
+      elements.push(element);
+      return element;
+    },
     querySelector: (selector: string) => (selector === 'meta[name="viewport"]' ? meta : null),
   });
   vi.stubGlobal('getComputedStyle', () => ({
@@ -409,13 +456,204 @@ describe('guardViewportFit', () => {
     settle();
 
     expect(meta.content).toBe(CONTENT);
-    expect(probe.remove).toHaveBeenCalled();
+    expect(elements).toHaveLength(2);
+    for (const element of elements) expect(element.remove).toHaveBeenCalled();
   });
 
-  it('keeps its probe while it watches', () => {
+  it('keeps its elements while it watches', () => {
     guardViewportFit();
     insetsArrive(62);
     settle();
-    expect(probe.remove).not.toHaveBeenCalled();
+    for (const element of elements) expect(element.remove).not.toHaveBeenCalled();
+  });
+});
+
+describe('guardViewportFit, with no resize', () => {
+  it('watches the size of the inset probe and of the layout span', () => {
+    guardViewportFit();
+    expect(observers).toHaveLength(1);
+    expect(observers[0].targets).toEqual([
+      { target: elements[0], box: 'border-box' },
+      { target: elements[1], box: 'border-box' },
+    ]);
+    // The probe's box follows each inset, the span's the layout viewport.
+    expect(elements[0].style.cssText).toContain('width:env(safe-area-inset-top)');
+    expect(elements[0].style.cssText).toContain('padding-top:env(safe-area-inset-top)');
+    expect(elements[0].style.cssText).toContain('padding-bottom:env(safe-area-inset-bottom)');
+    expect(elements[1].style.cssText).toContain('top:0;bottom:0');
+  });
+
+  it('drops cover once insets that arrive with no resize settle', () => {
+    guardViewportFit();
+    // Past the settle time of the reading taken at the start.
+    vi.advanceTimersByTime(SETTLE_MS * 2);
+
+    insetsArriveQuietly(62);
+    expect(meta.content).toBe(CONTENT);
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(meta.content).toBe(CONTENT);
+    vi.advanceTimersByTime(1);
+
+    expect(meta.content).not.toContain('viewport-fit');
+    expect(rootStyle.get('--safe-bottom-fallback')).toBe('34px');
+  });
+
+  it('does not drop it for insets it is never told of', () => {
+    // What went wrong before: nothing re-checks, so the reading is not taken.
+    vi.stubGlobal('ResizeObserver', undefined);
+    guardViewportFit();
+    safeAreaTop = 62;
+    vi.advanceTimersByTime(SETTLE_MS * 10);
+    expect(meta.content).toBe(CONTENT);
+  });
+
+  it('still follows resize where there is no ResizeObserver', () => {
+    vi.stubGlobal('ResizeObserver', undefined);
+    guardViewportFit();
+    insetsArrive(62);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+  });
+
+  it('keeps cover for a default install whose insets arrive with no resize', () => {
+    guardViewportFit();
+    insetsArriveQuietly(0);
+    vi.advanceTimersByTime(SETTLE_MS * 10);
+    expect(meta.content).toBe(CONTENT);
+    expect(rootStyle.size).toBe(0);
+  });
+
+  it('ignores a passing short reading that goes with no resize', () => {
+    guardViewportFit();
+    insetsArriveQuietly(62);
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    insetsArriveQuietly(0);
+    vi.advanceTimersByTime(SETTLE_MS * 10);
+    expect(meta.content).toBe(CONTENT);
+  });
+
+  it('ignores a passing short reading that is gone when it would settle, untold', () => {
+    guardViewportFit();
+    insetsArriveQuietly(62);
+    safeAreaTop = 0;
+    settle();
+    expect(meta.content).toBe(CONTENT);
+  });
+
+  it('counts the settle time from the last change of size', () => {
+    guardViewportFit();
+    insetsArriveQuietly(62);
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    sizeChanges();
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(meta.content).toBe(CONTENT);
+    vi.advanceTimersByTime(1);
+    expect(meta.content).not.toContain('viewport-fit');
+  });
+
+  it('starts a reading that came with a resize over when it changes with none', () => {
+    guardViewportFit();
+    insetsArrive(62);
+    // Gone and back inside the settle time. Read only at its end, as before
+    // the guard watched sizes, this would pass for a reading that had held.
+    vi.advanceTimersByTime(100);
+    insetsArriveQuietly(0);
+    vi.advanceTimersByTime(100);
+    insetsArriveQuietly(62);
+
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(meta.content).toBe(CONTENT);
+    vi.advanceTimersByTime(1);
+    expect(meta.content).not.toContain('viewport-fit');
+  });
+
+  it('settles once when a resize and a change of size announce the same insets', () => {
+    guardViewportFit();
+    insetsArrive(62);
+    sizeChanges();
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(meta.content).toBe(CONTENT);
+    vi.advanceTimersByTime(1);
+    expect(meta.content).not.toContain('viewport-fit');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('restores cover once the page reaches the bottom, with no resize', () => {
+    guardViewportFit();
+    insetsArriveQuietly(62);
+    settle();
+    relayoutQuietly(0, 812);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+
+    // The layout grows to the window's height and nothing else is said.
+    relayoutQuietly(0, 874);
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    expect(meta.content).not.toContain('viewport-fit');
+    vi.advanceTimersByTime(1);
+
+    expect(meta.content).toBe(CONTENT);
+    expect(rootStyle.has('--safe-bottom-fallback')).toBe(false);
+  });
+
+  it('does not restore on a reading that does not settle, with no resize', () => {
+    guardViewportFit();
+    insetsArriveQuietly(62);
+    settle();
+    relayoutQuietly(0, 812);
+
+    relayoutQuietly(0, 874);
+    vi.advanceTimersByTime(SETTLE_MS - 1);
+    relayoutQuietly(0, 812);
+    vi.advanceTimersByTime(SETTLE_MS * 10);
+
+    expect(meta.content).not.toContain('viewport-fit');
+    expect(rootStyle.get('--safe-bottom-fallback')).toBe('34px');
+  });
+
+  it('keeps the flip limit where no resize is sent at all', () => {
+    guardViewportFit();
+    insetsArriveQuietly(62);
+    settle();
+    // Without cover the page fills the window, with it the page is short
+    // again, and the window never changes.
+    relayoutQuietly(0, 874);
+    settle();
+    expect(meta.content).toBe(CONTENT);
+    relayoutQuietly(62, 812);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+    expect(rootStyle.get('--safe-bottom-fallback')).toBe('34px');
+
+    relayoutQuietly(0, 874);
+    vi.advanceTimersByTime(SETTLE_MS * 10);
+    expect(meta.content).not.toContain('viewport-fit');
+  });
+
+  it('leaves no timer running while nothing changes', () => {
+    guardViewportFit();
+    expect(vi.getTimerCount()).toBe(0);
+    insetsArriveQuietly(62);
+    expect(vi.getTimerCount()).toBe(1);
+    settle();
+    relayoutQuietly(0, 812);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops watching once cleaned up', () => {
+    const stop = guardViewportFit();
+    stop();
+    expect(observers[0].connected).toBe(false);
+
+    insetsArriveQuietly(62);
+    settle();
+    expect(meta.content).toBe(CONTENT);
+  });
+
+  it('watches nothing in Safari', () => {
+    standalone = false;
+    guardViewportFit();
+    expect(observers).toHaveLength(0);
+    expect(elements).toHaveLength(0);
   });
 });

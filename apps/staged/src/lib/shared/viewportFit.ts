@@ -18,16 +18,23 @@
 //
 // Dropping cover costs every `env()` inset: they all read 0 afterwards, for
 // both kinds of install, and without cover the two cannot be told apart. So
-// the guard is careful in three ways.
+// the guard is careful in four ways.
 //
 // - It acts on a settled reading only. iOS hands the page its insets a moment
-//   after launch, with a `resize` (on the simulator, 70-140 ms after the first
-//   script runs), and the status bar comes and goes with rotation. A reading
-//   counts once it has held from one `resize` until SETTLE_MS later with no
-//   `resize` in between, so one passing value, mid-rotation say, changes
-//   nothing. The cost falls on old installs: their first frames are drawn
-//   under the status bar and shift 62 px when cover goes, SETTLE_MS after the
-//   insets arrive.
+//   after launch, and the status bar comes and goes with rotation. A reading
+//   counts once it has held for SETTLE_MS since the guard last heard of a
+//   change, and is read again then, so one passing value, mid-rotation say,
+//   changes nothing. The cost falls on old installs: their first frames are
+//   drawn under the status bar and shift 62 px when cover goes, SETTLE_MS
+//   after the insets arrive.
+// - It does not count on `resize` to hear of a change. On a cold launch in
+//   the iOS 27.2 simulator a black-translucent app is handed its insets, and
+//   its layout viewport goes from 874 to 812 pt, 140-175 ms after the first
+//   script runs and most often with no `resize` at all. (A default app got
+//   one each time.) So the guard also watches the size of two hidden
+//   elements, one padded by the insets and one as tall as the layout
+//   viewport. That is an observer, not a timer: it runs when one of them
+//   changes size, and nothing runs in between.
 // - It keeps watching. Once the layout reaches the bottom of the window with
 //   cover dropped (an iPhone in landscape has no status bar), cover is put
 //   back, on a settled reading too, and judged afresh from there.
@@ -36,7 +43,7 @@
 //   in app.css is the larger of that and the `env()` inset, and is what every
 //   bottom-padded pane reads. The fallback is removed when cover returns.
 
-/** How long a reading must hold, with no `resize`, before the guard acts on it. */
+/** How long a reading must hold, with no change the guard hears of, before it acts on it. */
 export const SETTLE_MS = 300;
 
 /** Set on <html> while cover is dropped: the bottom inset cover last reported. */
@@ -108,13 +115,21 @@ export function guardViewportFit(): () => void {
   if (!meta || !/viewport-fit\s*=\s*cover/i.test(meta.content)) return () => {};
   const root = document.documentElement;
 
-  // One hidden probe for the guard's lifetime, outside <body>, so no check
-  // inserts a node next to the app.
+  // Two hidden elements for the guard's lifetime, outside <body>, so no check
+  // inserts a node next to the app. `probe` is padded by the top and bottom
+  // insets, which is how they are read. It is also as wide as the top inset,
+  // so its box changes size when either inset does, even if their sum does
+  // not. `span` runs from the top of the layout viewport to its bottom.
+  const hidden = 'position:fixed;visibility:hidden;pointer-events:none;';
   const probe = document.createElement('div');
   probe.style.cssText =
-    'position:fixed;visibility:hidden;pointer-events:none;' +
+    hidden +
+    'width:env(safe-area-inset-top);' +
     'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)';
+  const span = document.createElement('div');
+  span.style.cssText = hidden + 'top:0;bottom:0;width:0';
   root.appendChild(probe);
+  root.appendChild(span);
 
   let covered = true;
   let settle: ReturnType<typeof setTimeout> | undefined;
@@ -163,8 +178,8 @@ export function guardViewportFit(): () => void {
     }
   };
 
-  // A reading is acted on only if it still stands SETTLE_MS later; a `resize`
-  // in between starts over from what the page reads then.
+  // A reading is acted on only if it still stands SETTLE_MS later; a change
+  // the guard hears of in between starts over from what the page reads then.
   const check = () => {
     clearTimeout(settle);
     settle = undefined;
@@ -176,11 +191,21 @@ export function guardViewportFit(): () => void {
     }, SETTLE_MS);
   };
 
+  // What the decision reads, and what tells the guard it may have changed:
+  // the insets and the layout viewport's height, by the two elements' sizes,
+  // and the window's size, by `resize`. Each is one more call to `check`, so
+  // a change with no `resize` gets the same settle time as one with it, and
+  // restarts the settle time of a reading already waiting.
+  const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(check) : undefined;
+  observer?.observe(probe, { box: 'border-box' });
+  observer?.observe(span, { box: 'border-box' });
   window.addEventListener('resize', check);
   check();
   return () => {
     clearTimeout(settle);
+    observer?.disconnect();
     window.removeEventListener('resize', check);
     probe.remove();
+    span.remove();
   };
 }

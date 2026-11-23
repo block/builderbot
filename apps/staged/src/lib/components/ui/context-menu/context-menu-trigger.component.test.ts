@@ -140,22 +140,27 @@ describe('ContextMenu.Trigger touch presses', () => {
     expect(props.open).toBe(false);
   });
 
-  // A keyed re-render replaces the row under the finger: the node the touch
-  // started on leaves the DOM and another takes its place in the trigger.
-  function replaceRow(row: HTMLElement, top: number) {
-    const next = document.createElement('div');
-    next.getBoundingClientRect = () => new DOMRect(16, top, 320, 44);
-    row.replaceWith(next);
+  // The triggers that wrap one row: the project card, the sidebar row and the
+  // board card. A re-render inside the row replaces the element under the
+  // finger, and the row itself stays.
+  function touchLabel(row: HTMLElement): HTMLElement {
+    const label = row.querySelector<HTMLElement>('[data-testid="label"]');
+    if (!label) throw new Error('label not rendered');
+    label.getBoundingClientRect = () => row.getBoundingClientRect();
+    pointerDown(label, 'touch');
+    touchStart(label);
+    return label;
   }
 
-  it('opens when the row was replaced during the hold and a scroll leaves the trigger where it is', () => {
+  it('opens when the touched element was replaced during the hold and a scroll leaves the row where it is', () => {
     const { props, row } = render();
-    row.getBoundingClientRect = () => new DOMRect(16, 300, 320, 44);
+    let top = 300;
+    row.getBoundingClientRect = () => new DOMRect(16, top, 320, 44);
 
-    pointerDown(row, 'touch');
-    touchStart(row);
+    const label = touchLabel(row);
     advance(LONG_PRESS_DELAY_MS - 100);
-    replaceRow(row, 300.5);
+    label.replaceWith(document.createElement('span'));
+    top = 300.5;
     document.dispatchEvent(new Event('scroll'));
     expect(props.open).toBe(false);
     advance(100);
@@ -163,14 +168,43 @@ describe('ContextMenu.Trigger touch presses', () => {
     expect(props.open).toBe(true);
   });
 
-  it('stays closed when the row was replaced during the hold and a scroll carried the trigger', () => {
+  it('stays closed when the touched element was replaced during the hold and a scroll carried the row', () => {
+    const { props, row } = render();
+    let top = 300;
+    row.getBoundingClientRect = () => new DOMRect(16, top, 320, 44);
+
+    const label = touchLabel(row);
+    advance(LONG_PRESS_DELAY_MS - 100);
+    label.replaceWith(document.createElement('span'));
+    top = 280;
+    document.dispatchEvent(new Event('scroll'));
+    advance(BITS_UI_LONG_PRESS_MS);
+
+    expect(props.open).toBe(false);
+  });
+
+  it('opens when the touched element was replaced during the hold and nothing scrolls', () => {
+    const { props, row } = render();
+
+    const label = touchLabel(row);
+    advance(LONG_PRESS_DELAY_MS - 100);
+    label.replaceWith(document.createElement('span'));
+    advance(100);
+
+    expect(props.open).toBe(true);
+  });
+
+  it('stays closed when the whole row was replaced during the hold and the list scrolls', () => {
     const { props, row } = render();
     row.getBoundingClientRect = () => new DOMRect(16, 300, 320, 44);
 
-    pointerDown(row, 'touch');
-    touchStart(row);
+    touchLabel(row);
     advance(LONG_PRESS_DELAY_MS - 100);
-    replaceRow(row, 280);
+    // Nothing the finger landed in is left, so there is nothing to say the
+    // new row is where the old one was.
+    const next = document.createElement('div');
+    next.getBoundingClientRect = () => new DOMRect(16, 300, 320, 44);
+    row.replaceWith(next);
     document.dispatchEvent(new Event('scroll'));
     advance(BITS_UI_LONG_PRESS_MS);
 

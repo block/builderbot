@@ -68,8 +68,33 @@
     return actionByKey.get(key) ?? null;
   }
 
+  /**
+   * The action for a `contextmenu` that arrives at the trigger itself. That
+   * is a touch long press whose touched element was replaced during the hold
+   * (a live title re-rendered, say; see longPress.ts), so there is no row to
+   * find from the event. It belongs to the row its `pointerdown` resolved,
+   * if that row is still under the finger. The key alone does not say so: a
+   * row with no menu stops its `pointerdown` before it gets here, which
+   * leaves an earlier touch's key, and a row can be removed or shifted
+   * during the hold.
+   */
+  function actionForHeldRow(event: MouseEvent): TimelineContextMenuAction | null {
+    const trigger = event.currentTarget;
+    if (!activeActionKey || !(trigger instanceof Element)) return null;
+    const { clientX: x, clientY: y } = event;
+    for (const row of trigger.querySelectorAll<HTMLElement>('[data-timeline-context-menu-key]')) {
+      if (row.dataset.timelineContextMenuKey !== activeActionKey) continue;
+      const box = row.getBoundingClientRect();
+      if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) {
+        return actionByKey.get(activeActionKey) ?? null;
+      }
+    }
+    return null;
+  }
+
   function handleContextMenu(event: MouseEvent) {
-    const action = actionForEvent(event);
+    const action =
+      event.target === event.currentTarget ? actionForHeldRow(event) : actionForEvent(event);
     if (!action) {
       activeActionKey = null;
       open = false;

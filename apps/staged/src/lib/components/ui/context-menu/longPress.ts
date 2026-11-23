@@ -54,12 +54,14 @@
  *   scroll position by the same amount and fires `scroll`, and the row under
  *   the finger stays put. The element's position is read at `touchstart` and
  *   again on each such scroll; one that cannot be measured counts as moved;
- * - a touched element replaced during the hold (a keyed re-render, which the
- *   same timeline does) is in no scroller and has no position. The scroll
- *   test then follows the trigger, as the firing path does: its position is
- *   read at `touchstart` too, and a scroll of a container holding it drops
- *   the press only when the trigger has moved. With no trigger left to
- *   follow, any scroll drops the press;
+ * - a touched element replaced during the hold (a re-render, which the same
+ *   timeline does to a live title) is in no scroller and has no position.
+ *   The scroll test then follows the nearest element above it that is still
+ *   in the DOM: every element from the touched one up to the trigger has its
+ *   position read at `touchstart`. That is the held row or something in it.
+ *   The trigger is not: one wraps a whole timeline, whose top an anchoring
+ *   scroll moves while the row stays. With nothing left to follow, any
+ *   scroll drops the press;
  * - a touch that lands on a list that is still moving is the user catching
  *   the scroll, not pressing a row: a `touchstart` within
  *   `SCROLL_CATCH_WINDOW_MS` of the last scroll of a container holding the
@@ -108,7 +110,8 @@ export interface LongPressOptions {
    * The trigger element. A press whose touched descendant is no longer in the
    * DOM when the hold matures fires at the trigger instead, so the menu still
    * opens for the element the user is holding. A scroll during the hold is
-   * judged by the trigger's position for such a press, for the same reason.
+   * judged for such a press by what is left between that descendant and the
+   * trigger.
    */
   trigger?: () => EventTarget | null;
   /**
@@ -164,20 +167,25 @@ function positionOf(target: EventTarget): ScreenPosition | null {
   return { left, top };
 }
 
+/** An element at or above the touched one, and where it was at `touchstart`. */
+interface Rested {
+  node: EventTarget;
+  at: ScreenPosition | null;
+}
+
 /**
- * Where a trigger is on screen. Most triggers are `display: contents`
- * wrappers with no box of their own; one of those is placed by the first
- * element inside it that has a box.
+ * The touched element and each element above it up to the trigger, nearest
+ * first, with where each was on screen. With no trigger, the touched element
+ * alone.
  */
-function triggerPositionOf(trigger: EventTarget): ScreenPosition | null {
-  if (isDetached(trigger)) return null;
-  const own = positionOf(trigger);
-  if (own) return own;
-  for (const child of Array.from((trigger as Partial<Element>).children ?? [])) {
-    const inner = triggerPositionOf(child);
-    if (inner) return inner;
+function restingPlaces(target: EventTarget, trigger: EventTarget | null): Rested[] {
+  const places: Rested[] = [];
+  let node: EventTarget | null = target;
+  while (node) {
+    places.push({ node, at: positionOf(node) });
+    node = trigger && node !== trigger ? ((node as Partial<Node>).parentNode ?? null) : null;
   }
-  return null;
+  return places;
 }
 
 function apart(a: ScreenPosition, b: ScreenPosition): boolean {
@@ -275,10 +283,8 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   const moveThreshold = options.moveThreshold ?? LONG_PRESS_MOVE_THRESHOLD_PX;
 
   let start: LongPressPoint | null = null;
-  /** Where the touched element was on screen when the finger landed. */
-  let restedAt: ScreenPosition | null = null;
-  /** Where the trigger was then, for a touched element replaced mid-hold. */
-  let triggerRestedAt: ScreenPosition | null = null;
+  /** Where the touched element and those above it were when the finger landed. */
+  let rested: Rested[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let fired = false;
   let unlistenGesture: (() => void) | null = null;
@@ -308,8 +314,7 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     clearTimer();
     unlistenGesture?.();
     start = null;
-    restedAt = null;
-    triggerRestedAt = null;
+    rested = [];
     fired = false;
   }
 
@@ -399,18 +404,16 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   function onscroll(event: Event) {
     if (!start || timer === null) return;
     // A touched element replaced during the hold is inside no scroller and
-    // has no position: the trigger stands in for it, as it does when the
-    // press fires.
-    const replaced = isDetached(start.target);
-    const held = replaced ? (options.trigger?.() ?? null) : start.target;
-    if (!held || isDetached(held)) {
+    // has no position: the nearest element above it still in the DOM stands
+    // in for it.
+    const held = rested.find(({ node }) => !isDetached(node));
+    if (!held) {
       clearTimer();
       return;
     }
-    if (!scrollMoves(event.target, held)) return;
-    const was = replaced ? triggerRestedAt : restedAt;
-    const now = replaced ? triggerPositionOf(held) : positionOf(held);
-    if (!was || !now || apart(was, now)) clearTimer();
+    if (!scrollMoves(event.target, held.node)) return;
+    const now = positionOf(held.node);
+    if (!held.at || !now || apart(held.at, now)) clearTimer();
   }
 
   // The listeners live only for the duration of a press, on the document and
@@ -461,9 +464,7 @@ export function createLongPress(options: LongPressOptions): LongPressController 
       // Catching a list that is still moving stops it; it presses nothing.
       if (scrollWatch && landedOnMovingList(scrollWatch, target)) return;
       start = { target, clientX: touch.clientX, clientY: touch.clientY };
-      restedAt = positionOf(target);
-      const trigger = options.trigger?.();
-      triggerRestedAt = trigger ? triggerPositionOf(trigger) : null;
+      rested = restingPlaces(target, options.trigger?.() ?? null);
       const point = start;
       const scope = scopeFor(point.target);
       if (scope) listenGesture(scope, point.target);

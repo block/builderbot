@@ -1,10 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  FLICK_MAX_DURATION_MS,
-  guardTouchTaps,
-  TAP_CLICK_WINDOW_MS,
-  TAP_MAX_TRAVEL_PX,
-} from './touchTapGuard';
+import { guardTouchTaps, TAP_CLICK_WINDOW_MS, TAP_MAX_TRAVEL_PX } from './touchTapGuard';
 
 // vitest runs in node, and a dispatched `Event` is never trusted, so the
 // document is a stand-in that hands plain event objects to the capture
@@ -77,6 +72,21 @@ function touch(fromY: number, toY: number, durationMs = 60): void {
   pointer('pointerup', toY);
 }
 
+/** A touch that lifts `dx` px across and `dy` px down from where it landed. */
+function travel(dx: number, dy: number, durationMs: number): void {
+  pointer('pointerdown', 438, { x: 200 });
+  now += durationMs;
+  pointer('pointerup', 438 + dy, { x: 200 + dx });
+}
+
+/** Whether the click of a touch that travelled `px` in `durationMs` is swallowed, up and sideways. */
+function swallowed(px: number, durationMs: number): boolean[] {
+  travel(0, -px, durationMs);
+  const vertical = click();
+  travel(px, 0, durationMs);
+  return [vertical, click()];
+}
+
 beforeEach(() => {
   doc = new FakeDocument();
   now = 1000;
@@ -97,42 +107,60 @@ describe('guardTouchTaps', () => {
   });
 
   it('measures travel as a straight line, and only beyond the limit', () => {
-    pointer('pointerdown', 400, { x: 100 });
-    pointer('pointerup', 400 + TAP_MAX_TRAVEL_PX, { x: 100 });
+    travel(0, TAP_MAX_TRAVEL_PX, 60);
     expect(click()).toBe(false);
+    travel(0, TAP_MAX_TRAVEL_PX + 1, 60);
+    expect(click()).toBe(true);
 
-    // 15 px across and 15 px down is 21.2 px of travel.
-    pointer('pointerdown', 400, { x: 100 });
-    pointer('pointerup', 415, { x: 115 });
+    // 30 px across and 30 px down is 42.4 px of travel; 32 and 32 is 45.3 px.
+    travel(30, 30, 60);
+    expect(click()).toBe(false);
+    travel(32, 32, 60);
     expect(click()).toBe(true);
   });
 
-  it('lets a quick tap click when the thumb rolled as it pressed', () => {
-    // Past the old 10 px limit, and as short as a flick.
-    touch(438, 438 - 18, 60);
-    expect(click()).toBe(false);
-  });
+  // The corners the rule has to hold at once: a pressing thumb rolls up to
+  // about 30 px, quickly or slowly, and a touch that went far was no tap
+  // however long it took.
+  describe('the corners of the rule', () => {
+    it('passes a 25 px roll lifted after 120 ms', () => {
+      expect(swallowed(25, 120)).toEqual([false, false]);
+    });
 
-  it('lets a slow press click however far the finger rolled', () => {
-    touch(438, 438 - 30, FLICK_MAX_DURATION_MS + 1);
-    expect(click()).toBe(false);
+    it('passes a 30 px roll, quick or slow', () => {
+      for (const durationMs of [30, 60, 120, 200, 400]) {
+        expect(swallowed(30, durationMs), `${durationMs} ms`).toEqual([false, false]);
+      }
+    });
 
-    touch(438, 238, 400);
-    expect(click()).toBe(false);
-  });
+    it('swallows a 60 px flick lifted after 30 to 100 ms', () => {
+      for (const durationMs of [30, 50, 80, 100]) {
+        expect(swallowed(60, durationMs), `${durationMs} ms`).toEqual([true, true]);
+      }
+    });
 
-  it('counts a touch as a flick up to the duration limit, and not beyond it', () => {
-    touch(438, 438 - TAP_MAX_TRAVEL_PX - 1, FLICK_MAX_DURATION_MS);
-    expect(click()).toBe(true);
+    it('swallows an 80 px touch lifted after 250 ms', () => {
+      expect(swallowed(80, 250)).toEqual([true, true]);
+    });
 
-    touch(438, 438 - TAP_MAX_TRAVEL_PX - 1, FLICK_MAX_DURATION_MS + 1);
-    expect(click()).toBe(false);
-  });
+    it('passes a press that rolls 10 to 20 px at any speed', () => {
+      for (const px of [10, 15, 20]) {
+        for (const durationMs of [20, 60, 120, 250, 1000]) {
+          expect(swallowed(px, durationMs), `${px} px in ${durationMs} ms`).toEqual([false, false]);
+        }
+      }
+    });
 
-  it('swallows the shortest and slowest flick seen to open a project', () => {
-    // 60 px in 100 ms.
-    touch(438, 378, 100);
-    expect(click()).toBe(true);
+    it('swallows a far touch however slow', () => {
+      for (const [px, durationMs] of [
+        [60, 200],
+        [100, 400],
+        [200, 400],
+        [200, 3000],
+      ]) {
+        expect(swallowed(px, durationMs), `${px} px in ${durationMs} ms`).toEqual([true, true]);
+      }
+    });
   });
 
   it('swallows only one click per travelled touch', () => {

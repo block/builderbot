@@ -153,7 +153,7 @@
   .content {
     flex: 1;
     padding: 24px;
-    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    padding-bottom: calc(24px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -199,7 +199,9 @@
   @media (max-width: 640px) {
     .content {
       padding: 16px;
-      padding-bottom: calc(16px + env(safe-area-inset-bottom));
+      padding-bottom: calc(
+        16px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))
+      );
     }
 
     .repos-grid {

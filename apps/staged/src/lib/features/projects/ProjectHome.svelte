@@ -1261,7 +1261,7 @@
     max-width: 900px;
     margin: 0 auto;
     padding: 16px;
-    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    padding-bottom: calc(16px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -1293,7 +1293,9 @@
 
     .projects-list {
       padding: 12px;
-      padding-bottom: calc(12px + env(safe-area-inset-bottom));
+      padding-bottom: calc(
+        12px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))
+      );
       gap: 20px;
     }
   }

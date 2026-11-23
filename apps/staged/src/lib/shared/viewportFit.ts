@@ -12,19 +12,35 @@
 // Without cover, the same app is laid out below the status bar down to the
 // bottom of the screen, with no insets, as it was before cover was added. So
 // where the page is drawn under the status bar yet ends above the bottom of
-// the window, cover is dropped for the session. An app added since (status
-// bar `default`) has no top inset and keeps cover, and so does a
-// black-translucent app wherever iOS lays it out to the bottom edge.
+// the window, cover is dropped. An app added since (status bar `default`) has
+// no top inset and keeps cover, and so does a black-translucent app wherever
+// iOS lays it out to the bottom edge.
 //
-// iOS hands the page its safe-area insets a moment after launch, with a
-// `resize`: on the simulator, 70-140 ms after the first script runs and after
-// `load`. The status bar also comes and goes with rotation, so the check runs
-// on every `resize` until cover is gone. Until the insets arrive an old
-// install is drawn under the status bar, but only as a blank page: on cold
-// launches the app first rendered after the insets arrived, or in the same
-// frame, so the TopBar never showed under the clock. Should the app ever
-// render earlier, its first frames would sit under the status bar and shift
-// 62 px when cover is dropped.
+// Dropping cover costs every `env()` inset: they all read 0 afterwards, for
+// both kinds of install, and without cover the two cannot be told apart. So
+// the guard is careful in three ways.
+//
+// - It acts on a settled reading only. iOS hands the page its insets a moment
+//   after launch, with a `resize` (on the simulator, 70-140 ms after the first
+//   script runs), and the status bar comes and goes with rotation. A reading
+//   counts once it has held from one `resize` until SETTLE_MS later with no
+//   `resize` in between, so one passing value, mid-rotation say, changes
+//   nothing. The cost falls on old installs: their first frames are drawn
+//   under the status bar and shift 62 px when cover goes, SETTLE_MS after the
+//   insets arrive.
+// - It keeps watching. Once the layout reaches the bottom of the window with
+//   cover dropped (an iPhone in landscape has no status bar), cover is put
+//   back, on a settled reading too, and judged afresh from there.
+// - It keeps the home indicator clear. The bottom inset read just before
+//   cover goes is left on <html> as `--safe-bottom-fallback`, which the
+//   bottom-padded panes take the larger of (see SAFE_AREA_BOTTOM in
+//   safeArea.ts). It is removed when cover returns.
+
+/** How long a reading must hold, with no `resize`, before the guard acts on it. */
+export const SETTLE_MS = 300;
+
+/** Set on <html> while cover is dropped: the bottom inset cover last reported. */
+export const SAFE_BOTTOM_FALLBACK = '--safe-bottom-fallback';
 
 export interface ViewportFitSample {
   /** Running as a home-screen app. */
@@ -45,6 +61,21 @@ export function coverLaysOutShort(sample: ViewportFitSample): boolean {
   return sample.standalone && sample.safeAreaTop > 0 && sample.layoutHeight < sample.windowHeight;
 }
 
+export type ViewportFitChange = 'drop' | 'restore';
+
+/**
+ * What a reading asks for: drop cover where it lays the page out short, put
+ * it back where the page reaches the window's bottom without it.
+ */
+export function viewportFitChange(
+  covered: boolean,
+  sample: ViewportFitSample
+): ViewportFitChange | null {
+  if (!sample.standalone) return null;
+  if (covered) return coverLaysOutShort(sample) ? 'drop' : null;
+  return sample.layoutHeight >= sample.windowHeight ? 'restore' : null;
+}
+
 /** A viewport meta `content` without its `viewport-fit` key. */
 export function withoutViewportFit(content: string): string {
   return content
@@ -52,6 +83,11 @@ export function withoutViewportFit(content: string): string {
     .map((part) => part.trim())
     .filter((part) => part && !/^viewport-fit\s*=/i.test(part))
     .join(', ');
+}
+
+/** A viewport meta `content` with `viewport-fit=cover` as its last key. */
+export function withViewportFitCover(content: string): string {
+  return [withoutViewportFit(content), 'viewport-fit=cover'].filter(Boolean).join(', ');
 }
 
 function isStandalone(): boolean {
@@ -62,37 +98,78 @@ function isStandalone(): boolean {
 }
 
 /**
- * Drop `viewport-fit=cover` from the viewport meta once the page is laid out
- * short (see above). A no-op outside a home-screen app. Returns the cleanup.
+ * Keep `viewport-fit=cover` off the viewport meta while it lays the page out
+ * short, and on otherwise (see above). A no-op outside a home-screen app.
+ * Returns the cleanup, which leaves the meta as it then stands.
  */
 export function guardViewportFit(): () => void {
   if (typeof window === 'undefined' || !isStandalone()) return () => {};
   const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
   if (!meta || !/viewport-fit\s*=\s*cover/i.test(meta.content)) return () => {};
+  const root = document.documentElement;
 
   // One hidden probe for the guard's lifetime, outside <body>, so no check
   // inserts a node next to the app.
   const probe = document.createElement('div');
   probe.style.cssText =
-    'position:fixed;visibility:hidden;pointer-events:none;padding-top:env(safe-area-inset-top)';
-  document.documentElement.appendChild(probe);
+    'position:fixed;visibility:hidden;pointer-events:none;' +
+    'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)';
+  root.appendChild(probe);
 
-  const check = () => {
-    const short = coverLaysOutShort({
+  let covered = true;
+  let settle: ReturnType<typeof setTimeout> | undefined;
+  // Window sizes, so a pair of layouts that each ask for the other cannot
+  // flip the meta for ever: where cover was put back and then had to go again
+  // with the window unchanged, it stays off until the window changes.
+  let restoredAt: string | null = null;
+  let keepOffAt: string | null = null;
+
+  const windowSize = () => `${window.outerWidth}x${window.outerHeight}`;
+
+  const wanted = (): ViewportFitChange | null => {
+    const change = viewportFitChange(covered, {
       standalone: true,
       safeAreaTop: parseFloat(getComputedStyle(probe).paddingTop) || 0,
-      layoutHeight: document.documentElement.clientHeight,
+      layoutHeight: root.clientHeight,
       windowHeight: window.outerHeight,
     });
-    if (!short) return;
-    meta.content = withoutViewportFit(meta.content);
-    stop();
+    return change === 'restore' && windowSize() === keepOffAt ? null : change;
   };
-  const stop = () => {
+
+  const apply = (change: ViewportFitChange) => {
+    if (change === 'drop') {
+      // Read before cover goes: afterwards it is 0.
+      const bottom = parseFloat(getComputedStyle(probe).paddingBottom) || 0;
+      if (bottom > 0) root.style.setProperty(SAFE_BOTTOM_FALLBACK, `${bottom}px`);
+      meta.content = withoutViewportFit(meta.content);
+      covered = false;
+      keepOffAt = windowSize() === restoredAt ? restoredAt : null;
+    } else {
+      meta.content = withViewportFitCover(meta.content);
+      root.style.removeProperty(SAFE_BOTTOM_FALLBACK);
+      covered = true;
+      restoredAt = windowSize();
+    }
+  };
+
+  // A reading is acted on only if it still stands SETTLE_MS later; a `resize`
+  // in between starts over from what the page reads then.
+  const check = () => {
+    clearTimeout(settle);
+    settle = undefined;
+    const change = wanted();
+    if (!change) return;
+    settle = setTimeout(() => {
+      settle = undefined;
+      if (wanted() === change) apply(change);
+    }, SETTLE_MS);
+  };
+
+  window.addEventListener('resize', check);
+  check();
+  return () => {
+    clearTimeout(settle);
     window.removeEventListener('resize', check);
     probe.remove();
   };
-  window.addEventListener('resize', check);
-  check();
-  return stop;
 }

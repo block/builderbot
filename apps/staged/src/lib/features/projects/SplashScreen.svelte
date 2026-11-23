@@ -324,7 +324,7 @@
     flex-direction: column;
     align-items: center;
     gap: 14px;
-    padding-bottom: calc(32px + env(safe-area-inset-bottom));
+    padding-bottom: calc(32px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
     z-index: 1;
   }
 
@@ -357,7 +357,7 @@
   }
 
   .splash-close {
-    padding-bottom: calc(32px + env(safe-area-inset-bottom));
+    padding-bottom: calc(32px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
     z-index: 1;
   }
 
@@ -382,7 +382,9 @@
     }
 
     .splash-actions {
-      padding-bottom: calc(20px + env(safe-area-inset-bottom));
+      padding-bottom: calc(
+        20px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))
+      );
     }
 
     .splash-actions :global(button) {

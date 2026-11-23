@@ -6,7 +6,7 @@ describe('safeAreaOffset', () => {
     expect(safeAreaOffset('16px')).toEqual({
       top: 'calc(16px + env(safe-area-inset-top))',
       right: 'calc(16px + env(safe-area-inset-right))',
-      bottom: 'calc(16px + env(safe-area-inset-bottom))',
+      bottom: 'calc(16px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)))',
       left: 'calc(16px + env(safe-area-inset-left))',
     });
   });

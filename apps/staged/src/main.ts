@@ -3,8 +3,8 @@ import './app.css';
 import Root from './Root.svelte';
 import { guardViewportFit } from './lib/shared/viewportFit';
 
-// Before the first layout of the app: an older home-screen install may need
-// viewport-fit=cover dropped (viewportFit.ts).
+// For the life of the page: an older home-screen install may need
+// viewport-fit=cover dropped, and put back when it turns (viewportFit.ts).
 guardViewportFit();
 
 if (

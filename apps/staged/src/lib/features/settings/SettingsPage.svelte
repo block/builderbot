@@ -289,7 +289,7 @@
      chrome above it. */
   .panel-pad {
     padding: 14px;
-    padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    padding-bottom: calc(14px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
     overflow: hidden;
     --settings-panel-inset-bottom: 0px;
   }
@@ -335,7 +335,10 @@
        runs to the screen's edges and its body takes the bottom inset. */
     .panel-pad {
       padding: 0;
-      --settings-panel-inset-bottom: env(safe-area-inset-bottom);
+      --settings-panel-inset-bottom: max(
+        env(safe-area-inset-bottom),
+        var(--safe-bottom-fallback, 0px)
+      );
     }
 
     /* Each panel's root sets its own border and radius at (0,2,0) specificity

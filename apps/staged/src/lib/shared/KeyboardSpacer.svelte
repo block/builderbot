@@ -33,6 +33,11 @@
 <style>
   .keyboard-spacer {
     flex: none;
-    height: max(0px, calc(var(--keyboard-inset) - env(safe-area-inset-bottom)));
+    height: max(
+      0px,
+      calc(
+        var(--keyboard-inset) - max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))
+      )
+    );
   }
 </style>

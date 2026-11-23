@@ -2051,7 +2051,7 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-    --dialog-safe-bottom: env(safe-area-inset-bottom);
+    --dialog-safe-bottom: max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px));
   }
 
   /* The diff viewer scrolls its lines by transform over a viewport the size
@@ -2163,7 +2163,7 @@
        and the side ones to each row's inline padding, so the rows run to the
        screen's edges and a swipe there still scrolls the list. */
     --dialog-safe-top: env(safe-area-inset-top);
-    --dialog-safe-bottom: env(safe-area-inset-bottom);
+    --dialog-safe-bottom: max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px));
     --dialog-safe-left: env(safe-area-inset-left);
     --dialog-safe-right: env(safe-area-inset-right);
     background: var(--bg-chrome);

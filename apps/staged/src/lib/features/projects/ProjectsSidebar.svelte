@@ -846,7 +846,7 @@
     padding: 10px var(--project-row-bleed);
     /* Clear of the home indicator on a landscape phone (App.svelte's main
        leaves the bottom inset to the panes' content). */
-    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    padding-bottom: calc(10px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
   }
 
   .project-rows {

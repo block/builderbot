@@ -6267,13 +6267,22 @@ fn rate_limit_recovery_details(
         //    bridge sends only once the turn has usage to report.
         //
         // Each field is taken from the first place that has it. Info that
-        // says its window is still open is skipped in both places (see
+        // does not say a limit was reached is skipped in both places (see
         // `rate_limit_info_reports_a_reached_limit`).
+        //
+        // The usage update is not read at all for a prompt the bridge failed
+        // as `overloaded`. The bridge attaches `data.rateLimit` only to a
+        // `rate_limit` failure, so the usage update would be the one way a
+        // subscription window's reset and limit type could land on a 529:
+        // an account drawing on extra usage can have a base window that
+        // stays `rejected` while its turns run.
+        let overloaded = prompt_error_kind(metadata).as_deref() == Some("overloaded");
         let reported: Vec<&serde_json::Value> = [
             metadata.pointer("/acp/promptError/data/rateLimit"),
             metadata
                 .pointer("/acp/usageUpdate/_meta")
-                .and_then(|meta| meta.get("_claude/rateLimit")),
+                .and_then(|meta| meta.get("_claude/rateLimit"))
+                .filter(|_| !overloaded),
         ]
         .into_iter()
         .flatten()
@@ -6317,24 +6326,58 @@ fn rate_limit_recovery_details(
             Some(kind.to_string())
         });
 
+    // A reset further ahead than this kind is waited for is not stored. Only
+    // a subscription usage limit may wait for a weekly reset; for any other
+    // kind the scheduler would ignore it and the pause copy would still show
+    // it.
+    if details.resets_at.as_deref().is_some_and(|resets_at| {
+        crate::rate_limit_scheduler::reset_exceeds_allowance(
+            details.kind.as_deref(),
+            resets_at,
+            now_millis,
+        )
+    }) {
+        details.resets_at = None;
+    }
+
     details
 }
 
-/// Whether a `rate_limit_info` describes a limit that was reached.
+/// Whether a `rate_limit_info` describes a limit that was reached and is
+/// what stopped the turn.
 ///
-/// The SDK sends the same info while a window is still open, with a `status`
-/// of `allowed` or `allowed_warning`, and its `resetsAt` is then the end of
-/// that window, up to seven days on. A turn that fails for another reason
-/// (an API 429, an overloaded provider) can still have such info on its last
-/// usage update. Its reset is not when that failure clears and its limit
-/// type is not what failed, so neither is read.
+/// The info of a refused request has a `status` of `rejected` and
+/// `isUsingOverage` false (the CLI documents it so for a
+/// `usage_limit_reached` error, 0.3.328). The SDK sends the same shape at
+/// other times, and a turn that then fails for another reason (an API 429,
+/// an overloaded provider) can still carry it. Its `resetsAt` is the end of
+/// a window, up to seven days on, not when that failure clears, and its
+/// limit type is not what failed, so neither is read from:
+///
+/// - info whose window is still open (`allowed`, `allowed_warning`);
+/// - info with no `status`, which says nothing either way;
+/// - info of an account drawing on extra usage (`isUsingOverage` or
+///   `overageInUse`): its turns run, whatever the base window's status.
+///
+/// The last also skips the info of an extra-usage allowance that has itself
+/// run out, if the SDK still flags it as in use. That limit is then known
+/// by its wording alone and takes the slow schedule.
 fn rate_limit_info_reports_a_reached_limit(rate_limit: &serde_json::Value) -> bool {
-    !rate_limit
+    let flagged = |name: &str| {
+        rate_limit
+            .get(name)
+            .and_then(|flag| flag.as_bool())
+            .unwrap_or(false)
+    };
+    if flagged("isUsingOverage") || flagged("overageInUse") {
+        return false;
+    }
+    rate_limit
         .get("status")
         .and_then(|status| status.as_str())
         .is_some_and(|status| {
             let status = status.trim().to_ascii_lowercase();
-            status == "allowed" || status == "allowed_warning"
+            !status.is_empty() && status != "allowed" && status != "allowed_warning"
         })
 }
 
@@ -6361,29 +6404,57 @@ fn usage_limit_kind_from_message(
     {
         return None;
     }
-    // The prompt error's own message when there is one: the driver error
-    // around it can carry agent stderr and model output.
+    // The driver error around the failure can carry agent stderr and model
+    // output, and a session that is working on limit code quotes this very
+    // wording. So only the sentence that says what went wrong is matched:
+    // the prompt error's own message when there is one, else the innermost
+    // sentence of the driver error (what the row's message shows), and the
+    // error as given only when it has no structure to read one from.
     let message = provider_metadata
         .and_then(|metadata| metadata.pointer("/acp/promptError/message"))
         .and_then(|message| message.as_str())
-        .unwrap_or(error);
+        .map(str::to_string)
+        .or_else(|| innermost_error_sentence(error))
+        .unwrap_or_else(|| error.to_string());
     has_usage_limit_wording(&message.to_lowercase())
         .then(|| crate::rate_limit_scheduler::USAGE_LIMIT_KIND.to_string())
 }
 
-/// Whether lowercased error text is worded as a reached subscription usage
-/// limit.
+/// Whether lowercased error text is worded as a subscription usage limit
+/// that resets by itself, so that waiting it out can work.
 ///
-/// The phrases are the ones the Claude Agent SDK lists for a limit that
-/// resets by itself (`USAGE_LIMIT_ERROR_PREFIXES`: "You've hit your session
-/// limit", "You've reached your …", "You're out of extra usage"), and "usage
-/// limit", which also covers Codex ("You've hit your usage limit"). The
-/// wording of an API limit ("rate limit", "429", "quota") is not among them.
+/// The Claude Agent SDK lists twelve `USAGE_LIMIT_ERROR_PREFIXES` (the same
+/// in 0.3.328 and in 0.3.322, which the last bridge before claude-agent-acp
+/// #1610 pins). Three are limits that reset by themselves and are matched
+/// here: "You've hit your …" (session, weekly and model limits), "You've
+/// reached your …" and "You're out of extra usage". "usage limit" is matched
+/// too, which covers Codex ("You've hit your usage limit").
+///
+/// The other nine need a person, not a wait ([`USAGE_LIMITS_NEEDING_ACTION`]),
+/// and are never matched, whatever else the text says: "Your group's usage
+/// limit is set to $0" contains "usage limit" and only an admin can change
+/// it. They keep the backoff they had.
+///
+/// The wording of an API limit is not matched either. "429" and "quota" are
+/// not among the phrases, and text that says "rate limit" is an API limit
+/// even behind "You've hit your": a provider may word a 429 as "You've hit
+/// your rate limit".
+///
+/// There is no bare "limit reached": "Rate limit reached" is API wording.
+/// The older CLI wording that phrase would be for ("5-hour limit reached",
+/// "Weekly limit reached") is not among the prefixes of either SDK version
+/// above, so it is not covered.
 fn has_usage_limit_wording(normalized: &str) -> bool {
-    if normalized.contains("overloaded") {
+    if normalized.contains("overloaded") || normalized.contains("rate limit") {
         return false;
     }
     let normalized = normalized.replace('\u{2019}', "'");
+    if USAGE_LIMITS_NEEDING_ACTION
+        .iter()
+        .any(|phrase| normalized.contains(phrase))
+    {
+        return false;
+    }
     [
         "you've hit your",
         "you've reached your",
@@ -6393,6 +6464,20 @@ fn has_usage_limit_wording(normalized: &str) -> bool {
     .iter()
     .any(|phrase| normalized.contains(phrase))
 }
+
+/// The wordings among the SDK's `USAGE_LIMIT_ERROR_PREFIXES` that do not
+/// clear with time: credits to buy, or a setting only an admin can change.
+/// Lowercased, with a plain apostrophe. The seat-type phrase stands for its
+/// three prefixes ("… usage credits", "… usage", "… extra usage"), and the
+/// org phrase for its two.
+const USAGE_LIMITS_NEEDING_ACTION: [&str; 6] = [
+    "you're out of usage credits",
+    "your org is out of usage",
+    "your seat type doesn't include",
+    "your usage allocation has been disabled",
+    "usage limit is set to $0",
+    "requires usage credits",
+];
 
 fn string_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
     names
@@ -6443,7 +6528,8 @@ fn epoch_to_rfc3339_utc(epoch: i64, now_millis: i64) -> Option<String> {
     } else {
         epoch.checked_mul(1_000)?
     };
-    if millis.saturating_sub(now_millis) > crate::rate_limit_scheduler::MAX_PLAUSIBLE_RESET_LEAD_MS
+    if millis.saturating_sub(now_millis)
+        > crate::rate_limit_scheduler::MAX_USAGE_LIMIT_RESET_LEAD_MS
     {
         return None;
     }
@@ -11533,22 +11619,18 @@ draft file (its path is in your instructions), counting from the first non-blank
 
     #[test]
     fn rate_limit_recovery_details_prefers_the_prompt_error_over_the_usage_update() {
-        // The usage update was sent mid-turn, while the five-hour window was
-        // only close to its limit; the turn then failed on the weekly one.
-        // The prompt error carries the turn's latest info, so it wins.
-        let metadata = claude_limit_metadata(
-            Some(serde_json::json!({
-                "status": "rejected",
-                "resetsAt": 1_782_402_300,
-                "rateLimitType": "seven_day",
-            })),
-            Some(serde_json::json!({
-                "status": "allowed_warning",
-                "resetsAt": 1_782_315_900,
-                "rateLimitType": "five_hour",
-                "utilization": 0.93,
-            })),
-        );
+        // Both say a limit was reached, and they disagree: the usage update
+        // was sent mid-turn for the five-hour limit, and the turn then
+        // failed on the weekly one. The prompt error carries the turn's
+        // latest info, so it wins. Read in the other order this would give
+        // the five-hour limit and its reset.
+        let weekly = serde_json::json!({
+            "status": "rejected",
+            "resetsAt": 1_782_402_300,
+            "rateLimitType": "seven_day",
+        });
+        let metadata =
+            claude_limit_metadata(Some(weekly.clone()), Some(rejected_five_hour_limit()));
 
         let details =
             rate_limit_recovery_details("Prompt failed", Some(&metadata), RESET_TEST_NOW_MILLIS);
@@ -11558,6 +11640,18 @@ draft file (its path is in your instructions), counting from the first non-blank
             Some("2026-06-25T15:45:00.000Z")
         );
         assert_eq!(details.kind.as_deref(), Some("seven_day"));
+
+        // The same two the other way round: the prompt error still wins.
+        let metadata = claude_limit_metadata(Some(rejected_five_hour_limit()), Some(weekly));
+
+        let details =
+            rate_limit_recovery_details("Prompt failed", Some(&metadata), RESET_TEST_NOW_MILLIS);
+
+        assert_eq!(
+            details.resets_at.as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+        assert_eq!(details.kind.as_deref(), Some("five_hour"));
     }
 
     #[test]
@@ -11607,7 +11701,7 @@ draft file (its path is in your instructions), counting from the first non-blank
 
     #[test]
     fn implausibly_distant_reset_timestamps_are_dropped() {
-        let max_lead = crate::rate_limit_scheduler::MAX_PLAUSIBLE_RESET_LEAD_MS;
+        let max_lead = crate::rate_limit_scheduler::MAX_USAGE_LIMIT_RESET_LEAD_MS;
 
         // An epoch in microseconds passes the seconds-vs-millis magnitude
         // split as millis and lands tens of millennia out; storing it would

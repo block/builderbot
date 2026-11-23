@@ -27,10 +27,12 @@ mod network_gate;
 mod retry_schedule;
 
 use network_gate::{InterfaceAddresses, NetworkFingerprint, NetworkGate, NetworkTurn};
-pub(crate) use retry_schedule::USAGE_LIMIT_KIND;
+pub(crate) use retry_schedule::{
+    reset_exceeds_allowance, MAX_USAGE_LIMIT_RESET_LEAD_MS, USAGE_LIMIT_KIND,
+};
 use retry_schedule::{
-    jitter_bound_for, retry_schedule, RetrySchedule, USAGE_LIMIT_BACKOFF_REASON,
-    USAGE_LIMIT_RETRY_INTERVAL_MS, USAGE_LIMIT_RETRY_JITTER_MS,
+    retry_schedule, RetrySchedule, USAGE_LIMIT_BACKOFF_REASON, USAGE_LIMIT_RETRY_INTERVAL_MS,
+    USAGE_LIMIT_RETRY_JITTER_MS,
 };
 
 pub(crate) const AUTO_RETRY_RESUME_PROMPT: &str = "Continue where you left off.";
@@ -95,16 +97,19 @@ const MIN_RETRY_DELAY_MS: i64 = 5_000;
 const RESET_GRACE_MS: i64 = 30_000;
 const RESET_JITTER_MS: i64 = 5 * 60_000;
 const MAX_RESUMES_PER_TICK: usize = 2;
-/// The longest a provider-reported reset is trusted to sit in the future:
-/// the seven days of a weekly limit, and a day's margin.
+/// The longest a provider-reported reset is trusted to sit in the future,
+/// for every pause but a subscription usage limit, which may wait for a
+/// weekly reset ([`MAX_USAGE_LIMIT_RESET_LEAD_MS`]).
 ///
-/// This is also the check on a reset's scale. An epoch in the wrong one
-/// (microseconds read as millis land tens of millennia ahead) would park the
-/// session on a bogus `next_retry_at` forever, because a retry time is only
+/// An API rate limit or an overloaded provider clears in seconds to minutes,
+/// so a reset days ahead on one is a wrong value: an epoch in the wrong
+/// scale (microseconds read as millis land tens of millennia ahead), or the
+/// end of a window that is not what failed. Waiting for it would park the
+/// session on a bogus `next_retry_at`, because a retry time is only
 /// reconsidered when recovery state is (re)built, never on ticks. A reset
 /// further ahead than this is not waited for: the pause is scheduled as one
 /// that reported none.
-pub(crate) const MAX_PLAUSIBLE_RESET_LEAD_MS: i64 = 8 * 24 * 60 * 60 * 1_000;
+const MAX_PLAUSIBLE_RESET_LEAD_MS: i64 = 48 * 60 * 60 * 1_000;
 
 pub struct RateLimitScheduler {
     in_flight: Mutex<HashSet<String>>,
@@ -458,7 +463,8 @@ fn ensure_auto_recovery_state(
 
     // No failure was reported for this row, so a network pause among these
     // is not counted: it waits for the gate like the rest.
-    record_rate_limit_pause_for_session(store, session, PauseAccounting::Waiting, now)?;
+    let schedule = stored_retry_schedule(session, now);
+    record_rate_limit_pause_for_session(store, session, PauseAccounting::Waiting, schedule, now)?;
     Ok(store
         .get_session(&session.id)
         .map_err(|e| e.to_string())?
@@ -508,7 +514,8 @@ pub(crate) fn pause_for_rate_limit(
     } else {
         PauseAccounting::Counted
     };
-    let state = plan_recovery_state(store, &session, kind, accounting, resets_at, now)?;
+    let schedule = retry_schedule(kind, resets_at, now);
+    let state = plan_recovery_state(store, &session, kind, accounting, schedule, now)?;
     let transitioned = store
         .transition_running_to_rate_limited_with_provider_metadata(
             session_id,
@@ -529,18 +536,31 @@ fn record_rate_limit_pause(store: &Store, session_id: &str, now: i64) -> Result<
     let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
         return Ok(());
     };
-    record_rate_limit_pause_for_session(store, &session, PauseAccounting::Counted, now)
+    let schedule = stored_retry_schedule(&session, now);
+    record_rate_limit_pause_for_session(store, &session, PauseAccounting::Counted, schedule, now)
 }
 
-/// Write retry bookkeeping onto a row that is already paused.
+/// The schedule for the limit a paused row stores: its kind and its reset.
+fn stored_retry_schedule(session: &Session, now: i64) -> RetrySchedule {
+    retry_schedule(
+        session.rate_limit_kind.as_deref(),
+        session.rate_limit_resets_at.as_deref(),
+        now,
+    )
+}
+
+/// Write retry bookkeeping onto a row that is already paused, with its next
+/// retry timed by `schedule`.
 ///
-/// Only [`ensure_auto_recovery_state`] needs this: rows paused by a build
-/// that wrote the fragment after the status flip, or by a pause path that
-/// could not plan one. New pauses go through [`pause_for_rate_limit`].
+/// [`ensure_auto_recovery_state`] needs this for rows paused by a build that
+/// wrote the fragment after the status flip, or by a pause path that could
+/// not plan one, and [`reschedule_after_start_failure`] for a resume that
+/// failed to start. New pauses go through [`pause_for_rate_limit`].
 fn record_rate_limit_pause_for_session(
     store: &Store,
     session: &Session,
     accounting: PauseAccounting,
+    schedule: RetrySchedule,
     now: i64,
 ) -> Result<(), String> {
     let state = plan_recovery_state(
@@ -548,7 +568,7 @@ fn record_rate_limit_pause_for_session(
         session,
         session.rate_limit_kind.as_deref(),
         accounting,
-        session.rate_limit_resets_at.as_deref(),
+        schedule,
         now,
     )?;
     store
@@ -559,23 +579,24 @@ fn record_rate_limit_pause_for_session(
 }
 
 /// The next retry state for `session`, advancing any bookkeeping it already
-/// carries. `kind` and `accounting` are those of [`build_recovery_state`].
+/// carries. `kind`, `accounting` and `schedule` are those of
+/// [`build_recovery_state_on`].
 fn plan_recovery_state(
     store: &Store,
     session: &Session,
     kind: Option<&str>,
     accounting: PauseAccounting,
-    resets_at: Option<&str>,
+    schedule: RetrySchedule,
     now: i64,
 ) -> Result<RateLimitAutoRecovery, String> {
     let blocker = auto_resume_blocker(store, session)?;
     let existing = auto_recovery_from_metadata(session.provider_metadata.as_ref());
-    let jitter_ms = jitter_ms(jitter_bound_for(kind, resets_at, now));
-    Ok(build_recovery_state(
+    let jitter_ms = jitter_ms(schedule.jitter_bound_ms());
+    Ok(build_recovery_state_on(
         existing.as_ref(),
         kind,
         accounting,
-        resets_at,
+        schedule,
         now,
         blocker.as_deref(),
         jitter_ms,
@@ -629,15 +650,22 @@ fn log_recovery_state(session: &Session, kind: Option<&str>, state: &RateLimitAu
     }
 }
 
-/// Park a failed auto-resume attempt back into the normal retry schedule.
+/// Park a failed auto-resume attempt back into the retry schedule, on the
+/// minute-scale backoff.
 ///
 /// `auto_resume_rate_limited_session` re-parks the session as paused when the
 /// start fails, so a transient error (a store hiccup, a briefly unresolvable
 /// workspace path) lands here with the retry bookkeeping intact. Scheduling a
-/// regular backoff attempt lets a later tick try again; the attempt cap and
-/// the 24h window in [`build_recovery_state`] still bound repeated failures,
-/// so give-up is reserved for starts that keep failing rather than issued on
-/// the first one.
+/// backoff attempt lets a later tick try again; the attempt cap and the 24h
+/// window in [`build_recovery_state_on`] still bound repeated failures, so
+/// give-up is reserved for starts that keep failing rather than issued on the
+/// first one.
+///
+/// The retry is on [`RetrySchedule::Backoff`] whatever limit paused the row.
+/// A start failure says nothing about the limit: the provider was never
+/// asked. So a row on the slow schedule of a subscription usage limit is not
+/// made to wait another 40 minutes for it, and a row that waited for a reset
+/// is past that reset by the time the tick claims it.
 ///
 /// A start failure is not evidence about the network: `prepare_resume` fails
 /// on a missing workspace path, a disconnected session or a branch in
@@ -659,9 +687,13 @@ fn reschedule_after_start_failure(
             if is_network_pause(session.rate_limit_kind.as_deref()) {
                 scheduler.abandon_network_probe(session_id, now);
             }
-            if let Err(e) =
-                record_rate_limit_pause_for_session(store, &session, PauseAccounting::Counted, now)
-            {
+            if let Err(e) = record_rate_limit_pause_for_session(
+                store,
+                &session,
+                PauseAccounting::Counted,
+                RetrySchedule::Backoff,
+                now,
+            ) {
                 log::warn!(
                     "[rate_limit_recovery] failed to reschedule session {session_id} after a failed start: {e}"
                 );
@@ -687,17 +719,38 @@ fn is_actionable_for_auto_resume(session: &Session) -> bool {
         .unwrap_or(true)
 }
 
-/// The retry state after one more pause.
+/// The retry state after one more pause of `kind` that reported `resets_at`:
+/// [`build_recovery_state_on`] the schedule those two choose.
+#[cfg(test)]
+fn build_recovery_state(
+    existing: Option<&RateLimitAutoRecovery>,
+    kind: Option<&str>,
+    accounting: PauseAccounting,
+    resets_at: Option<&str>,
+    now: i64,
+    blocker: Option<&str>,
+    jitter_ms: i64,
+) -> RateLimitAutoRecovery {
+    build_recovery_state_on(
+        existing,
+        kind,
+        accounting,
+        retry_schedule(kind, resets_at, now),
+        now,
+        blocker,
+        jitter_ms,
+    )
+}
+
+/// The retry state after one more pause, with its retry timed by `schedule`.
 ///
 /// `accounting` applies to a network pause (`kind` of
-/// [`NETWORK_PAUSE_KIND`]) only. An API-limit pause is counted, with one
-/// exception: a pause that reports no usable reset while the session's last
-/// retry is still waiting for one keeps that retry and is not counted (see
-/// [`pending_reset_retry`]).
+/// [`NETWORK_PAUSE_KIND`]) only. An API-limit pause is always counted.
 ///
 /// A counted pause advances `attempt` and gives up past
-/// [`MAX_AUTO_RETRY_ATTEMPTS`]. Its retry is timed by [`RetrySchedule`]: for
-/// the reported reset when there is a usable one, else on a backoff.
+/// [`MAX_AUTO_RETRY_ATTEMPTS`]. Its retry is timed by `schedule`
+/// ([`RetrySchedule`]): for the reported reset when there is a usable one,
+/// else on a backoff.
 ///
 /// The 24 hour window bounds the time a session spends on a backoff, not the
 /// time it waits for a reset the provider reported, which for a weekly limit
@@ -722,11 +775,11 @@ fn is_actionable_for_auto_resume(session: &Session) -> bool {
 ///   session, whether the wait came before its first counted failure or
 ///   between two of them. Counted failures with no wait between them still
 ///   give up once they span more than 24 hours.
-fn build_recovery_state(
+fn build_recovery_state_on(
     existing: Option<&RateLimitAutoRecovery>,
     kind: Option<&str>,
     accounting: PauseAccounting,
-    resets_at: Option<&str>,
+    schedule: RetrySchedule,
     now: i64,
     blocker: Option<&str>,
     jitter_ms: i64,
@@ -772,17 +825,7 @@ fn build_recovery_state(
         };
     }
 
-    let schedule = retry_schedule(kind, resets_at, now);
     let waits_for_reset = matches!(schedule, RetrySchedule::Reset(_));
-    if !network && !waits_for_reset {
-        if let Some(waiting) = pending_reset_retry(existing, now) {
-            return RateLimitAutoRecovery {
-                updated_at: now,
-                ..waiting.clone()
-            };
-        }
-    }
-
     let attempt = existing.map(|s| s.attempt.saturating_add(1)).unwrap_or(1);
     let window_restarts = last_pause_waited_for_reset(existing)
         || (network && (attempt == 1 || last_pause_was_uncounted(existing)));
@@ -847,37 +890,6 @@ fn build_recovery_state(
         unsafe_to_auto_resume: false,
         reason: Some(reason.to_string()),
     }
-}
-
-/// The bookkeeping of a retry that is still waiting for a provider-reported
-/// reset: scheduled from one (`reason` of [`RESET_AT_REASON`]) and not yet
-/// due.
-///
-/// A pause that lands in this state with no usable reset of its own keeps
-/// waiting for the known one. The claim for an auto-resume clears the row's
-/// reset column, and a turn refused before its first model response may
-/// report no reset at all, so without this the session would drop onto the
-/// minute-scale backoff and spend its attempts before the limit resets. The
-/// retry time is the reset the session already knows, so it stands, and the
-/// pause is not charged to the attempt cap or the 24 hour window.
-///
-/// Once the retry is due the reset it waited for has passed, and a refusal
-/// after that is a new limit: it is counted and scheduled like any other.
-/// The tick claims a row only when its retry is due, so a resume it starts
-/// is refused in that second case; this one holds for a pause recorded
-/// while the retry is still ahead, however the run came to start early.
-fn pending_reset_retry(
-    existing: Option<&RateLimitAutoRecovery>,
-    now: i64,
-) -> Option<&RateLimitAutoRecovery> {
-    existing.filter(|state| {
-        state.reason.as_deref() == Some(RESET_AT_REASON)
-            && state.gave_up_at.is_none()
-            && !state.unsafe_to_auto_resume
-            && state
-                .next_retry_at
-                .is_some_and(|next_retry_at| next_retry_at > now)
-    })
 }
 
 /// Whether the pause before this one was scheduled for a provider-reported
@@ -1118,15 +1130,6 @@ fn metadata_for_state(state: &RateLimitAutoRecovery) -> serde_json::Value {
             "rateLimitAutoRecovery": state
         }
     })
-}
-
-/// A stored reset time the scheduler will actually wait for: parseable, in
-/// the future, and within [`MAX_PLAUSIBLE_RESET_LEAD_MS`] of now.
-fn plausible_reset_millis(resets_at: Option<&str>, now: i64) -> Option<i64> {
-    resets_at
-        .and_then(parse_reset_timestamp_millis)
-        .filter(|reset_at| *reset_at > now)
-        .filter(|reset_at| reset_at.saturating_sub(now) <= MAX_PLAUSIBLE_RESET_LEAD_MS)
 }
 
 /// Parse a stored reset timestamp into UTC millis.
@@ -2210,7 +2213,10 @@ mod tests {
             12_000,
         );
         assert_eq!(state.reason.as_deref(), Some("backoff"));
-        assert_eq!(jitter_bound_for(None, Some(&micros), now), MAX_BACKOFF_MS);
+        assert_eq!(
+            retry_schedule(None, Some(&micros), now).jitter_bound_ms(),
+            MAX_BACKOFF_MS
+        );
 
         // The cap is on lead time, not scale: just beyond the window falls
         // back, just within it is honored.
@@ -2238,7 +2244,7 @@ mod tests {
         );
         assert_eq!(state.reason.as_deref(), Some("reset_at"));
         assert_eq!(
-            jitter_bound_for(None, Some(&within_window), now),
+            retry_schedule(None, Some(&within_window), now).jitter_bound_ms(),
             RESET_JITTER_MS
         );
     }

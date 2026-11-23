@@ -421,8 +421,9 @@ mod tests {
 
     /// API-style failures keep the minute-scale backoff: a 429 and an
     /// overloaded provider clear in seconds to minutes. A usage update from
-    /// earlier in the turn, sent while a subscription window was still open,
-    /// changes nothing.
+    /// earlier in the turn changes nothing, whether it was sent while a
+    /// subscription window was still open or for an account on extra usage,
+    /// whose weekly window stays `rejected` while its turns run.
     #[test]
     fn api_rate_limits_and_overloads_park_the_row_on_the_minute_backoff() {
         const API_429: &str = r#"Internal error: API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your organization's rate limit of 400,000 input tokens per minute."}}"#;
@@ -439,8 +440,21 @@ mod tests {
             } },
         });
 
+        let on_extra_usage = json!({
+            "sessionUpdate": "usage_update",
+            "used": 51_234,
+            "size": 200_000,
+            "_meta": { "_claude/rateLimit": {
+                "status": "rejected",
+                "resetsAt": WEEKLY_RESETS_AT_SECS,
+                "rateLimitType": "seven_day",
+                "overageStatus": "allowed",
+                "isUsingOverage": true,
+            } },
+        });
+
         for (error_kind, message) in [("rate_limit", API_429), ("overloaded", OVERLOADED)] {
-            for usage_update in [None, Some(&open_window)] {
+            for usage_update in [None, Some(&open_window), Some(&on_extra_usage)] {
                 let store = Store::in_memory().unwrap();
                 let mut metadata = prompt_error_metadata(error_kind, message);
                 if let Some(usage_update) = usage_update {
@@ -466,6 +480,27 @@ mod tests {
                 );
             }
         }
+
+        // An overloaded prompt takes nothing from a usage update that says
+        // the weekly limit was reached, extra usage or not.
+        let store = Store::in_memory().unwrap();
+        let mut metadata = prompt_error_metadata("overloaded", OVERLOADED);
+        metadata["acp"]["usageUpdate"] = on_extra_usage.clone();
+        metadata["acp"]["usageUpdate"]["_meta"]["_claude/rateLimit"]["isUsingOverage"] =
+            json!(false);
+        let mut session = Session::new_running("work", Path::new("/tmp"))
+            .with_provider("claude")
+            .with_agent("agent-1");
+        session.provider_metadata = Some(metadata);
+
+        let bookkeeping = park_failed_run(&store, &session, OVERLOADED);
+
+        let parked = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(parked.rate_limit_kind.as_deref(), Some("overloaded"));
+        assert_eq!(parked.rate_limit_resets_at, None);
+        assert_eq!(bookkeeping.reason.as_deref(), Some("backoff"));
+        let retry_at = bookkeeping.next_retry_at.expect("a retry is scheduled");
+        assert!((NOW_MS..=NOW_MS + MINUTE_MS).contains(&retry_at));
     }
 
     #[test]

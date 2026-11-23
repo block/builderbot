@@ -127,6 +127,21 @@ pub trait MessageWriter: Send + Sync {
     ) {
     }
 
+    /// The text of a prompt as the agent is about to receive it: the
+    /// request's text blocks in order, which are the prompt followed by what
+    /// the connection adds for attachments (a label ahead of each labelled
+    /// image, or one notice for images an agent without image support does
+    /// not get). Called on the connection task just before `session/prompt`
+    /// is sent, for every prompt turn of the connection: the caller's, and
+    /// the one that follows an interrupt.
+    ///
+    /// For a writer that weighs what the agent says against what it was sent
+    /// (a session title that only repeats its input, say): which blocks go
+    /// out depends on the agent's capabilities, so only the connection knows
+    /// them. A message steered into a live turn is not reported. The default
+    /// ignores it.
+    async fn on_prompt_sent(&self, _text_blocks: &[&str]) {}
+
     /// Record a tool call with its ID, title, and optional raw input parameters.
     async fn record_tool_call(
         &self,
@@ -7497,6 +7512,12 @@ async fn run_prompt_turn(
         .await
         .start_prompt(setup.agent_session_id.to_string());
 
+    // Before the request goes out, so the writer knows the text by the time
+    // anything the agent says about it can be dispatched.
+    handler
+        .writer
+        .on_prompt_sent(&prompt_text_blocks(&prompt_request.prompt))
+        .await;
     let prompt_task = connection.send_request(prompt_request).block_task();
     tokio::pin!(prompt_task);
 
@@ -8964,6 +8985,18 @@ fn build_prompt_content_blocks(
     content_blocks
 }
 
+/// The text blocks of a prompt's content, in order: everything in it an
+/// agent reads as text (see [`MessageWriter::on_prompt_sent`]).
+fn prompt_text_blocks(content_blocks: &[AcpContentBlock]) -> Vec<&str> {
+    content_blocks
+        .iter()
+        .filter_map(|block| match block {
+            AcpContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Strip outer markdown code fences from tool-result content.
 /// Agents often wrap results in ``` fences which are redundant in our `<pre>` display.
 /// The closing fence may be absent when content was truncated by the preview limit.
@@ -9142,7 +9175,7 @@ mod tests {
         NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
         PlanEntryPriority, PlanEntryStatus, PromptRequest, RequestPermissionOutcome,
         RequestPermissionRequest, SessionConfigOption, SessionConfigOptionCategory,
-        SessionConfigSelectOption, SessionNotification, SessionUpdate,
+        SessionConfigSelectOption, SessionInfoUpdate, SessionNotification, SessionUpdate,
         SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
         ToolCall, ToolCallUpdate, ToolCallUpdateFields,
     };
@@ -15104,18 +15137,40 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         PermissionCancelled(String),
     }
 
+    /// What the writer was told about the session's prompts and its info
+    /// (title), in order. Kept apart from [`WriterCall`]: the transcript
+    /// tests compare that log whole.
+    #[derive(Debug, Clone, PartialEq)]
+    enum SessionCall {
+        /// The text blocks of a prompt about to be sent.
+        PromptSent(Vec<String>),
+        /// A `session_info_update` from the agent.
+        Info(SessionInfoUpdate),
+    }
+
     #[derive(Default)]
     struct TranscriptWriter {
         calls: Mutex<Vec<WriterCall>>,
+        session_calls: Mutex<Vec<SessionCall>>,
         /// Hold the next permission request open — a dialog nobody has
         /// answered — until its cancel token fires or the test releases it.
         hold_next_permission: AtomicBool,
         release_permission: tokio::sync::Notify,
+        /// Hold the next `on_prompt_sent` open (a writer still taking the
+        /// prompt in) until the test releases it. `prompt_sent_arrived` says
+        /// the call is being held; the prompt is recorded as it returns.
+        hold_next_prompt_sent: AtomicBool,
+        prompt_sent_arrived: tokio::sync::Notify,
+        release_prompt_sent: tokio::sync::Notify,
     }
 
     impl TranscriptWriter {
         fn calls(&self) -> Vec<WriterCall> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn session_calls(&self) -> Vec<SessionCall> {
+            self.session_calls.lock().unwrap().clone()
         }
 
         /// Appends and boundaries only — the transcript shape, without the
@@ -15195,6 +15250,29 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     .unwrap()
                     .push(WriterCall::UserAttachments(attachment_ids.to_vec()));
             }
+        }
+
+        async fn on_prompt_sent(&self, text_blocks: &[&str]) {
+            if self
+                .hold_next_prompt_sent
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.prompt_sent_arrived.notify_one();
+                self.release_prompt_sent.notified().await;
+            }
+            self.session_calls
+                .lock()
+                .unwrap()
+                .push(SessionCall::PromptSent(
+                    text_blocks.iter().map(|text| text.to_string()).collect(),
+                ));
+        }
+
+        async fn on_session_info_update(&self, info: &SessionInfoUpdate) {
+            self.session_calls
+                .lock()
+                .unwrap()
+                .push(SessionCall::Info(info.clone()));
         }
 
         async fn record_tool_call(

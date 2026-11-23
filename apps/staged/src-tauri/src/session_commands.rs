@@ -5029,6 +5029,18 @@ automatically be told where to read all notes, so a reference is enough. For exa
 `Implement \"Step 5: unit tests\" from #note:123`. This restriction applies only when a note is \
 being referenced.";
 
+/// A project session's first prompt: Staged's instructions and the project's
+/// context in an `<action>` block, then the user's request.
+fn project_session_prompt(
+    action_instructions: &str,
+    project_context: &str,
+    prompt: &str,
+) -> String {
+    format!(
+        "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
+    )
+}
+
 pub(crate) fn build_project_session_action_instructions_with_pikchr_reference(
     is_remote: bool,
     pikchr_grammar_reference: &str,
@@ -5211,9 +5223,7 @@ pub async fn start_project_session_for_store(
         &note_draft_path,
     );
 
-    let full_prompt = format!(
-        "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
-    );
+    let full_prompt = project_session_prompt(&action_instructions, &project_context, &prompt);
     session.prompt = full_prompt.clone();
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
@@ -15155,6 +15165,76 @@ mod tests {
             "`path` must be the repo-root-relative path exactly as shown in the `git diff` file headers \
              (without the `a/` or `b/` prefix), even when you are working inside a subdirectory."
         ));
+    }
+
+    /// Every prompt built here opens with Staged's instructions, in the form
+    /// the session-title check recognises them by: a title that is the bare
+    /// start of one is an echo of it (`store::title_echoes_input`).
+    #[test]
+    fn built_prompts_open_with_instructions_the_title_check_recognises() {
+        let mut prompts = vec![
+            project_session_prompt(
+                &build_project_session_action_instructions_with_pikchr_reference(
+                    false,
+                    PIKCHR_GRAMMAR_URL,
+                    TEST_NOTE_DRAFT_PATH,
+                ),
+                "project info",
+                "user prompt",
+            ),
+            project_session_prompt(
+                &build_project_session_action_instructions_with_pikchr_reference(
+                    true,
+                    PIKCHR_GRAMMAR_URL,
+                    TEST_NOTE_DRAFT_PATH,
+                ),
+                "project info",
+                "user prompt",
+            ),
+        ];
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Commit,
+            BranchSessionType::Review,
+        ] {
+            prompts.push(build_full_prompt(
+                "user prompt",
+                "project info",
+                "branch context",
+                &session_type,
+                None,
+                None,
+            ));
+        }
+        for has_parsed_note in [false, true] {
+            prompts.push(build_note_followup_message_with_pikchr_reference(
+                has_parsed_note,
+                PIKCHR_GRAMMAR_URL,
+                false,
+                TEST_NOTE_DRAFT_PATH,
+            ));
+        }
+
+        for prompt in &prompts {
+            let opening: String = prompt.chars().take(60).collect();
+            assert!(store::opens_with_staged_instructions(prompt), "{opening:?}");
+            // As an agent that names a session after its input cuts it,
+            // marked or not.
+            let cut: String = prompt
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(40)
+                .collect();
+            assert!(store::title_echoes_input(&cut, prompt), "{cut:?}");
+            assert!(
+                store::title_echoes_input(&format!("{cut}…"), prompt),
+                "{cut:?}"
+            );
+        }
+        // The user's own words, which is what a chat follow-up sends.
+        assert!(!store::opens_with_staged_instructions("user prompt"));
     }
 
     #[test]

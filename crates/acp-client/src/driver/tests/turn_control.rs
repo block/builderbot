@@ -36,6 +36,9 @@ struct FakeAgent {
     advertise_steering: bool,
     /// Text the agent streams at the start of each prompt, in order.
     stream_on_prompt: Vec<&'static str>,
+    /// A session title the agent pushes (`session_info_update`) at the start
+    /// of every prompt, ahead of any text.
+    title_on_prompt: Option<&'static str>,
     /// Ask permission for a tool call during these (1-based) prompts, and
     /// record the client's answers in order.
     permission_on_prompts: Vec<usize>,
@@ -155,6 +158,12 @@ impl FakeAgent {
                         prompts.push(text);
                         prompts.len()
                     };
+                    if let Some(title) = prompt_agent.title_on_prompt {
+                        cx.send_notification(SessionNotification::new(
+                            "sess-1",
+                            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title)),
+                        ))?;
+                    }
                     if let Some(chunk) = prompt_agent.stream_on_prompt.get(ordinal - 1) {
                         cx.send_notification(agent_text(Some(&format!("msg-{ordinal}")), chunk))?;
                     }
@@ -404,11 +413,56 @@ where
     F: FnOnce(TurnControlHandle, Arc<FakeAgent>, Arc<TranscriptWriter>) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let writer = Arc::new(TranscriptWriter::default());
+    live_turn_sending(
+        agent,
+        steering_setup(steering_supported),
+        "first",
+        &[],
+        drive,
+    )
+    .await
+}
+
+/// [`live_turn_with`] for a given prompt and attachments, against an agent
+/// with the capabilities in `setup`.
+async fn live_turn_sending<F, Fut>(
+    agent: &Arc<FakeAgent>,
+    setup: AcpSessionSetup,
+    prompt: &str,
+    images: &[PromptImage],
+    drive: F,
+) -> (Result<TurnStep, String>, Arc<TranscriptWriter>)
+where
+    F: FnOnce(TurnControlHandle, Arc<FakeAgent>, Arc<TranscriptWriter>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    live_turn_on(
+        Arc::new(TranscriptWriter::default()),
+        agent,
+        setup,
+        prompt,
+        images,
+        drive,
+    )
+    .await
+}
+
+/// [`live_turn_sending`] with a writer the test set up before the turn.
+async fn live_turn_on<F, Fut>(
+    writer: Arc<TranscriptWriter>,
+    agent: &Arc<FakeAgent>,
+    setup: AcpSessionSetup,
+    prompt: &str,
+    images: &[PromptImage],
+    drive: F,
+) -> (Result<TurnStep, String>, Arc<TranscriptWriter>)
+where
+    F: FnOnce(TurnControlHandle, Arc<FakeAgent>, Arc<TranscriptWriter>) -> Fut,
+    Fut: Future<Output = ()>,
+{
     // `run_prompt_turn` is driven without `session/new`, which is what names
     // the connection's session; the fake agent stamps `sess-1`.
     let handler = Arc::new(transcript_handler(&writer).named("sess-1"));
-    let setup = steering_setup(steering_supported);
     let (turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
     let handle = turn_control_handle(&turn_control_tx, true);
     let cancel = CancellationToken::new();
@@ -430,8 +484,8 @@ where
                     "local-session",
                     &cancel,
                     &mut turn_control_rx,
-                    "first",
-                    &[],
+                    prompt,
+                    images,
                 ),
                 drive(handle, Arc::clone(agent), Arc::clone(&writer)),
             );
@@ -814,6 +868,15 @@ async fn interrupt_cancels_the_turn_and_reprompts_on_the_same_connection() {
             WriterCall::Finalize,
             WriterCall::UserMessage("actually, do this instead".to_string()),
             WriterCall::Append("the new answer".to_string()),
+        ]
+    );
+    // The writer was told the text of both prompts: the re-prompt is a
+    // prompt turn like the first.
+    assert_eq!(
+        writer.session_calls(),
+        [
+            SessionCall::PromptSent(vec!["first".to_string()]),
+            SessionCall::PromptSent(vec!["actually, do this instead".to_string()]),
         ]
     );
     // The first prompt()'s reply was never resolved by the interrupt: it is
@@ -1652,5 +1715,130 @@ async fn a_pending_permission_decision_does_not_stall_the_connection() {
     );
     if let Some(reply) = stashed_reply {
         let _ = reply.send(result.map(|(outcome, _)| outcome));
+    }
+}
+
+// =============================================================================
+// What the writer is told about a turn: the prompt as sent, the agent's title
+// =============================================================================
+
+/// A `session_info_update` frame on the wire reaches the writer, through the
+/// dispatch `AcpDriver::connect` registers, and by then the writer has been
+/// told the prompt the title may only be repeating.
+///
+/// The second half is `run_prompt_turn` telling the writer before the
+/// request goes out, and a writer that takes the prompt in without yielding
+/// would be told first whichever side of the send the call sat on: nothing
+/// else runs on this runtime until the turn yields. So this writer holds
+/// the call open, and the test checks that the agent has no prompt while it
+/// is held. The clock is paused: a sleep returns only once every task is
+/// idle, so by then a request already sent would have reached the agent
+/// and its title would have reached the writer.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_agents_session_title_reaches_the_writer_after_the_prompt_as_sent() {
+    let agent = Arc::new(FakeAgent {
+        title_on_prompt: Some("Refresh expired login tokens"),
+        stream_on_prompt: vec!["on it"],
+        ..FakeAgent::default()
+    });
+    let writer = Arc::new(TranscriptWriter::default());
+    writer.hold_next_prompt_sent.store(true, Ordering::SeqCst);
+
+    let (step, writer) = live_turn_on(
+        writer,
+        &agent,
+        steering_setup(false),
+        "first",
+        &[],
+        |_handle, agent, writer| async move {
+            tokio::time::timeout(SETTLE_TIMEOUT, writer.prompt_sent_arrived.notified())
+                .await
+                .expect("the writer should be told the prompt");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                agent.prompts(),
+                Vec::<String>::new(),
+                "the request went out before the writer had been told the prompt"
+            );
+            assert_eq!(writer.session_calls(), []);
+            writer.release_prompt_sent.notify_one();
+
+            agent.await_prompt().await;
+            // The chunk is sent behind the title, so the title was dispatched.
+            wait_until("the chunk behind the title", || {
+                writer
+                    .text_flow()
+                    .contains(&WriterCall::Append("on it".to_string()))
+            })
+            .await;
+            agent.finish_prompt(StopReason::EndTurn);
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(step, Ok(TurnStep::Settled(AgentRunOutcome::Completed))),
+        "got: {step:?}"
+    );
+    assert_eq!(
+        writer.session_calls(),
+        [
+            SessionCall::PromptSent(vec!["first".to_string()]),
+            SessionCall::Info(SessionInfoUpdate::new().title("Refresh expired login tokens")),
+        ]
+    );
+}
+
+/// The writer is told every text block of the request, not only the prompt:
+/// an agent that names a session after its input reads them all. Which
+/// blocks there are depends on whether the agent takes images.
+#[tokio::test(flavor = "current_thread")]
+async fn the_writer_is_told_every_text_block_of_the_prompt_as_sent() {
+    let images = [
+        PromptImage::new("aGk=", "image/png").with_label("page 1 of 2 of spec.pdf"),
+        PromptImage::new("aGk=", "image/png").with_label("page 2 of 2 of spec.pdf"),
+    ];
+    for (supports_images, attachment_text) in [
+        (
+            true,
+            vec!["page 1 of 2 of spec.pdf", "page 2 of 2 of spec.pdf"],
+        ),
+        (
+            false,
+            vec![
+                "[2 image block(s) omitted because this ACP provider does not advertise \
+                 promptCapabilities.image]",
+            ],
+        ),
+    ] {
+        let agent = Arc::new(FakeAgent::default());
+        let mut setup = steering_setup(false);
+        setup.agent_capabilities.prompt_capabilities.image = supports_images;
+
+        let (step, writer) = live_turn_sending(
+            &agent,
+            setup,
+            "also add tests",
+            &images,
+            |_handle, agent, _writer| async move {
+                agent.await_prompt().await;
+                agent.finish_prompt(StopReason::EndTurn);
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(step, Ok(TurnStep::Settled(AgentRunOutcome::Completed))),
+            "got: {step:?}"
+        );
+        let mut text_blocks = vec!["also add tests".to_string()];
+        text_blocks.extend(attachment_text.iter().map(|text| text.to_string()));
+        // What the writer was told is the text the agent received.
+        assert_eq!(agent.prompts(), [text_blocks.concat()]);
+        assert_eq!(
+            writer.session_calls(),
+            [SessionCall::PromptSent(text_blocks)],
+            "supports_images: {supports_images}"
+        );
     }
 }

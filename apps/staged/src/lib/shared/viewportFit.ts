@@ -32,9 +32,9 @@
 //   cover dropped (an iPhone in landscape has no status bar), cover is put
 //   back, on a settled reading too, and judged afresh from there.
 // - It keeps the home indicator clear. The bottom inset read just before
-//   cover goes is left on <html> as `--safe-bottom-fallback`, which the
-//   bottom-padded panes take the larger of (see SAFE_AREA_BOTTOM in
-//   safeArea.ts). It is removed when cover returns.
+//   cover goes is left on <html> as `--safe-bottom-fallback`. `--safe-bottom`
+//   in app.css is the larger of that and the `env()` inset, and is what every
+//   bottom-padded pane reads. The fallback is removed when cover returns.
 
 /** How long a reading must hold, with no `resize`, before the guard acts on it. */
 export const SETTLE_MS = 300;
@@ -119,8 +119,19 @@ export function guardViewportFit(): () => void {
   let covered = true;
   let settle: ReturnType<typeof setTimeout> | undefined;
   // Window sizes, so a pair of layouts that each ask for the other cannot
-  // flip the meta for ever: where cover was put back and then had to go again
-  // with the window unchanged, it stays off until the window changes.
+  // flip the meta for ever. `restoredAt` is the size at which cover was last
+  // put back. Every drop sets `keepOffAt`: to the window's size if that is
+  // where cover was last put back, to nothing otherwise. Cover is not put
+  // back at the `keepOffAt` size.
+  //
+  // The window changing size does not clear `keepOffAt`. Only the next drop
+  // does, and for one to happen cover must first come back at another size.
+  // So cover stays off at that size through a rotation away and back, for
+  // the rest of the session if it comes back nowhere else. That errs towards
+  // no cover: at that size the page reaches the bottom of the window without
+  // it, and the fallback inset stays. Where cover does come back at another
+  // size, the drop on returning clears `keepOffAt`, and this size gets one
+  // more restore and drop before cover is kept off here again.
   let restoredAt: string | null = null;
   let keepOffAt: string | null = null;
 

@@ -6,13 +6,13 @@ export interface EdgeOffsets {
 }
 
 /**
- * The bottom safe-area inset. Where viewportFit.ts has dropped
- * `viewport-fit=cover`, every `env()` inset reads 0 while the page still runs
- * under the home indicator, so the guard leaves the inset it last read in
- * `--safe-bottom-fallback`. Stylesheets spell this expression out.
+ * The bottom safe-area inset: `--safe-bottom`, defined once on `:root` in
+ * app.css as the larger of the env() bottom inset and the inset
+ * viewportFit.ts leaves behind when it drops `viewport-fit=cover`. Styles use
+ * the property, never the env() inset itself, which reads 0 without cover
+ * (safeAreaBottom.test.ts fails on one that does).
  */
-export const SAFE_AREA_BOTTOM =
-  'max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))';
+export const SAFE_AREA_BOTTOM = 'var(--safe-bottom)';
 
 /**
  * `distance` from each screen edge, measured from the safe area rather than

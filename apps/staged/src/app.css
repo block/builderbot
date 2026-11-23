@@ -222,6 +222,18 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* ── The bottom safe-area inset: the home indicator's strip. Everything that
+ *    clears it reads `var(--safe-bottom)`, never the `env()` inset itself.
+ *    Where viewportFit.ts has dropped `viewport-fit=cover`, every `env()`
+ *    inset reads 0 while the page still runs under the home indicator, so the
+ *    guard leaves the inset it last read on <html> as `--safe-bottom-fallback`
+ *    and this takes the larger of the two. The fallback is unset while cover
+ *    is on. safeAreaBottom.test.ts fails on a use of either outside this
+ *    rule. ── */
+:root {
+  --safe-bottom: max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px));
+}
+
 html,
 body {
   overflow: hidden;

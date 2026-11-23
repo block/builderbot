@@ -217,7 +217,7 @@
   .content {
     flex: 1;
     padding: 24px;
-    padding-bottom: calc(24px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
+    padding-bottom: calc(24px + var(--safe-bottom));
     width: 100%;
     box-sizing: border-box;
     display: flex;
@@ -250,9 +250,7 @@
   @media (max-width: 640px) {
     .content {
       padding: 16px;
-      padding-bottom: calc(
-        16px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))
-      );
+      padding-bottom: calc(16px + var(--safe-bottom));
     }
   }
 </style>

@@ -343,6 +343,62 @@ describe('guardViewportFit', () => {
     expect(meta.content).toBe(CONTENT);
   });
 
+  /** Cover came back in portrait and had to go again: it is kept off there. */
+  function keptOffInPortrait(): void {
+    guardViewportFit();
+    insetsArrive(62);
+    settle();
+    relayout(0, 874);
+    settle();
+    relayout(62, 812);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+  }
+
+  it('keeps cover off at that size through a change of window where cover stays off', () => {
+    keptOffInPortrait();
+
+    // A window whose page ends above its bottom without cover: no restore.
+    fakeWindow.outerWidth = 874;
+    fakeWindow.outerHeight = 402;
+    relayout(0, 380);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+
+    // Back at the first size, where the page fills the window without cover.
+    fakeWindow.outerWidth = 402;
+    fakeWindow.outerHeight = 874;
+    relayout(0, 874);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+    expect(rootStyle.get('--safe-bottom-fallback')).toBe('34px');
+  });
+
+  it('tries cover once more at that size after it came back at another', () => {
+    keptOffInPortrait();
+
+    rotate('landscape');
+    settle();
+    expect(meta.content).toBe(CONTENT);
+
+    // Short again with cover, so it goes; that drop lifts the limit.
+    rotate('portrait');
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+
+    relayout(0, 874);
+    settle();
+    expect(meta.content).toBe(CONTENT);
+    relayout(62, 812);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+
+    // One restore and drop, then cover is kept off here as before.
+    relayout(0, 874);
+    settle();
+    expect(meta.content).not.toContain('viewport-fit');
+  });
+
   it('stops checking once cleaned up', () => {
     const stop = guardViewportFit();
     insetsArrive(62);

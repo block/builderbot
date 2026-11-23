@@ -1,11 +1,14 @@
 // touchTapGuard.ts — ignore the click a flick ends in.
 //
-// iOS Safari turns a quick flick into a tap when it sees too few touch
-// samples to start a scroll (60–200 px of travel, finger up within about
-// 100 ms): no scroll happens, and a `click` lands on whatever was under the
-// finger when it came down. On a list of cards that opens one. This is
-// WebKit's tap synthesis, not an app handler, so it is undone in one place
-// for every click target rather than per card.
+// iOS Safari turns a touch that travelled into a tap when it sees too few
+// touch samples to start a scroll: no scroll happens, and a `click` lands on
+// whatever was under the finger when it came down. On a list of cards that
+// opens one. Such a touch need not go far or be quick. In the iOS 27.2
+// Simulator the click came after 24 to 246 px of travel, from a flick lifted
+// within 100 ms and from a finger put down and lifted elsewhere more than
+// half a second later with no move sample between. This is WebKit's tap
+// synthesis, not an app handler, so it is undone in one place for every
+// click target rather than per card.
 //
 // What tells such a touch from a tap is how far the finger went, in points on
 // the screen, and where it went. Both limits are ones iOS already has, for a
@@ -61,11 +64,13 @@
 // distance is multiplied by the scale before it is held to either limit.
 
 /**
- * Travel between finger down and finger up, in screen points, up to which a
- * touch is a tap wherever it landed and whatever its duration: the limit iOS
- * itself applies to a touch it has seen move. It leaves half as much again
- * above the furthest roll of a pressing thumb (about 30 px), and the shortest
- * flick the audit saw turned into a tap (60 px) is a third beyond it.
+ * Travel between finger down and finger up, in screen points, beyond which a
+ * touch is no tap wherever it landed and whatever its duration: the limit iOS
+ * itself applies to a touch it has seen move where nothing scrolls along the
+ * travel. It leaves half as much again above the furthest roll of a pressing
+ * thumb (about 30 px). A touch that went less far is not always a tap: flicks
+ * along a list were turned into taps from 24 px, so travel along something
+ * that scrolls is also held to `TAP_SCROLL_SLOP_PX`.
  */
 export const TAP_MAX_TRAVEL_PX = 45;
 

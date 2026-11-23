@@ -423,7 +423,8 @@ describe('guardTouchTaps', () => {
     // Simulator, as px across the list / px along it. With every sample
     // WebKit clicked for the first group and sent no click for the second, so
     // the guard must pass the one and swallow the other. A count is how many
-    // times the review ran the stroke.
+    // times the review ran the stroke. Only the vertical list was measured:
+    // the chip row below gets the same strokes mirrored.
     const WEBKIT_CLICKED: [across: number, along: number][] = [
       [22, 12],
       [24, 12],
@@ -435,10 +436,8 @@ describe('guardTouchTaps', () => {
       [40, 14],
       [40, 18],
       [40, 20],
-      // Not in the review's 25: 18/10 is its other reading of the cone's edge,
-      // and 10/8 is short of the scroll limit.
+      // Not in the review's 25: its other reading of the cone's edge.
       [18, 10],
-      [10, 8],
     ];
     const WEBKIT_SCROLLED: [across: number, along: number][] = [
       [10, 10], // 2
@@ -452,43 +451,72 @@ describe('guardTouchTaps', () => {
       [26, 24],
       [0, 10],
     ];
+    // Never run in the Simulator. It must pass by the rule: 8 pt along the
+    // list is short of the scroll limit. The measured reading under the limit
+    // is a straight 8 px along the list (0/8), which clicked, in 21bbb4b3.
+    const NOT_RUN_UNDER_SCROLL_LIMIT: [across: number, along: number][] = [[10, 8]];
     const strokes = [
-      ...WEBKIT_CLICKED.map(([across, along]) => ({ across, along, webkit: 'clicked' })),
-      ...WEBKIT_SCROLLED.map(([across, along]) => ({ across, along, webkit: 'sent no click' })),
+      ...WEBKIT_CLICKED.map(([across, along]) => ({
+        across,
+        along,
+        swallowed: false,
+        reading: 'WebKit clicked',
+      })),
+      ...WEBKIT_SCROLLED.map(([across, along]) => ({
+        across,
+        along,
+        swallowed: true,
+        reading: 'WebKit sent no click',
+      })),
+      ...NOT_RUN_UNDER_SCROLL_LIMIT.map(([across, along]) => ({
+        across,
+        along,
+        swallowed: false,
+        reading: 'not run (under the scroll limit)',
+      })),
     ];
 
-    describe.each([
+    // Titles are built here, not by `describe.each`, which cuts a value put
+    // into a title at 40 characters.
+    const scrollers = [
       {
-        where: 'a card in a vertical scroller',
+        title: 'strokes on a card in a vertical scroller, where WebKit was measured',
         landing: () => projectList().card,
         // Across the list is x, along it is y.
         delta: (across: number, along: number) => [across, along],
+        basis: (reading: string) => reading,
       },
       {
-        where: 'a chip in a horizontal scroller',
+        title: 'the card strokes mirrored onto a chip in a horizontal scroller, not measured there',
         landing: () => chipRow().chip,
         delta: (across: number, along: number) => [along, across],
+        basis: (reading: string) => `on the card, ${reading}`,
       },
-    ])('the strokes WebKit was measured on, on $where', ({ landing, delta }) => {
-      it.each(strokes)('$across across, $along along: WebKit $webkit', (stroke) => {
-        const target = landing();
-        const [dx, dy] = delta(stroke.across, stroke.along);
-        // Either way along and either way across, quick and slow.
-        for (const [sx, sy] of [
-          [1, 1],
-          [1, -1],
-          [-1, 1],
-          [-1, -1],
-        ]) {
-          for (const durationMs of [50, 160, 610]) {
-            expect(
-              flicked(target, sx * dx, sy * dy, durationMs),
-              `${sx * dx}, ${sy * dy} in ${durationMs} ms`
-            ).toBe(stroke.webkit === 'sent no click');
-          }
+    ];
+    for (const { title, landing, delta, basis } of scrollers) {
+      describe(title, () => {
+        for (const stroke of strokes) {
+          it(`${stroke.across} across, ${stroke.along} along: ${basis(stroke.reading)}`, () => {
+            const target = landing();
+            const [dx, dy] = delta(stroke.across, stroke.along);
+            // Either way along and either way across, quick and slow.
+            for (const [sx, sy] of [
+              [1, 1],
+              [1, -1],
+              [-1, 1],
+              [-1, -1],
+            ]) {
+              for (const durationMs of [50, 160, 610]) {
+                expect(
+                  flicked(target, sx * dx, sy * dy, durationMs),
+                  `${sx * dx}, ${sy * dy} in ${durationMs} ms`
+                ).toBe(stroke.swallowed);
+              }
+            }
+          });
         }
       });
-    });
+    }
 
     it('passes diagonal rolls on a button outside any scroller', () => {
       const { newProject } = projectList();

@@ -20,6 +20,8 @@ pub(crate) use bulk_lists::{list_branches_by_project_impl, list_project_repos_by
 pub(crate) use control::{
     control_add_repo_request, control_create_project_request, ControlAddRepo, ControlCreateProject,
 };
+#[cfg(test)]
+pub(crate) use create::create_project_impl;
 pub(crate) use create::{create_project_and_setup, CreateProjectRequest, ProjectCreator};
 pub(crate) use rename::rename_project_impl;
 pub(crate) use repo_spec::{is_monorepo, RepoSpecRequest};

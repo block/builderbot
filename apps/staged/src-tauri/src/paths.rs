@@ -28,6 +28,13 @@ pub fn data_dir() -> Option<PathBuf> {
     resolve_data_dir(requested, dirs::home_dir())
 }
 
+/// `~/.staged/`, whatever [`DATA_DIR_ENV`] says: the directory an installed
+/// Staged keeps its data in. For code that must stay out of it even when the
+/// override points this process somewhere else.
+pub fn default_data_dir() -> Option<PathBuf> {
+    resolve_data_dir(None, dirs::home_dir())
+}
+
 /// [`data_dir`] over its two inputs: the override, if usable, else `.staged`
 /// under `home`.
 ///

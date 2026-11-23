@@ -71,6 +71,8 @@ pub(crate) mod workspace_setup;
 #[cfg(test)]
 mod board_load_bench;
 #[cfg(test)]
+mod note_versions_seed;
+#[cfg(test)]
 pub mod test_utils;
 
 use serde::Serialize;

@@ -315,24 +315,35 @@ fn bench_dir() -> PathBuf {
     guarded_bench_dir(&dir, &real_data).unwrap_or_else(|refusal| panic!("{refusal}"))
 }
 
-/// Create the benchmark directory and return its real path, or refuse it
-/// when that path is inside `data_dir`. The benchmark deletes and rewrites
-/// `data-<n>.db` files in it, so the check is made on where the path really
-/// leads, not on how it is spelled: a relative path, a `..` that climbs back
-/// in, and a symlink into the data directory are all resolved first.
+/// [`guarded_scratch_dir`] for the benchmark's directory, where it deletes
+/// and rewrites `data-<n>.db` files.
+fn guarded_bench_dir(dir: &Path, data_dir: &Path) -> Result<PathBuf, String> {
+    guarded_scratch_dir("STAGED_BOARD_BENCH_DIR", dir, data_dir)
+}
+
+/// Create a scratch directory and return its real path, or refuse it when
+/// that path is inside `data_dir`. What runs in it writes database files of
+/// its own, so the check is made on where the path really leads, not on how
+/// it is spelled: a relative path, a `..` that climbs back in, and a symlink
+/// into the data directory are all resolved first. `var` is the environment
+/// variable `dir` came from, for the refusal.
 ///
 /// Checked before anything is created, so a refused path leaves the data
 /// directory untouched, and once more on the created directory's canonical
 /// path, in case the path changed under the check.
-fn guarded_bench_dir(dir: &Path, data_dir: &Path) -> Result<PathBuf, String> {
-    // Resolved the same way as the benchmark directory, so a symlink on the
+pub(crate) fn guarded_scratch_dir(
+    var: &str,
+    dir: &Path,
+    data_dir: &Path,
+) -> Result<PathBuf, String> {
+    // Resolved the same way as the scratch directory, so a symlink on the
     // way to the data directory does not hide it, whether or not the data
     // directory exists yet.
     let real_data_dir = resolve_without_creating(data_dir)?;
     let refuse_inside_data_dir = |path: &Path| {
         if path.starts_with(&real_data_dir) {
             Err(format!(
-                "STAGED_BOARD_BENCH_DIR must not be inside {}: {} resolves to {}",
+                "{var} must not be inside {}: {} resolves to {}",
                 data_dir.display(),
                 dir.display(),
                 path.display()

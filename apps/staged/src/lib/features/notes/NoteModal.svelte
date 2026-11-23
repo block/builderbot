@@ -90,6 +90,7 @@
   } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
   import { pageVideos } from '../../shared/markdown/pageVideos';
+  import { followSectionLink } from '../../shared/markdown/sectionLinks';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -775,6 +776,9 @@
       onHashtagClick(click);
       return;
     }
+    // A link to a heading of this note scrolls to it, looked up in this
+    // note's own markdown: another note open behind may share the heading.
+    if (followSectionLink(event, { content: markdownEl, scroller: contentEl })) return;
     handleExternalLinkClick(event);
   }
 
@@ -1342,6 +1346,20 @@
   .markdown-content :global(h3:first-child),
   .markdown-content :global(h4:first-child) {
     margin-top: 0;
+  }
+
+  /* A section link (`[text](#heading-slug)`) scrolls its heading to the top
+     of the note and moves focus there (sectionLinks.ts). The margin is the
+     room left above it: nothing is stuck over the scroll box's top edge, so
+     it is breathing space only. The ring shows where a keyboard landed. */
+  .markdown-content :global(:is(h1, h2, h3, h4, h5, h6)) {
+    scroll-margin-top: 16px;
+  }
+
+  .markdown-content :global(:is(h1, h2, h3, h4, h5, h6):focus-visible) {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: 4px;
+    border-radius: 2px;
   }
 
   .markdown-content :global(h1) {

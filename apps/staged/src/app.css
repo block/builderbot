@@ -623,6 +623,13 @@ mark.search-match-current {
    utilities of every specificity, so the rule is `!important` rather than
    one override per field. Controls with no text to type are left out, as
    are the non-editable islands inside an editor (hashtag badges, figures).
+   Two editors need a word of their own:
+   - `.hashtag-editor` is named because a disabled one is
+     `contenteditable="false"`, like the islands, and would drop back to its
+     own 13px for as long as it is disabled (while a session starts).
+   - The Milkdown note editor is left out. It is sized to match the note's
+     read view, and sets its own 16px floor in the phone layout
+     (MarkdownWysiwygEditor's `--crepe-base-font-size`).
    With a mouse nothing here applies. */
 @media (pointer: coarse) {
   input:not(
@@ -635,7 +642,8 @@ mark.search-match-current {
   ),
   textarea,
   select,
-  [contenteditable]:not([contenteditable='false']) {
+  [contenteditable]:not([contenteditable='false'], .milkdown .ProseMirror),
+  .hashtag-editor {
     font-size: max(16px, 1em) !important;
   }
 }

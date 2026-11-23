@@ -1,6 +1,6 @@
 /**
  * sectionLinks — links from rendered markdown to a place in the same
- * document: `[difficult cases](#how-the-plan-behaves-in-difficult-cases)`.
+ * document: `[dry summer](#how-the-beds-cope-with-a-dry-summer)`.
  *
  * The rendered headings carry no ids. The sanitizer strips them, and an id
  * is document-wide while two notes can be on screen at once (a project note

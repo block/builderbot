@@ -152,32 +152,32 @@ describe('sectionLinkFragment', () => {
 
 describe('followSectionLink', () => {
   const NOTE = [
-    '# Plan',
+    '# Garden',
     '',
-    'Start with the [difficult cases section](#how-the-plan-behaves-in-difficult-cases).',
+    'Start with the [dry summer section](#how-the-beds-cope-with-a-dry-summer).',
     '',
     '## Ordered steps',
     '',
     '| Step | See |',
     '| --- | --- |',
-    '| Mute | [silencing](#silencing-this-apps-own-alerts) |',
-    '| Check | [rule 22](#need-in-both-directions-rule-22) |',
+    '| Thin | [thinning](#thinning-the-gardeners-own-seedlings) |',
+    '| Water | [bed 12](#water-on-both-sides-bed-12) |',
     '',
-    '## How the plan behaves in difficult cases',
+    '## How the beds cope with a dry summer',
     '',
     'Back to the [steps](#ordered-steps).',
     '',
-    "### Silencing this app's own alerts",
+    "### Thinning the gardener's own seedlings",
     '',
-    '### Need in both directions (rule 22)',
+    '### Water on both sides (bed 12)',
   ].join('\n');
 
   it('scrolls the note to a later heading and moves focus to it', async () => {
     const note = mountNote(NOTE);
-    const target = note.heading('How the plan behaves in difficult cases');
+    const target = note.heading('How the beds cope with a dry summer');
     note.scroller.scrollTop = 30;
 
-    note.link('#how-the-plan-behaves-in-difficult-cases').click();
+    note.link('#how-the-beds-cope-with-a-dry-summer').click();
 
     expect(note.clicks).toEqual([{ handled: true, defaultPrevented: true }]);
     // Third heading: 800px below the box's top edge, in a box already scrolled by 30.
@@ -203,13 +203,13 @@ describe('followSectionLink', () => {
 
   it('follows links inside table cells, to ### headings', () => {
     const note = mountNote(NOTE);
-    expect(note.link('#silencing-this-apps-own-alerts').closest('td')).not.toBeNull();
+    expect(note.link('#thinning-the-gardeners-own-seedlings').closest('td')).not.toBeNull();
 
-    expect(followed(note, '#silencing-this-apps-own-alerts')).toBe(
-      note.heading("Silencing this app's own alerts")
+    expect(followed(note, '#thinning-the-gardeners-own-seedlings')).toBe(
+      note.heading("Thinning the gardener's own seedlings")
     );
-    expect(followed(note, '#need-in-both-directions-rule-22')).toBe(
-      note.heading('Need in both directions (rule 22)')
+    expect(followed(note, '#water-on-both-sides-bed-12')).toBe(
+      note.heading('Water on both sides (bed 12)')
     );
     expect(note.scrollTo.mock.calls.map(([options]) => options.top)).toEqual([1200, 1600]);
     expect(note.clicks.every((click) => click.handled && click.defaultPrevented)).toBe(true);

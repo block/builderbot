@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { createHeadingSlugger, githubHeadingSlug } from './headingSlug';
 
 describe('githubHeadingSlug', () => {
-  // Heading → fragment pairs taken from links in real notes.
+  // Plain headings: several words, a dropped apostrophe, parentheses and digits.
   it.each([
-    ['How the plan behaves in difficult cases', 'how-the-plan-behaves-in-difficult-cases'],
-    ["Silencing this app's own alerts", 'silencing-this-apps-own-alerts'],
-    ['Need in both directions (rule 22)', 'need-in-both-directions-rule-22'],
+    ['How the beds cope with a dry summer', 'how-the-beds-cope-with-a-dry-summer'],
+    ["Thinning the gardener's own seedlings", 'thinning-the-gardeners-own-seedlings'],
+    ['Water on both sides (bed 12)', 'water-on-both-sides-bed-12'],
     ['Ordered steps', 'ordered-steps'],
   ])('slugs %j as %j', (heading, slug) => {
     expect(githubHeadingSlug(heading)).toBe(slug);

@@ -2,7 +2,7 @@
  * headingSlug — the fragment GitHub gives a markdown heading.
  *
  * Notes link to their own sections the way a README does:
- * `[difficult cases](#how-the-plan-behaves-in-difficult-cases)`. The target
+ * `[dry summer](#how-the-beds-cope-with-a-dry-summer)`. The target
  * is not written anywhere in the note; it is derived from the heading's text
  * by GitHub's rule, so the same rule has to be applied here for those links
  * to resolve.

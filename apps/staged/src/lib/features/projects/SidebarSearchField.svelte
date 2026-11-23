@@ -76,8 +76,10 @@
       box-shadow 0.15s ease;
   }
 
-  .search-field:hover {
-    background: var(--projects-sidebar-field-bg-hover);
+  @media (hover: hover) {
+    .search-field:hover {
+      background: var(--projects-sidebar-field-bg-hover);
+    }
   }
 
   .search-field:focus-within {
@@ -123,8 +125,10 @@
     padding: 0;
   }
 
-  .clear:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .clear:hover {
+      color: var(--text-primary);
+      background: var(--bg-hover);
+    }
   }
 </style>

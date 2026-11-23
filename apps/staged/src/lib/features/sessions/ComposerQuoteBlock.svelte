@@ -132,8 +132,10 @@
   }
 
   /* The block is already the hover tint; the X needs a tint of its own. */
-  .composer-quote :global(.composer-quote-remove:hover) {
-    background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  @media (hover: hover) {
+    .composer-quote :global(.composer-quote-remove:hover) {
+      background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+    }
   }
 
   .composer-quote :global(.composer-quote-reply) {
@@ -149,8 +151,8 @@
 
   /* Finger-sized: the X is drawn at 32px (its `touch-hit` area makes up
      44px) with the excerpt kept clear of it, and the reply row is 44px tall
-     (border-box: the 1.5em line plus 12px above and below, the min-height
-     making up the half pixel) so a tap on it lands in the input rather than
+     (border-box: a 24px line of the 16px text a touch screen types in, plus
+     10px above and below) so a tap on it lands in the input rather than
      beside it. */
   @media (pointer: coarse) {
     .composer-quote {
@@ -176,7 +178,7 @@
 
     .composer-quote :global(.composer-quote-reply) {
       --hashtag-input-min-height: 44px;
-      padding: 12px 0;
+      padding: 10px 0;
     }
   }
 </style>

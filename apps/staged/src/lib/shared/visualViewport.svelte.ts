@@ -50,8 +50,16 @@
 // whether or not its scroll was needed, so the layout scrolls with the page
 // and the input stays where Safari revealed it.
 //
+// `keyboardInset` is the other reading: how far up the layout viewport the
+// keyboard reaches, for panes outside the full-screen layout that stay put
+// and scroll under it (KeyboardSpacer.svelte). It is measured with the
+// geometry and settles with it after a blur, so a pane's end does not move
+// under a tap either. It is 0 while the focused input is inside a
+// full-screen layout, which fits itself above the keyboard and covers those
+// panes.
+//
 // Older webviews have no `visualViewport`; the state then stays at the
-// layout viewport's geometry and behaviour is unchanged.
+// layout viewport's geometry and behaviour is unchanged, with a `keyboardInset` of 0.
 
 import {
   pageScrollRevealsInput,
@@ -60,12 +68,16 @@ import {
 } from './documentScroll';
 import { isTextInput } from './textInput';
 import {
+  computeKeyboardInset,
   computeViewportGeometry,
   LAYOUT_VIEWPORT_GEOMETRY,
   type ViewportGeometry,
 } from './viewportGeometry';
 
 export const visibleViewport = $state<ViewportGeometry>({ ...LAYOUT_VIEWPORT_GEOMETRY });
+
+/** Px of the layout viewport's bottom under the on-screen keyboard; 0 with none. */
+export const keyboardInset = $state({ px: 0 });
 
 /**
  * How long a blur waits for the keyboard's `resize` before re-measuring
@@ -96,6 +108,17 @@ function measure(vv: VisualViewport): ViewportGeometry {
   });
 }
 
+function measureKeyboardInset(vv: VisualViewport): number {
+  const active = document.activeElement;
+  return computeKeyboardInset({
+    height: vv.height,
+    offsetTop: vv.offsetTop,
+    scale: vv.scale,
+    layoutHeight: document.documentElement.clientHeight,
+    textInputFocused: isTextInput(active) && !active?.closest('[data-full-screen]'),
+  });
+}
+
 function syncVisualViewport() {
   const vv = trackedViewport;
   if (!vv) return;
@@ -109,6 +132,7 @@ function syncVisualViewport() {
   // Unchanged fields are no-op writes on `$state`, so subscribers only
   // restyle when something actually moved.
   Object.assign(visibleViewport, geometry);
+  keyboardInset.px = measureKeyboardInset(vv);
 }
 
 function cancelBlurSettle(): void {
@@ -194,6 +218,7 @@ export function watchVisualViewport(): () => void {
       // Nothing keeps the state current any more; don't let the next
       // subscriber start from a stale keyboard.
       Object.assign(visibleViewport, LAYOUT_VIEWPORT_GEOMETRY);
+      keyboardInset.px = 0;
     }
   };
 }

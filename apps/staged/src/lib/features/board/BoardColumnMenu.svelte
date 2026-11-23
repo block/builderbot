@@ -138,10 +138,16 @@
     cursor: pointer;
   }
 
-  :global(.board-column-menu-trigger:hover),
   :global(.board-column-menu-trigger[data-state='open']) {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  @media (hover: hover) {
+    :global(.board-column-menu-trigger:hover) {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   .color-dot {

@@ -63,10 +63,16 @@
       border-color 0.15s ease;
   }
 
-  :global(.new-tag-group-trigger:hover:not(:disabled)),
   :global(.new-tag-group-trigger[data-state='open']) {
     background: var(--bg-hover);
     border-color: var(--border-emphasis);
+  }
+
+  @media (hover: hover) {
+    :global(.new-tag-group-trigger:hover:not(:disabled)) {
+      background: var(--bg-hover);
+      border-color: var(--border-emphasis);
+    }
   }
 
   :global(.new-tag-group-trigger:disabled) {

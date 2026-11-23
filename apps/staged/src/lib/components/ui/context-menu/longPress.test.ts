@@ -3,7 +3,10 @@ import {
   CLICK_SWALLOW_WINDOW_MS,
   LONG_PRESS_DELAY_MS,
   LONG_PRESS_MOVE_THRESHOLD_PX,
+  SCROLL_CATCH_WINDOW_MS,
+  SCROLL_STILL_TOLERANCE_PX,
   createLongPress,
+  recentScrollerCount,
   type LongPressPoint,
 } from './longPress';
 
@@ -317,6 +320,527 @@ describe('createLongPress', () => {
     vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
     expect(onLongPress).not.toHaveBeenCalled();
     expect(gesture('touchend').defaultPrevented).toBe(false);
+  });
+
+  // A `scroll` as the document's capture listener sees it: `target` is the
+  // container that scrolled. `list` holds `row`; `elsewhere` does not.
+  function scroll(scroller: EventTarget = doc) {
+    const event = new Event('scroll');
+    Object.defineProperty(event, 'target', { value: scroller });
+    doc.dispatchEvent(event);
+  }
+
+  function scroller(holds: EventTarget[]) {
+    return Object.assign(new EventTarget(), {
+      contains: (node: EventTarget) => holds.includes(node),
+    });
+  }
+
+  function pointerCancel(pointerType = 'touch', on: EventTarget = doc) {
+    on.dispatchEvent(Object.assign(new Event('pointercancel'), { pointerType }));
+  }
+
+  it('cancels a pending press on pointercancel, the way iOS announces a scroll', () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    // A slow drag: exactly the threshold, so the move test alone keeps the press.
+    gesture('touchmove', [{ clientX: 0, clientY: LONG_PRESS_MOVE_THRESHOLD_PX, target: row }]);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS - 50);
+    pointerCancel();
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    // No touchcancel follows on iOS; the release is an ordinary one.
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+    expect(clickPassesThrough()).toBe(true);
+  });
+
+  it("ignores another input's pointercancel", () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    pointerCancel('mouse');
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('sees the pointercancel of a pressed element that left the DOM', () => {
+    const lp = press();
+    const detached = Object.assign(new EventTarget(), { isConnected: false });
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: detached }]));
+    pointerCancel('touch', detached);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('keeps suppressing the release when pointercancel or a scroll follows a fired press', () => {
+    const lp = press();
+    holdUntilFired(lp);
+    pointerCancel();
+    scroll();
+    const end = gesture('touchend');
+    expect(end.defaultPrevented).toBe(true);
+    expect(clickPassesThrough()).toBe(false);
+  });
+
+  it('cancels a pending press when the list under the finger scrolls', () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS - 50);
+    scroll(scroller([row]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+
+    // The document scrolling moves every row.
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+    scroll();
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('keeps a pending press when an unrelated pane scrolls', () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    scroll(scroller([]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  // An element with a box on screen, which `at` moves.
+  function boxed(at: { left: number; top: number }) {
+    return Object.assign(new EventTarget(), {
+      isConnected: true,
+      getBoundingClientRect: () => ({ left: at.left, top: at.top, width: 320, height: 44 }),
+    });
+  }
+
+  it('keeps a pending press through scrolls that leave the touched element in place', () => {
+    const lp = press();
+    const at = { left: 16, top: 300 };
+    const held = boxed(at);
+    const list = scroller([held]);
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: held }]));
+    // A row sliding in above the viewport: the browser moves the scroll
+    // position every frame to hold the rows in view where they are.
+    for (let frame = 0; frame < 12; frame += 1) {
+      vi.advanceTimersByTime(16);
+      at.top = 300 + (frame % 2 === 0 ? 0.33 : -0.33);
+      scroll(list);
+    }
+    // The document scrolling without moving the element is no different.
+    scroll();
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    expect(onLongPress).toHaveBeenCalledWith({ target: held, clientX: 40, clientY: 320 });
+    expect(gesture('touchend').defaultPrevented).toBe(true);
+  });
+
+  it('cancels a pending press once a scroll has carried the touched element', () => {
+    const lp = press();
+    const at = { left: 16, top: 300 };
+    const held = boxed(at);
+    const list = scroller([held]);
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: held }]));
+    at.top = 300 - SCROLL_STILL_TOLERANCE_PX;
+    scroll(list);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    gesture('touchend');
+    vi.advanceTimersByTime(CLICK_SWALLOW_WINDOW_MS + SCROLL_CATCH_WINDOW_MS);
+
+    // A slow scroll start: each frame is inside the tolerance, and the
+    // distance is taken from where the element was when the finger landed.
+    at.top = 300;
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: held }]));
+    at.top = 300 - SCROLL_STILL_TOLERANCE_PX + 0.5;
+    scroll(list);
+    at.top = 300 - SCROLL_STILL_TOLERANCE_PX - 1;
+    scroll(list);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+
+    // Sideways counts too (the board's columns).
+    at.top = 300;
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: held }]));
+    at.left = 16 + SCROLL_STILL_TOLERANCE_PX + 1;
+    scroll(list);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels on a scroll when the touched element cannot be placed', () => {
+    const lp = press();
+
+    // No box of its own, at the touch or at the scroll.
+    const boxless = Object.assign(new EventTarget(), {
+      isConnected: true,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }),
+    });
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: boxless }]));
+    scroll(scroller([boxless]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    gesture('touchend');
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+
+    // Replaced by a re-render during the hold, with nothing between it and
+    // the trigger: where the element was says nothing about where the row is
+    // now.
+    const replaced = boxed({ left: 16, top: 300 });
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: replaced }]));
+    replaced.isConnected = false;
+    scroll(scroller([trigger]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  // What a touch on a timeline row's title lands in, as stand-ins: `code`
+  // (the touched element) in `title` in `rowEl` in `list`, inside a
+  // `display: contents` trigger with no box of its own. One trigger wraps the
+  // whole list there. `rowAt` and `listAt` place the row and the list; the
+  // title and the touched element sit in the row.
+  function timeline(rowAt: { left: number; top: number }, listAt = { left: 16, top: 100 }) {
+    const wrapper = Object.assign(new EventTarget(), {
+      isConnected: true,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }),
+    });
+    const list = Object.assign(boxed(listAt), { parentNode: wrapper });
+    const rowEl = Object.assign(boxed(rowAt), { parentNode: list });
+    const title = Object.assign(boxed(rowAt), { parentNode: rowEl });
+    const code = Object.assign(boxed(rowAt), { parentNode: title });
+    trigger = wrapper;
+    // The pane the timeline scrolls in. A real one holds everything still
+    // in the DOM and nothing that has left it.
+    const pane = Object.assign(new EventTarget(), {
+      contains: (node: EventTarget) =>
+        [wrapper, list, rowEl, title, code].some((el) => el === node && el.isConnected),
+    });
+    return { wrapper, list, rowEl, title, code, pane, listAt };
+  }
+
+  it('follows the held row through a scroll once the touched element was replaced', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { wrapper, code, pane, listAt } = timeline(rowAt);
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    vi.advanceTimersByTime(100);
+    // A live title re-rendered: the touched element is gone, the row is not.
+    code.isConnected = false;
+    // A row slides in above, in the same timeline. Scroll anchoring holds
+    // the held row where it is, so the top of the list goes up instead.
+    for (let frame = 0; frame < 12; frame += 1) {
+      vi.advanceTimersByTime(16);
+      listAt.top -= 44 / 12;
+      rowAt.top = 300 + (frame % 2 === 0 ? 0.33 : -0.33);
+      scroll(pane);
+    }
+    scroll();
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    expect(onLongPress).toHaveBeenCalledWith({ target: wrapper, clientX: 40, clientY: 320 });
+    // The release is delivered to the replaced element alone.
+    expect(gesture('touchend', [], code).defaultPrevented).toBe(true);
+  });
+
+  it('cancels once a scroll has carried the row of a replaced element', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { code, pane, listAt } = timeline(rowAt);
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    vi.advanceTimersByTime(100);
+    code.isConnected = false;
+    rowAt.top -= SCROLL_STILL_TOLERANCE_PX + 1;
+    listAt.top -= SCROLL_STILL_TOLERANCE_PX + 1;
+    scroll(pane);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    expect(gesture('touchend', [], code).defaultPrevented).toBe(false);
+  });
+
+  it('measures the row from where it was when the finger landed', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { code, pane } = timeline(rowAt);
+
+    // A slow scroll start: each frame is inside the tolerance of the last.
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    rowAt.top = 300 - SCROLL_STILL_TOLERANCE_PX + 0.5;
+    scroll(pane);
+    code.isConnected = false;
+    rowAt.top = 300 - SCROLL_STILL_TOLERANCE_PX - 1;
+    scroll(pane);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('follows the nearest element still in the DOM', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { wrapper, list, rowEl, title, code, pane, listAt } = timeline(rowAt);
+
+    // The title went with the touched element: the row is next.
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    code.isConnected = false;
+    title.isConnected = false;
+    listAt.top -= 44;
+    scroll(pane);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    gesture('touchend', [], code);
+    vi.advanceTimersByTime(CLICK_SWALLOW_WINDOW_MS + SCROLL_CATCH_WINDOW_MS);
+
+    // The whole row was replaced: the list is all there is to go by, and its
+    // top says nothing certain about the row. The press goes when it moves.
+    code.isConnected = true;
+    title.isConnected = true;
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    code.isConnected = false;
+    title.isConnected = false;
+    rowEl.isConnected = false;
+    scroll(pane);
+    listAt.top -= 44;
+    scroll(pane);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    gesture('touchend', [], code);
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+
+    // Only the trigger is left, and a `display: contents` one has no place.
+    code.isConnected = true;
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    code.isConnected = false;
+    list.isConnected = false;
+    expect(pane.contains(wrapper)).toBe(true);
+    scroll(pane);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  // A `display: contents` wrapper between the touched element and its row:
+  // still in the DOM after a re-render replaced what it holds, with no box
+  // to measure.
+  function timelineWithBoxlessWrapper(rowAt: { left: number; top: number }) {
+    const { wrapper, list, rowEl, title, code, listAt } = timeline(rowAt);
+    const inner = Object.assign(new EventTarget(), {
+      isConnected: true,
+      parentNode: title,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }),
+    });
+    Object.assign(code, { parentNode: inner });
+    const pane = Object.assign(new EventTarget(), {
+      contains: (node: EventTarget) =>
+        [wrapper, list, rowEl, title, inner, code].some((el) => el === node && el.isConnected),
+    });
+    return { wrapper, inner, code, pane, listAt };
+  }
+
+  it('passes over a boxless wrapper to follow the row through an anchoring scroll', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { wrapper, inner, code, pane, listAt } = timelineWithBoxlessWrapper(rowAt);
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    vi.advanceTimersByTime(100);
+    code.isConnected = false;
+    expect(pane.contains(inner)).toBe(true);
+    // A row slides in above: the held row is anchored, the list's top goes up.
+    for (let frame = 0; frame < 12; frame += 1) {
+      vi.advanceTimersByTime(16);
+      listAt.top -= 44 / 12;
+      rowAt.top = 300 + (frame % 2 === 0 ? 0.33 : -0.33);
+      scroll(pane);
+    }
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    expect(onLongPress).toHaveBeenCalledWith({ target: wrapper, clientX: 40, clientY: 320 });
+    expect(gesture('touchend', [], code).defaultPrevented).toBe(true);
+  });
+
+  it('cancels once a scroll has carried the row above a boxless wrapper', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { code, pane, listAt } = timelineWithBoxlessWrapper(rowAt);
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    code.isConnected = false;
+    rowAt.top -= SCROLL_STILL_TOLERANCE_PX + 1;
+    listAt.top -= SCROLL_STILL_TOLERANCE_PX + 1;
+    scroll(pane);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('follows a trigger with a box of its own when nothing inside it is left', () => {
+    const lp = press();
+    const at = { left: 16, top: 300 };
+    const own = boxed(at);
+    trigger = own;
+    const list = scroller([own]);
+
+    const held = Object.assign(boxed({ left: 24, top: 310 }), { parentNode: own });
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: held }]));
+    held.isConnected = false;
+    scroll(list);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledWith({ target: own, clientX: 40, clientY: 320 });
+    gesture('touchend', [], held);
+    vi.advanceTimersByTime(CLICK_SWALLOW_WINDOW_MS + SCROLL_CATCH_WINDOW_MS);
+
+    const again = Object.assign(boxed({ left: 24, top: 310 }), { parentNode: own });
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: again }]));
+    again.isConnected = false;
+    at.left = 16 + SCROLL_STILL_TOLERANCE_PX + 1;
+    scroll(list);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('looks no further up than the trigger', () => {
+    const lp = press();
+    const at = { left: 16, top: 300 };
+    const own = boxed(at);
+    trigger = own;
+    // Above the trigger: a page that no scroll moves.
+    const page = boxed({ left: 0, top: 0 });
+    Object.assign(own, { parentNode: page });
+    const held = Object.assign(boxed(at), { parentNode: own });
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: held }]));
+    held.isConnected = false;
+    own.isConnected = false;
+    scroll(scroller([page]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('keeps a replaced element’s press when an unrelated pane scrolls', () => {
+    const lp = press();
+    const { code } = timeline({ left: 16, top: 300 });
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    code.isConnected = false;
+    scroll(scroller([]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels on any scroll when a replaced element has nothing left to follow', () => {
+    // Everything up to the trigger left the DOM, and the trigger with it.
+    const lp = press();
+    const { wrapper, list, rowEl, title, code } = timeline({ left: 16, top: 300 });
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    for (const el of [code, title, rowEl, list, wrapper]) el.isConnected = false;
+    scroll(scroller([]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    gesture('touchend', [], code);
+    lp.destroy();
+
+    // No trigger was given: the touched element is all that is followed.
+    const bare = createLongPress({ onLongPress, scope: () => doc });
+    const parent = boxed({ left: 16, top: 300 });
+    const alone = Object.assign(boxed({ left: 16, top: 300 }), { parentNode: parent });
+    bare.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: alone }]));
+    alone.isConnected = false;
+    scroll(scroller([]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('starts no press for a touch that catches a moving list', () => {
+    const lp = press();
+    const list = scroller([row]);
+    scroll(list);
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS);
+    // The finger lands while the list is still coasting and stays down.
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS * 2);
+    expect(onLongPress).not.toHaveBeenCalled();
+    const end = gesture('touchend');
+    expect(end.defaultPrevented).toBe(false);
+    expect(clickPassesThrough()).toBe(true);
+    // A browser contextmenu for that hold is not ours to act on either.
+    const native = contextMenuEvent({ trusted: true });
+    expect(lp.oncontextmenu(native)).toBe(false);
+    expect(native.defaultPrevented).toBe(false);
+  });
+
+  it('presses normally once the list has come to rest, or when another pane is moving', () => {
+    const lp = press();
+    scroll(scroller([row]));
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    gesture('touchend');
+    vi.advanceTimersByTime(CLICK_SWALLOW_WINDOW_MS);
+
+    scroll(scroller([]));
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one scroll listener per document and drops it with the last controller', () => {
+    const add = vi.spyOn(doc, 'addEventListener');
+    const remove = vi.spyOn(doc, 'removeEventListener');
+    const scrollCalls = (spy: typeof add) => spy.mock.calls.filter(([type]) => type === 'scroll');
+    const first = press();
+    const second = press();
+    expect(scrollCalls(add)).toHaveLength(1);
+    first.destroy();
+    // A repeated destroy must not release the other controller's share.
+    first.destroy();
+    expect(scrollCalls(remove)).toHaveLength(0);
+    scroll(scroller([row]));
+    second.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    second.destroy();
+    expect(scrollCalls(remove)).toHaveLength(1);
+  });
+
+  it('forgets each container once it has stopped scrolling', () => {
+    const lp = press();
+    const transcript = scroller([]);
+    const dialogBody = scroller([]);
+    scroll(transcript);
+    scroll(dialogBody);
+    scroll();
+    expect(recentScrollerCount(doc)).toBe(3);
+
+    // A transcript following its stream never lets the record go quiet. The
+    // others leave it all the same.
+    for (let elapsed = 0; elapsed <= SCROLL_CATCH_WINDOW_MS; elapsed += 50) {
+      vi.advanceTimersByTime(50);
+      scroll(transcript);
+    }
+    expect(recentScrollerCount(doc)).toBe(1);
+
+    // And the last one goes with no further scroll to push it out.
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+    expect(recentScrollerCount(doc)).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The record still works afterwards.
+    scroll(scroller([row]));
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('drops the scroll record and its timer with the last controller', () => {
+    const lp = press();
+    scroll(scroller([row]));
+    expect(recentScrollerCount(doc)).toBe(1);
+    lp.destroy();
+    expect(recentScrollerCount(doc)).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('does nothing while disabled', () => {

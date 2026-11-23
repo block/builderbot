@@ -127,13 +127,15 @@
     font-weight: 500;
   }
 
-  :global(.tag-group-pill:hover:not(:disabled)) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-  }
+  @media (hover: hover) {
+    :global(.tag-group-pill:hover:not(:disabled)) {
+      background: var(--bg-hover);
+      border-color: var(--border-emphasis);
+    }
 
-  :global(.tag-group-pill.empty:hover:not(:disabled)) {
-    color: var(--text-muted);
+    :global(.tag-group-pill.empty:hover:not(:disabled)) {
+      color: var(--text-muted);
+    }
   }
 
   :global(.tag-group-pill:disabled) {

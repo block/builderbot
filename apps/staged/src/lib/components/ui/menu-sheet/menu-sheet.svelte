@@ -75,13 +75,13 @@
     {...props}
     data-menu-sheet=""
     class={cn(
-      'menu-sheet-panel data-open:animate-in data-open:slide-in-from-bottom data-closed:animate-out data-closed:slide-out-to-bottom text-popover-foreground relative flex max-h-[calc(100dvh-24px)] flex-col px-2 pb-[max(env(safe-area-inset-bottom),8px)] text-base outline-none duration-200',
+      'menu-sheet-panel data-open:animate-in data-open:slide-in-from-bottom data-closed:animate-out data-closed:slide-out-to-bottom text-popover-foreground relative flex max-h-[calc(100dvh-24px)] flex-col px-2 pb-[max(var(--safe-bottom),8px)] text-base outline-none duration-200',
       props.class as string | undefined,
       className
     )}
   >
     <div
-      class="menu-sheet-group bg-popover ring-foreground/10 min-h-0 overflow-y-auto overflow-x-hidden rounded-2xl ring-1"
+      class="menu-sheet-group bg-popover ring-foreground/10 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain rounded-2xl ring-1"
     >
       {@render children?.()}
     </div>

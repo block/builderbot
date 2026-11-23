@@ -921,16 +921,18 @@
     color: var(--review-color);
   }
 
-  .mode-switcher-btn.note-icon:hover {
-    background: var(--note-bg-emphasis);
-  }
+  @media (hover: hover) {
+    .mode-switcher-btn.note-icon:hover {
+      background: var(--note-bg-emphasis);
+    }
 
-  .mode-switcher-btn.commit-icon:hover {
-    background: var(--commit-bg-emphasis);
-  }
+    .mode-switcher-btn.commit-icon:hover {
+      background: var(--commit-bg-emphasis);
+    }
 
-  .mode-switcher-btn.review-icon:hover {
-    background: var(--review-bg-emphasis);
+    .mode-switcher-btn.review-icon:hover {
+      background: var(--review-bg-emphasis);
+    }
   }
 
   /* Both glyphs (mode icon + chevron) inherit the pill's tint. */
@@ -970,8 +972,10 @@
     transition: background-color 0.1s;
   }
 
-  .mode-menu-item:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .mode-menu-item:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .mode-menu-item.active {

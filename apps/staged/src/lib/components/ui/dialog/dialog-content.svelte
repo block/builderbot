@@ -11,6 +11,7 @@
   import { SHORT_VIEWPORT_PX, viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import { visibleViewport, watchVisualViewport } from '$lib/shared/visualViewport.svelte';
   import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
+  import { SAFE_AREA_BOTTOM } from '$lib/shared/safeArea';
   import { getWindowSync } from '$lib/transport';
   import {
     findEnabledSubmitButton,
@@ -143,7 +144,7 @@
       '--dialog-safe-top:env(safe-area-inset-top)',
       '--dialog-safe-left:env(safe-area-inset-left)',
       '--dialog-safe-right:env(safe-area-inset-right)',
-      `--dialog-safe-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
+      `--dialog-safe-bottom:${keyboardOpen ? '0px' : SAFE_AREA_BOTTOM}`,
       'transition-property:color,background-color,border-color,outline-color,opacity,transform,translate,scale',
       ...(cramped ? ['overflow-y:auto', 'overscroll-behavior:contain'] : []),
     ].join(';');

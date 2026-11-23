@@ -4298,8 +4298,10 @@
     transition: background-color 0.1s;
   }
 
-  .context-card-header:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .context-card-header:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .context-chevron {
@@ -4470,8 +4472,10 @@
     cursor: pointer;
   }
 
-  .acp-event-header:hover .acp-event-title {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .acp-event-header:hover .acp-event-title {
+      text-decoration: underline;
+    }
   }
 
   .acp-event-title {
@@ -4540,9 +4544,11 @@
     cursor: pointer;
   }
 
-  .command-row:hover,
-  .slash-command-item:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .command-row:hover,
+    .slash-command-item:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .command-row span,
@@ -4837,8 +4843,10 @@
     text-decoration: none;
   }
 
-  .markdown-content :global(a:hover) {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .markdown-content :global(a:hover) {
+      text-decoration: underline;
+    }
   }
 
   .markdown-content :global(strong) {

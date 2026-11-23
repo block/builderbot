@@ -145,8 +145,10 @@
       color 0.15s ease;
   }
 
-  .scroll-edge-button:hover {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .scroll-edge-button:hover {
+      border-color: var(--border-emphasis);
+      color: var(--text-primary);
+    }
   }
 </style>

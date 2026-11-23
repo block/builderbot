@@ -224,9 +224,11 @@
       border-color 0.15s;
   }
 
-  .suggested-chip:hover:not(:disabled) {
-    background: var(--chip-bg-hover);
-    border-color: var(--chip-border-hover);
+  @media (hover: hover) {
+    .suggested-chip:hover:not(:disabled) {
+      background: var(--chip-bg-hover);
+      border-color: var(--chip-border-hover);
+    }
   }
 
   .suggested-chip:disabled {

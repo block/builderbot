@@ -102,8 +102,10 @@
       background-color 0.1s ease;
   }
 
-  .mode:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .mode:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .mode:has(input:checked) {

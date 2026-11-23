@@ -77,9 +77,11 @@
     stroke: var(--text-muted);
   }
 
-  .board-row:hover {
-    color: var(--text-primary);
-    background-color: var(--projects-sidebar-hover-bg, var(--bg-hover));
+  @media (hover: hover) {
+    .board-row:hover {
+      color: var(--text-primary);
+      background-color: var(--projects-sidebar-hover-bg, var(--bg-hover));
+    }
   }
 
   .board-row.active {
@@ -87,9 +89,14 @@
     background-color: var(--bg-hover);
   }
 
-  .board-row:hover :global(svg),
   .board-row.active :global(svg) {
     stroke: var(--text-primary);
+  }
+
+  @media (hover: hover) {
+    .board-row:hover :global(svg) {
+      stroke: var(--text-primary);
+    }
   }
 
   .board-row:focus-visible {

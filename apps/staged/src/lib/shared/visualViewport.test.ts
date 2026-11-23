@@ -475,13 +475,112 @@ describe('watchVisualViewport', () => {
     expect(visibleViewport.height).toBeNull();
   });
 
+  describe('keyboardInset', () => {
+    /** The project list's search field: near the top, outside any dialog. */
+    const searchField = () =>
+      element({ tagName: 'INPUT', type: 'search', getBoundingClientRect: pageRect(100) }, false);
+
+    function openKeyboardOver(input: unknown): void {
+      fakeDocument.activeElement = input;
+      viewport.height = 384;
+      viewport.dispatchEvent(new Event('resize'));
+    }
+
+    it('is what the keyboard covers while an input outside the full-screen layout has focus', async () => {
+      const { keyboardInset, visibleViewport, watchVisualViewport } = await importModule();
+      watchVisualViewport();
+      flushFrames();
+      expect(keyboardInset.px).toBe(0);
+
+      openKeyboardOver(searchField());
+
+      expect(keyboardInset.px).toBe(330);
+      // The full-screen geometry is not for this input.
+      expect(visibleViewport).toEqual(LAYOUT_GEOMETRY);
+    });
+
+    it('is measured after the page scroll Safari added is undone', async () => {
+      const { keyboardInset, watchVisualViewport } = await importModule();
+      watchVisualViewport();
+      flushFrames();
+
+      fakeDocument.activeElement = searchField();
+      viewport.height = 384;
+      viewport.offsetTop = 5;
+      fakeWindow.scrollY = 5;
+      viewport.dispatchEvent(new Event('resize'));
+
+      expect(fakeWindow.scrollTo).toHaveBeenCalledWith(0, 0);
+      expect(keyboardInset.px).toBe(330);
+    });
+
+    it('is 0 where a kept page scroll brings the bottom of the layout on screen', async () => {
+      const { keyboardInset, watchVisualViewport } = await importModule();
+      watchVisualViewport();
+      flushFrames();
+
+      fakeDocument.activeElement = element(
+        { tagName: 'INPUT', type: 'text', getBoundingClientRect: pageRect(600) },
+        false
+      );
+      viewport.height = 384;
+      viewport.offsetTop = 330;
+      fakeWindow.scrollY = 330;
+      viewport.dispatchEvent(new Event('resize'));
+
+      expect(fakeWindow.scrollY).toBe(330);
+      expect(keyboardInset.px).toBe(0);
+    });
+
+    it('is 0 for an input in a full-screen layout, which fits itself above the keyboard', async () => {
+      const { keyboardInset, visibleViewport, watchVisualViewport } = await importModule();
+      watchVisualViewport();
+      flushFrames();
+
+      openKeyboardOver(composer);
+
+      expect(visibleViewport.keyboardOpen).toBe(true);
+      expect(keyboardInset.px).toBe(0);
+    });
+
+    it('holds after a blur until the keyboard leaves', async () => {
+      useFakeTimeouts();
+      const { keyboardInset, watchVisualViewport } = await importModule();
+      watchVisualViewport();
+      flushFrames();
+      const input = searchField();
+      openKeyboardOver(input);
+
+      // A tap on a result: focus leaves, and the click is still to land.
+      fakeDocument.activeElement = BODY;
+      dispatchFocus('focusout', input);
+      expect(keyboardInset.px).toBe(330);
+
+      viewport.height = 714;
+      viewport.dispatchEvent(new Event('resize'));
+      expect(keyboardInset.px).toBe(0);
+    });
+
+    it('the last unsubscribe drops it', async () => {
+      const { keyboardInset, watchVisualViewport } = await importModule();
+      const unwatch = watchVisualViewport();
+      flushFrames();
+      openKeyboardOver(searchField());
+      expect(keyboardInset.px).toBe(330);
+
+      unwatch();
+      expect(keyboardInset.px).toBe(0);
+    });
+  });
+
   it('is a no-op without visualViewport', async () => {
     vi.stubGlobal('window', { scrollX: 0, scrollY: 0, scrollTo: vi.fn() });
-    const { visibleViewport, watchVisualViewport } = await importModule();
+    const { keyboardInset, visibleViewport, watchVisualViewport } = await importModule();
     const unwatch = watchVisualViewport();
     flushFrames();
     unwatch();
 
     expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
+    expect(keyboardInset.px).toBe(0);
   });
 });

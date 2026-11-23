@@ -222,6 +222,18 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* ── The bottom safe-area inset: the home indicator's strip. Everything that
+ *    clears it reads `var(--safe-bottom)`, never the `env()` inset itself.
+ *    Where viewportFit.ts has dropped `viewport-fit=cover`, every `env()`
+ *    inset reads 0 while the page still runs under the home indicator, so the
+ *    guard leaves the inset it last read on <html> as `--safe-bottom-fallback`
+ *    and this takes the larger of the two. The fallback is unset while cover
+ *    is on. safeAreaBottom.test.ts fails on a use of either outside this
+ *    rule. ── */
+:root {
+  --safe-bottom: max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px));
+}
+
 html,
 body {
   overflow: hidden;
@@ -391,8 +403,10 @@ mark.search-match-current {
   cursor: pointer;
 }
 
-.hashtag-badge[data-hashtag-ref]:hover {
-  filter: brightness(0.96);
+@media (hover: hover) {
+  .hashtag-badge[data-hashtag-ref]:hover {
+    filter: brightness(0.96);
+  }
 }
 
 .hashtag-badge[data-hashtag-ref]:focus-visible {
@@ -599,6 +613,41 @@ mark.search-match-current {
   }
 }
 
+/* ── Text entry on touch screens ──
+   Anything typed into is at least 16px where the pointer is a finger. The
+   app's text scale is 12-13px, which is small to type in on a phone, and a
+   browser that is allowed to zooms the page into a focused field under 16px
+   (iOS Safari is held off only by `maximum-scale=1`, which Android ignores).
+   `1em` is the parent's size, so a field in larger text (a title being
+   renamed) keeps that size. Fields set their size in component styles and
+   utilities of every specificity, so the rule is `!important` rather than
+   one override per field. Controls with no text to type are left out, as
+   are the non-editable islands inside an editor (hashtag badges, figures).
+   Two editors need a word of their own:
+   - `.hashtag-editor` is named because a disabled one is
+     `contenteditable="false"`, like the islands, and would drop back to its
+     own 13px for as long as it is disabled (while a session starts).
+   - The Milkdown note editor is left out. It is sized to match the note's
+     read view, and sets its own 16px floor in the phone layout
+     (MarkdownWysiwygEditor's `--crepe-base-font-size`).
+   With a mouse nothing here applies. */
+@media (pointer: coarse) {
+  input:not(
+    [type='checkbox'],
+    [type='radio'],
+    [type='range'],
+    [type='file'],
+    [type='color'],
+    [type='hidden']
+  ),
+  textarea,
+  select,
+  [contenteditable]:not([contenteditable='false'], .milkdown .ProseMirror),
+  .hashtag-editor {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 /* ── Pointer drags (shared/pointerDrag.ts) ──
    While a drag made of pointer events is under way, the root carries
    `data-pointer-drag` and the cursor says what a release would do: grabbing,
@@ -680,10 +729,16 @@ mark.search-match-current {
     border-color 0.15s ease;
 }
 
-.board-toolbar-trigger:hover:not(:disabled),
 .board-toolbar-trigger[data-state='open'] {
   background: var(--bg-hover);
   border-color: var(--border-emphasis);
+}
+
+@media (hover: hover) {
+  .board-toolbar-trigger:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-emphasis);
+  }
 }
 
 .board-toolbar-trigger .trigger-label {

@@ -141,16 +141,18 @@
     color: var(--text-primary);
   }
 
-  .comment-action-btn.note-btn:hover {
-    color: var(--note-color);
-    border-color: var(--note-color);
-    background-color: var(--note-bg);
-  }
+  @media (hover: hover) {
+    .comment-action-btn.note-btn:hover {
+      color: var(--note-color);
+      border-color: var(--note-color);
+      background-color: var(--note-bg);
+    }
 
-  .comment-action-btn.commit-btn:hover {
-    color: var(--commit-color);
-    border-color: var(--commit-color);
-    background-color: var(--commit-bg);
+    .comment-action-btn.commit-btn:hover {
+      color: var(--commit-color);
+      border-color: var(--commit-color);
+      background-color: var(--commit-bg);
+    }
   }
 
   /* Mirrors the styled running/completed note and commit actions in the timeline. */
@@ -166,10 +168,12 @@
     background-color: var(--commit-bg);
   }
 
-  .comment-action-btn.github-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--text-muted);
-    background-color: var(--bg-hover);
+  @media (hover: hover) {
+    .comment-action-btn.github-btn:hover:not(:disabled) {
+      color: var(--text-primary);
+      border-color: var(--text-muted);
+      background-color: var(--bg-hover);
+    }
   }
 
   .comment-action-btn:disabled {

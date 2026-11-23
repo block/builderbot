@@ -774,10 +774,12 @@
       background-color 0.1s;
   }
 
-  .selection-reply-button:hover {
-    border-color: var(--border-emphasis);
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .selection-reply-button:hover {
+      border-color: var(--border-emphasis);
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   .selection-reply-button:focus-visible {

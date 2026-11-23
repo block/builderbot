@@ -892,8 +892,11 @@
     border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
     background: var(--bg-app-bar);
     /* A full-height column here, so it ends at the home indicator; stacked
-       on top on narrow screens (below) it does not. */
-    padding: 0 var(--repo-row-bleed) calc(10px + env(safe-area-inset-bottom));
+       on top on narrow screens (below) it does not. The inset is the one
+       SettingsPage's `.panel-pad` hands down: 0 while the page pads the
+       inset around the panel's card (above 920px), so it is not added
+       twice. */
+    padding: 0 var(--repo-row-bleed) calc(10px + var(--settings-panel-inset-bottom, 0px));
     overflow-y: auto;
     min-height: 0;
   }
@@ -954,8 +957,10 @@
       color 0.15s ease;
   }
 
-  .context-item:hover {
-    background: var(--repo-sidebar-hover-bg);
+  @media (hover: hover) {
+    .context-item:hover {
+      background: var(--repo-sidebar-hover-bg);
+    }
   }
 
   .context-item.selected {
@@ -1002,14 +1007,14 @@
     gap: 8px;
   }
 
-  /* The bottom inset keeps the content clear of the home indicator
-     (App.svelte's main leaves it to the panes). */
+  /* The bottom inset keeps the content clear of the home indicator where
+     the panel runs to the screen's edge (SettingsPage's `.panel-pad`). */
   .main-panel {
     flex: 1;
     min-width: 0;
     background: var(--bg-chrome);
     padding: 14px;
-    padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    padding-bottom: calc(14px + var(--settings-panel-inset-bottom, 0px));
     overflow: hidden;
     min-height: 0;
     display: flex;
@@ -1109,6 +1114,13 @@
 
   .badge-input-error {
     border-color: var(--ui-danger);
+  }
+
+  /* Room for the six characters at the 16px a touch screen types in. */
+  @media (pointer: coarse) {
+    .badge-input {
+      width: calc(6ch + 14px);
+    }
   }
 
   .badge-error {
@@ -1290,7 +1302,7 @@
       max-height: none;
       border-right: none;
       border-bottom: none;
-      padding-bottom: calc(10px + env(safe-area-inset-bottom));
+      padding-bottom: calc(10px + var(--settings-panel-inset-bottom, 0px));
     }
 
     .panel-body.detail-open .sidebar,
@@ -1305,7 +1317,7 @@
     }
 
     .main-panel-scroll {
-      padding-bottom: calc(14px + env(safe-area-inset-bottom));
+      padding-bottom: calc(14px + var(--settings-panel-inset-bottom, 0px));
     }
 
     .panel-body:not(.detail-open) .context-item.selected {

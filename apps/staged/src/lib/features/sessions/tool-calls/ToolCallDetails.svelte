@@ -225,11 +225,18 @@
     cursor: pointer;
   }
 
-  .tool-code-block :global(.tool-copy-button:hover),
   .tool-code-block :global(.tool-copy-button:focus-visible) {
     background: var(--bg-hover);
     color: var(--text-muted);
     outline: none;
+  }
+
+  @media (hover: hover) {
+    .tool-code-block :global(.tool-copy-button:hover) {
+      background: var(--bg-hover);
+      color: var(--text-muted);
+      outline: none;
+    }
   }
 
   /* The overlaid button sits over the top-right of the output, so give it the
@@ -238,9 +245,14 @@
     background: color-mix(in srgb, var(--bg-chrome) 82%, var(--bg-primary));
   }
 
-  .tool-code-block :global(.tool-output-body-actions .tool-copy-button:hover),
   .tool-code-block :global(.tool-output-body-actions .tool-copy-button:focus-visible) {
     background: var(--bg-hover);
+  }
+
+  @media (hover: hover) {
+    .tool-code-block :global(.tool-output-body-actions .tool-copy-button:hover) {
+      background: var(--bg-hover);
+    }
   }
 
   .tool-code-block :global(.tool-code-output) {

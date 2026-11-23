@@ -14,6 +14,7 @@
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import SearchField from '../../shared/SearchField.svelte';
+  import KeyboardSpacer from '../../shared/KeyboardSpacer.svelte';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
@@ -118,6 +119,7 @@
           </div>
         {/if}
       {/if}
+      <KeyboardSpacer />
     </div>
   </div>
 </div>
@@ -151,7 +153,7 @@
   .content {
     flex: 1;
     padding: 24px;
-    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    padding-bottom: calc(24px + var(--safe-bottom));
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -197,7 +199,7 @@
   @media (max-width: 640px) {
     .content {
       padding: 16px;
-      padding-bottom: calc(16px + env(safe-area-inset-bottom));
+      padding-bottom: calc(16px + var(--safe-bottom));
     }
 
     .repos-grid {

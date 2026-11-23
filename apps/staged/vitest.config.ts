@@ -14,6 +14,11 @@ export default defineConfig({
             '../../packages/diff-viewer/src/**/*.test.ts',
           ],
           exclude: [...configDefaults.exclude, 'src/**/*.component.test.ts'],
+          // Vitest empties every CSS module it is not told to process, a
+          // `.css?raw` import included, so a source-text test would read the
+          // stylesheets as ''. Raw imports are left to Vite, which hands
+          // back the file's text.
+          css: { include: [/\.css\?(?:.*&)?raw\b/] },
         },
       },
       {

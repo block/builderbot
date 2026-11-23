@@ -771,8 +771,10 @@
       transform 0.1s ease;
   }
 
-  .new-project-button:hover {
-    background: var(--ui-accent-hover);
+  @media (hover: hover) {
+    .new-project-button:hover {
+      background: var(--ui-accent-hover);
+    }
   }
 
   .new-project-button:active {
@@ -844,7 +846,7 @@
     padding: 10px var(--project-row-bleed);
     /* Clear of the home indicator on a landscape phone (App.svelte's main
        leaves the bottom inset to the panes' content). */
-    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    padding-bottom: calc(10px + var(--safe-bottom));
   }
 
   .project-rows {
@@ -881,9 +883,11 @@
       color 0.15s ease;
   }
 
-  .project-row:hover {
-    color: var(--text-primary);
-    background-color: var(--projects-sidebar-hover-bg);
+  @media (hover: hover) {
+    .project-row:hover {
+      color: var(--text-primary);
+      background-color: var(--projects-sidebar-hover-bg);
+    }
   }
 
   .project-row.active {
@@ -952,15 +956,26 @@
     stroke: var(--text-secondary);
   }
 
-  .all-repos-link:hover,
   .all-repos-link.active {
     background: var(--projects-sidebar-hover-bg);
     color: var(--text-primary);
   }
 
-  .all-repos-link:hover :global(svg),
+  @media (hover: hover) {
+    .all-repos-link:hover {
+      background: var(--projects-sidebar-hover-bg);
+      color: var(--text-primary);
+    }
+  }
+
   .all-repos-link.active :global(svg) {
     stroke: var(--text-primary);
+  }
+
+  @media (hover: hover) {
+    .all-repos-link:hover :global(svg) {
+      stroke: var(--text-primary);
+    }
   }
 
   .state {
@@ -991,8 +1006,10 @@
     cursor: pointer;
   }
 
-  .state-link:hover {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .state-link:hover {
+      text-decoration: underline;
+    }
   }
 
   .resize-handle {
@@ -1019,9 +1036,14 @@
     transition: background-color 0.15s ease;
   }
 
-  .resize-handle:hover::after,
   .resize-handle:focus-visible::after,
   .resize-handle.active::after {
     background-color: var(--border-emphasis);
+  }
+
+  @media (hover: hover) {
+    .resize-handle:hover::after {
+      background-color: var(--border-emphasis);
+    }
   }
 </style>

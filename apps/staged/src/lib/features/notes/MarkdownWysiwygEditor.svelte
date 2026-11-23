@@ -376,8 +376,10 @@
     text-decoration: none;
   }
 
-  .editor-host :global(.milkdown .ProseMirror a:hover) {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .editor-host :global(.milkdown .ProseMirror a:hover) {
+      text-decoration: underline;
+    }
   }
 
   .editor-host :global(.milkdown .ProseMirror strong) {

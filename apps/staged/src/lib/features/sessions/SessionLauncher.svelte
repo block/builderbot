@@ -316,7 +316,7 @@
   .launcher {
     position: fixed;
     /* Measured from the safe area, clear of the home indicator. */
-    bottom: calc(16px + env(safe-area-inset-bottom));
+    bottom: calc(16px + var(--safe-bottom));
     right: calc(16px + env(safe-area-inset-right));
     width: 340px;
     background: var(--bg-chrome);
@@ -372,6 +372,13 @@
     color: var(--text-faint);
   }
 
+  /* A line that holds the 16px a touch screen types in. */
+  @media (pointer: coarse) {
+    .prompt-input {
+      line-height: 20px;
+    }
+  }
+
   .prompt-input:focus {
     border-color: var(--ui-accent);
   }
@@ -399,8 +406,10 @@
     transition: background-color 0.1s;
   }
 
-  .session-row:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .session-row:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .session-indicator {

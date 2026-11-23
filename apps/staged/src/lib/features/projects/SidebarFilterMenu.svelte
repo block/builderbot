@@ -216,10 +216,16 @@
       color 0.15s ease;
   }
 
-  :global(.sidebar-filter-trigger:hover),
   :global(.sidebar-filter-trigger[data-state='open']) {
     background: var(--projects-sidebar-hover-bg, var(--bg-hover));
     color: var(--text-primary);
+  }
+
+  @media (hover: hover) {
+    :global(.sidebar-filter-trigger:hover) {
+      background: var(--projects-sidebar-hover-bg, var(--bg-hover));
+      color: var(--text-primary);
+    }
   }
 
   :global(.sidebar-filter-trigger.filtering) {

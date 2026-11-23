@@ -1276,6 +1276,14 @@
     background: var(--bg-primary);
   }
 
+  /* On a touch screen a swipe past either end of the note stops there
+     instead of moving whatever scrolls behind the dialog. */
+  @media (pointer: coarse) {
+    .modal-content {
+      overscroll-behavior: contain;
+    }
+  }
+
   /* With no bottom bar below it the note ends the dialog: it scrolls behind
      the home indicator of a full-screen dialog, and its last line can still
      scroll clear of it (`--dialog-safe-bottom`, see dialog-content). The
@@ -1414,8 +1422,10 @@
     text-decoration: none;
   }
 
-  .markdown-content :global(a:hover) {
-    text-decoration: underline;
+  @media (hover: hover) {
+    .markdown-content :global(a:hover) {
+      text-decoration: underline;
+    }
   }
 
   .markdown-content :global(strong) {

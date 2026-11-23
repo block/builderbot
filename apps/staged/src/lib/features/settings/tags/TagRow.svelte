@@ -279,8 +279,10 @@
     cursor: grab;
   }
 
-  .drag-handle:hover {
-    color: var(--text-muted);
+  @media (hover: hover) {
+    .drag-handle:hover {
+      color: var(--text-muted);
+    }
   }
 
   .drag-handle:active {
@@ -312,10 +314,16 @@
     cursor: pointer;
   }
 
-  :global(.tag-row-menu-trigger:hover),
   :global(.tag-row-menu-trigger[data-state='open']) {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  @media (hover: hover) {
+    :global(.tag-row-menu-trigger:hover) {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   /* A phone has no room for one line: the name takes its own row under the

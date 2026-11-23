@@ -26,6 +26,7 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import SearchField from '../../shared/SearchField.svelte';
+  import KeyboardSpacer from '../../shared/KeyboardSpacer.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
@@ -182,6 +183,7 @@
           groupPicker={false}
         />
       {/if}
+      <KeyboardSpacer />
     </div>
   </div>
 </div>
@@ -215,7 +217,7 @@
   .content {
     flex: 1;
     padding: 24px;
-    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    padding-bottom: calc(24px + var(--safe-bottom));
     width: 100%;
     box-sizing: border-box;
     display: flex;
@@ -248,7 +250,7 @@
   @media (max-width: 640px) {
     .content {
       padding: 16px;
-      padding-bottom: calc(16px + env(safe-area-inset-bottom));
+      padding-bottom: calc(16px + var(--safe-bottom));
     }
   }
 </style>

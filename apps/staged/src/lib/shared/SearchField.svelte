@@ -71,7 +71,7 @@
     <Button
       variant="ghost"
       size="icon-xs"
-      class="-my-1 -mr-1 size-6 [&_svg]:size-3.5"
+      class="touch-hit -my-1 -mr-1 size-6 [&_svg]:size-3.5"
       aria-label="Clear search"
       title="Clear search"
       onclick={clear}
@@ -96,6 +96,15 @@
 
   .search-field:focus-within {
     border-color: var(--border-emphasis);
+  }
+
+  /* On a touch screen the input's text is 16px (app.css), and its line 23px
+     where it was 17px. Less padding keeps the field its 35px, in line with
+     the menu triggers beside it. */
+  @media (pointer: coarse) {
+    .search-field {
+      padding-block: 5px;
+    }
   }
 
   /* The explicit clear button replaces WebKit's native search cancel glyph. */

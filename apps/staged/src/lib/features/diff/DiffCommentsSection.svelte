@@ -313,9 +313,11 @@
     border-radius: 0;
   }
 
-  .tree-item:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .tree-item:hover {
+      background-color: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
 
   .tree-item.selected {
@@ -468,8 +470,10 @@
     opacity: 0.5;
   }
 
-  .deleted-comment:hover {
-    opacity: 0.8;
+  @media (hover: hover) {
+    .deleted-comment:hover {
+      opacity: 0.8;
+    }
   }
 
   .deleted-comment .tree-item {

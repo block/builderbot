@@ -36,6 +36,7 @@
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
   import SearchField from '../../shared/SearchField.svelte';
+  import KeyboardSpacer from '../../shared/KeyboardSpacer.svelte';
   import { Button } from '$lib/components/ui/button';
   import { tagsStore } from '../../stores/tags.svelte';
   import ProjectsBoard from '../board/ProjectsBoard.svelte';
@@ -684,6 +685,7 @@
           </div>
         {/if}
       {/if}
+      <KeyboardSpacer />
     </div>
   </div>
 </div>
@@ -717,7 +719,7 @@
   .content {
     flex: 1;
     padding: 24px;
-    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    padding-bottom: calc(24px + var(--safe-bottom));
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -861,8 +863,10 @@
     contain-intrinsic-size: auto 68px;
   }
 
-  .project-card:hover {
-    background-color: var(--bg-hover);
+  @media (hover: hover) {
+    .project-card:hover {
+      background-color: var(--bg-hover);
+    }
   }
 
   .card-header {
@@ -945,7 +949,7 @@
   @media (max-width: 640px) {
     .content {
       padding: 16px;
-      padding-bottom: calc(16px + env(safe-area-inset-bottom));
+      padding-bottom: calc(16px + var(--safe-bottom));
     }
 
     /* Room for the view toggle and the sort button beside the field on a

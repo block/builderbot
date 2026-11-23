@@ -312,10 +312,12 @@
       color 0.15s ease;
   }
 
-  :global(.add-tag-button:hover:not(:disabled)) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-    color: var(--text-secondary);
+  @media (hover: hover) {
+    :global(.add-tag-button:hover:not(:disabled)) {
+      background: var(--bg-hover);
+      border-color: var(--border-emphasis);
+      color: var(--text-secondary);
+    }
   }
 
   :global(.add-tag-button:disabled) {
@@ -450,8 +452,11 @@
       min-height: 40px;
     }
 
+    /* A swipe past either end of the list stops there instead of
+       scrolling what is behind the picker. */
     .tag-picker-list {
       max-height: none;
+      overscroll-behavior: contain;
     }
 
     .tag-picker-search input {

@@ -45,9 +45,19 @@
   opacity: 1;
 }
 
-.markdown-content .markdown-diagram:hover::after {
-  border-color: var(--text-muted);
-  color: var(--text-primary);
+@media (hover: hover) {
+  .markdown-content .markdown-diagram:hover::after {
+    border-color: var(--text-muted);
+    color: var(--text-primary);
+  }
+}
+
+/* Nothing hovers on a touch screen: the badge is the only sign the diagram
+   opens, so it stays shown. */
+@media (hover: none) {
+  .markdown-content .markdown-diagram::after {
+    opacity: 1;
+  }
 }
 
 .markdown-content .markdown-diagram-preview {

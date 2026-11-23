@@ -68,16 +68,22 @@
     user-select: none;
   }
 
-  .row:hover {
-    background: var(--bg-hover);
+  /* Under `(hover: hover)`: a touch browser leaves `:hover` on the row last
+     tapped, and on a checkbox row the highlight reads as selected. */
+  @media (hover: hover) {
+    .row:hover {
+      background: var(--bg-hover);
+    }
   }
 
   .row[data-selectable='false'] {
     cursor: default;
   }
 
-  .row[data-selectable='false']:hover {
-    background: transparent;
+  @media (hover: hover) {
+    .row[data-selectable='false']:hover {
+      background: transparent;
+    }
   }
 
   .row[data-selectable='false'] .name {

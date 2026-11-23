@@ -1970,9 +1970,14 @@
     transition: background-color 0.1s;
   }
 
-  .context-option:hover,
   .context-option.focused {
     background-color: var(--bg-hover);
+  }
+
+  @media (hover: hover) {
+    .context-option:hover {
+      background-color: var(--bg-hover);
+    }
   }
 
   .context-option.selected {
@@ -2046,7 +2051,7 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-    --dialog-safe-bottom: env(safe-area-inset-bottom);
+    --dialog-safe-bottom: var(--safe-bottom);
   }
 
   /* The diff viewer scrolls its lines by transform over a viewport the size
@@ -2158,7 +2163,7 @@
        and the side ones to each row's inline padding, so the rows run to the
        screen's edges and a swipe there still scrolls the list. */
     --dialog-safe-top: env(safe-area-inset-top);
-    --dialog-safe-bottom: env(safe-area-inset-bottom);
+    --dialog-safe-bottom: var(--safe-bottom);
     --dialog-safe-left: env(safe-area-inset-left);
     --dialog-safe-right: env(safe-area-inset-right);
     background: var(--bg-chrome);
@@ -2229,9 +2234,11 @@
     color: var(--diff-comment-accent);
   }
 
-  :global(.diff-viewer-container .range-btn.comment-btn:hover) {
-    color: var(--text-primary);
-    background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
+  @media (hover: hover) {
+    :global(.diff-viewer-container .range-btn.comment-btn:hover) {
+      color: var(--text-primary);
+      background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
+    }
   }
 
   /* The mobile layout (MOBILE_LAYOUT_QUERY, viewport.svelte.ts). */

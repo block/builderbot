@@ -814,10 +814,18 @@
     content: none;
   }
 
+  /* On a touch screen the draft's text is 16px (app.css) and a line of it
+     24px, so the padding gives way to keep the heights: the one-line field
+     at 36px, which the cramped layout below counts on, and the text under a
+     quote at its 44px. */
   @media (pointer: coarse) {
+    .chat-composer :global(.message-input) {
+      padding-block: 5px;
+    }
+
     .composer-field.has-quotes :global(.message-input) {
       --hashtag-input-min-height: 44px;
-      padding: 12px;
+      padding: 10px 12px;
     }
   }
 

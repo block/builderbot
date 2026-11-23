@@ -619,6 +619,17 @@ export function getNote(noteId: string): Promise<import('./types').NoteTimelineI
 }
 
 /**
+ * The title and body a note held before its latest revision, for a branch
+ * note or a project note. Null when the note has not been revised since
+ * versions were first kept, which includes every note older than that.
+ */
+export function getNotePreviousVersion(
+  noteId: string
+): Promise<import('./types').NoteVersion | null> {
+  return invokeCommand('get_note_previous_version', { noteId });
+}
+
+/**
  * Mark a branch note read or unread, returning the row as it now reads. A
  * write that changes the read state publishes `notes-changed`; marking a read
  * note read, or a note still being written, writes nothing.

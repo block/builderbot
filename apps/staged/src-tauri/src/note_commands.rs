@@ -338,6 +338,27 @@ pub async fn list_child_notes(
     .map_err(|e| format!("list_child_notes task failed: {e}"))?
 }
 
+/// The title and body a note held before its latest revision, or `None` for
+/// a note that has not been revised since versions were first kept.
+///
+/// `note_id` is a branch note's id or a project note's: the viewer shows both
+/// kinds, and one id names at most one of them. A store read on the blocking
+/// pool, like [`get_note`]: the viewer asks on open and on each notes change.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_note_previous_version(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    note_id: String,
+) -> Result<Option<crate::store::NoteVersion>, String> {
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_previous_note_version(&note_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("get_note_previous_version task failed: {e}"))?
+}
+
 // =============================================================================
 // Project note commands
 // =============================================================================

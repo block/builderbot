@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { failedArtifactSubtitle, formatRateLimitResetTime } from './sessionFailureCopy';
+import {
+  failedArtifactSubtitle,
+  formatPauseTime,
+  formatRateLimitResetTime,
+  rateLimitPausedSubtitle,
+} from './sessionFailureCopy';
 import {
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_NO_WORKSPACE,
@@ -7,6 +12,71 @@ import {
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_WORKSTATION_GONE,
 } from '../../shared/disconnectedSession';
+
+/** A local wall-clock time, so "today" does not depend on the machine's time zone. */
+function local(month: number, day: number, hour: number, minute = 0): Date {
+  return new Date(2026, month - 1, day, hour, minute);
+}
+
+const timeOnly = (date: Date) =>
+  date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const dateAndTime = (date: Date) =>
+  date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+describe('formatPauseTime', () => {
+  const now = local(11, 23, 14);
+
+  it('gives the time alone for a time later today', () => {
+    const reset = local(11, 23, 17, 30);
+    expect(formatPauseTime(reset, now)).toBe(timeOnly(reset));
+    expect(formatPauseTime(reset.getTime(), now)).toBe(timeOnly(reset));
+    // Earlier today too: the day is what matters, not the direction.
+    expect(formatPauseTime(local(11, 23, 0, 5), now)).toBe(timeOnly(local(11, 23, 0, 5)));
+  });
+
+  it('puts the date ahead of the time for a weekly reset days away', () => {
+    const reset = local(11, 27, 9);
+    const formatted = formatPauseTime(reset, now);
+    expect(formatted).toBe(dateAndTime(reset));
+    expect(formatted).not.toBe(timeOnly(reset));
+    expect(formatted).toContain('27');
+  });
+
+  it('dates a time just past midnight, hours away', () => {
+    const reset = local(11, 24, 0, 30);
+    expect(formatPauseTime(reset, local(11, 23, 23, 50))).toBe(dateAndTime(reset));
+  });
+
+  it('dates the same day of another month, and a day already gone', () => {
+    expect(formatPauseTime(local(12, 23, 14), now)).toBe(dateAndTime(local(12, 23, 14)));
+    expect(formatPauseTime(local(11, 22, 14), now)).toBe(dateAndTime(local(11, 22, 14)));
+  });
+});
+
+describe('formatRateLimitResetTime', () => {
+  const now = local(11, 23, 14);
+
+  it('shows the date only when the reset is not today', () => {
+    const today = local(11, 23, 17, 30);
+    const nextWeek = local(11, 27, 9);
+    expect(formatRateLimitResetTime(today.toISOString(), now)).toBe(timeOnly(today));
+    expect(formatRateLimitResetTime(nextWeek.toISOString(), now)).toBe(dateAndTime(nextWeek));
+  });
+
+  it('is null without a usable time', () => {
+    expect(formatRateLimitResetTime(null, now)).toBeNull();
+    expect(formatRateLimitResetTime('', now)).toBeNull();
+    expect(formatRateLimitResetTime('5:30pm (America/Los_Angeles)', now)).toBeNull();
+  });
+
+  it('reads the clock when no moment is given', () => {
+    const inFiveDays = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+    expect(formatRateLimitResetTime(inFiveDays.toISOString())).toBe(dateAndTime(inFiveDays));
+    expect(rateLimitPausedSubtitle(inFiveDays.toISOString())).toBe(
+      `Paused by API limit — resets around ${dateAndTime(inFiveDays)}`
+    );
+  });
+});
 
 describe('failedArtifactSubtitle', () => {
   it('explains project-session interruptions', () => {

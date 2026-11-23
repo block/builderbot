@@ -260,8 +260,10 @@ was rejected as holding only the title line, and a title never holds a
 Versions 8, 9 and 10 are the two cases of that rule. Version 8 marks output
 the laptop has to read differently. Versions 9 and 10 change the tool's
 contract and leave the output alone, so no reader on the laptop looks for
-them: the laptop rejects a title with a `\r` in it from every script from
-version 8 on, and a version 10 script never writes one.
+them. A version 8 or 9 script can write a title with a `\r` in it, as an
+earlier script can, and a version 10 script never does; the laptop stores
+such a title from any of them (see _Collector_ in
+[`note-delivery.md`](./note-delivery.md)).
 
 On the laptop:
 

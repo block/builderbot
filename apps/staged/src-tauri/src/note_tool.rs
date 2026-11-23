@@ -279,7 +279,8 @@ impl NoteSubmission {
     ///
     /// A title is a single line here when it holds no `\n`. A `\r` on its
     /// own is let through, as the scripts that wrote these outboxes let it
-    /// through, so what they wrote is collected as it always was.
+    /// through in the argument, so what they wrote is collected as it always
+    /// was.
     pub(crate) fn from_parts(
         title: &str,
         body: &str,
@@ -288,7 +289,7 @@ impl NoteSubmission {
     ) -> Result<Self, String> {
         let title = title.trim();
         let title = title.strip_prefix('#').unwrap_or(title);
-        Self::from_checked_parts(title, &['\n'], body, suggested_next_steps, source)
+        Self::from_parts_as_written(title, body, suggested_next_steps, source)
     }
 
     /// [`Self::from_parts`] for a title that is already the one to store:
@@ -300,26 +301,19 @@ impl NoteSubmission {
     /// for a local session, so `# #12 follow-up` is titled `#12 follow-up`
     /// on both transports. The rejection reasons are `from_parts`' own.
     ///
-    /// A title is a single line here when it holds neither a `\n` nor a
-    /// `\r`: either one ends the draft's title line
-    /// ([`crate::note_draft::split_title`]), so a title read from a draft
-    /// holds neither, and one that does could not be seeded back into a
-    /// draft unchanged.
+    /// A title is a single line here when it holds no `\n`, as in
+    /// `from_parts`. A `\r` on its own inside the title is stored, not
+    /// rejected. A script of version 8 or 9 could write one: both ended the
+    /// draft's title line at a `\n` only, so the draft `# Title\rBody line`
+    /// above a blank line is titled `Title\rBody line`, and version 8 also
+    /// let one through in a `title` argument. From version 10 the title line
+    /// ends at a `\r` too ([`crate::note_draft::split_title`]), so that
+    /// script never writes one. A rejection here would make the run-start
+    /// recovery discard the note, and the title needs no rejection to be
+    /// repaired: the next seed writes its line break as one space
+    /// (`note_draft::seed_body`).
     pub(crate) fn from_parts_as_written(
         title: &str,
-        body: &str,
-        suggested_next_steps: Option<SuggestedNextSteps>,
-        source: NoteSubmissionSource,
-    ) -> Result<Self, String> {
-        Self::from_checked_parts(title, &['\r', '\n'], body, suggested_next_steps, source)
-    }
-
-    /// The checks [`Self::from_parts`] and [`Self::from_parts_as_written`]
-    /// share. `line_endings` are the characters a one-line title must not
-    /// hold.
-    fn from_checked_parts(
-        title: &str,
-        line_endings: &[char],
         body: &str,
         suggested_next_steps: Option<SuggestedNextSteps>,
         source: NoteSubmissionSource,
@@ -328,7 +322,7 @@ impl NoteSubmission {
         if title.is_empty() {
             return Err("`title` must not be empty".to_string());
         }
-        if title.contains(line_endings) {
+        if title.contains('\n') {
             return Err("`title` must be a single line".to_string());
         }
         let body = body.trim();
@@ -781,9 +775,9 @@ you passed. Edit that line if the title should change, then call write_note agai
     /// `from_draft` builds from the draft itself. That last equality is what
     /// gives a note the same title whether the laptop split the draft (a
     /// local session) or the script did and the outbox carried the parts.
-    /// The one title the two treat differently is one with a `\r` on its
-    /// own: a title read from a draft cannot hold it, so the as-written
-    /// path rejects it as it rejects a `\n`.
+    /// A `\r` on its own inside the title is one of the titles the two
+    /// agree on: neither rejects it, so an outbox that holds one is stored
+    /// and not discarded.
     #[test]
     fn from_parts_as_written_keeps_a_leading_hash_and_matches_from_draft() {
         let as_written = |title: &str, body: &str| {
@@ -807,6 +801,9 @@ you passed. Edit that line if the title should change, then call write_note agai
             ("", "body"),
             ("  ", "body"),
             ("a\nb", "body"),
+            ("a\r\nb", "body"),
+            ("a\rb", "body"),
+            ("Title\rBody line", "More"),
             ("Title", "  \n"),
         ] {
             for source in [NoteSubmissionSource::Tool, NoteSubmissionSource::Outbox] {
@@ -821,12 +818,18 @@ you passed. Edit that line if the title should change, then call write_note agai
             as_written("", "body").unwrap_err(),
             "`title` must not be empty"
         );
-        for title in ["a\nb", "a\rb", "a\r\nb", "Title\rBody line", "a\n\rb"] {
+        for title in ["a\nb", "a\r\nb", "a\n\rb"] {
             assert_eq!(
                 as_written(title, "body").unwrap_err(),
                 "`title` must be a single line",
                 "{title:?}"
             );
+        }
+        // A carriage return on its own is not a reason to refuse a note. A
+        // version 8 or 9 script could write such a title, and it is stored
+        // as written; the next seed makes it one line.
+        for title in ["a\rb", "Title\rBody line", "a\r\rb"] {
+            assert_eq!(title_of(title), title, "{title:?}");
         }
         // A line ending at the ends is trimmed off and is no second line.
         assert_eq!(title_of("Title\r"), "Title");
@@ -858,7 +861,7 @@ you passed. Edit that line if the title should change, then call write_note agai
             "# Use `foo` for [bar](x) #\nBody",
             "#\t Tabbed \t\r\n\r\nBody",
             // A carriage return on its own ends the title line, so the
-            // title the split returns passes the as-written check.
+            // title the split returns holds none.
             "# Title\rBody\rMore",
             "# Title\rBody line\n\nMore",
             "# Tab\tand   spaces\u{3000}wide\u{2028}here\rBody",

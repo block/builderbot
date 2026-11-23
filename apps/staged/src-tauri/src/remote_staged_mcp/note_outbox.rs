@@ -533,12 +533,16 @@ impl<'a> MarkerLine<'a> {
 /// and `#12 follow-up` for a local one. So the collector takes such a title
 /// as written ([`NoteSubmission::from_parts_as_written`]).
 ///
-/// The two paths also differ in what they call a one-line title. A title
-/// read from a draft holds neither a `\n` nor a `\r`, since either ends the
-/// draft's title line, so the as-written path rejects both. The earlier
-/// path rejects a `\n` only, which is all the scripts before version 8
-/// rejected in the argument, so a title of theirs with a `\r` on its own is
-/// still collected.
+/// Both paths call a title one line when it holds no `\n`, and neither
+/// rejects a `\r` on its own inside it. A script of any version before 10
+/// could write one. Up to version 8 it could come from the `title` argument,
+/// in which those scripts rejected a `\n` only. In versions 8 and 9 it could
+/// come from the draft, whose title line ended at a `\n` only: the draft
+/// `# Title\rBody line` above a blank line was titled `Title\rBody line`.
+/// From version 10 the title line ends at a `\r` too, so the script never
+/// writes one. Such a title is stored as written at every version: the
+/// collector does not discard a note over it, and the next seed of the draft
+/// writes the line break as one space (`note_draft::seed_body`).
 ///
 /// An outbox with an earlier version, or none, is collected as it always
 /// was: a turn that outlives its connection keeps the script it started
@@ -1476,23 +1480,18 @@ mod tests {
             }
         }
 
-        // A carriage return on its own. An earlier script let it through
-        // in the `title` argument, and its outbox is collected as it always
-        // was. From version 8 the title is a draft's title line, which a
-        // carriage return ends, so one inside the title is a second line.
+        // A carriage return on its own is stored at every version, so the
+        // note is not discarded over it. A script before version 8 let it
+        // through in the `title` argument, and a version 8 or 9 script
+        // ended the draft's title line at a `\n` only. A version 10 script
+        // never writes one; were it to, the title would be kept the same
+        // way. The next seed makes such a title one line.
         for written in ["Title\rBody line", "a\r\rb"] {
-            for version in [None, Some(1), Some(7)] {
+            for version in [None, Some(1), Some(7), Some(8), Some(9), Some(10)] {
                 assert_eq!(
                     title_of(version, written),
                     written,
                     "{version:?} {written:?}"
-                );
-            }
-            for version in [8, 9, 10] {
-                assert_eq!(
-                    outbox_state(snapshot(Some(version), written, "Body"), Some("t1")).unwrap_err(),
-                    "outbox note is invalid: `title` must be a single line",
-                    "{version} {written:?}"
                 );
             }
         }
@@ -3025,12 +3024,17 @@ without `title`."
                 collected("#12 follow-up", "Body"),
                 "version {version}"
             );
-            // A title that could not have been a draft's title line is not
-            // stored.
+            // A carriage return inside the title, which a version 8 or 9
+            // script could write, is no reason to refuse the note.
             write_outbox("Title\rsecond line", "Body", Some(version));
             assert_eq!(
                 collect(&exec, "sess-1", Some("turn-1")),
-                Err("outbox note is invalid: `title` must be a single line".to_string()),
+                collected("Title\rsecond line", "Body"),
+                "version {version}"
+            );
+            assert_eq!(
+                collect(&exec, "sess-1", None),
+                collected("Title\rsecond line", "Body"),
                 "version {version}"
             );
         }
@@ -3052,6 +3056,27 @@ without `title`."
         assert_eq!(
             ingested,
             [("Plan".to_string(), "# Draft heading\n\nBody".to_string())]
+        );
+
+        // It ingests, and does not discard, a version 9 note whose title
+        // holds a carriage return: that script ended the title line of the
+        // draft `# Title\rBody line`, a blank line, `More` at the `\n`.
+        write_outbox("Title\rBody line", "More", Some(9));
+        let mut ingested = Vec::new();
+        let recovery = recover_uncollected_outbox(
+            &exec,
+            "sess-1",
+            &mut |submission| {
+                ingested.push((submission.title, submission.body));
+                true
+            },
+            &mut || None,
+        )
+        .unwrap();
+        assert_eq!(recovery.outbox, OutboxRecovery::Ingested);
+        assert_eq!(
+            ingested,
+            [("Title\rBody line".to_string(), "More".to_string())]
         );
     }
 

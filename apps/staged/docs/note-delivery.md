@@ -265,8 +265,8 @@ What the file holds at run start depends on the stored note
 
   A title stored some other way can still need the seed's change: one with
   a line break in it, with whitespace at its ends or with no text. Sources
-  include an outbox from a version 7 or earlier script, whose `title`
-  argument could hold a `\r` on its own, and the `---` fallback, which ends
+  include an outbox from a script before version 10, whose title could
+  hold a `\r` on its own (see _Collector_), and the `---` fallback, which ends
   the title at a `\n` only and can fall back to the start of the prompt.
   Such a title is changed by the first seed, to one that later seeds leave
   alone.
@@ -882,17 +882,31 @@ unchanged and work with either script.
   an outbox is collected as it always was.
 
 Both paths reject an empty or multi-line title and an empty body, with the
-same reasons (`outbox note is invalid: …`). They differ in what makes a
-title multi-line. From version 8 it is a `\n` or a `\r`: either one ends a
-draft's title line, so a title read from a draft holds neither, and one
-that does could not be seeded back unchanged. A script from version 10
-never writes such a title. For version 7 or earlier it is a `\n` only,
-which is all those scripts rejected in the argument, so a title of theirs
-with a `\r` on its own is collected as it always was. The gate is needed because
-outboxes of the earlier shape are still written after an update. A running
-`node` process keeps the script it was started from, so a turn that
-outlives its connection, or is taken over, finishes on the script and the
-prompt it started with. Stripping a `#` from every title would instead have
+same reasons (`outbox note is invalid: …`). A title is multi-line when it
+holds a `\n`, on both paths. A `\r` on its own inside the title is not
+rejected at any version: the title is stored with it. Which scripts can
+write one:
+
+- **Version 7 or earlier**: in the `title` argument, in which those scripts
+  rejected a `\n` only.
+- **Version 8**: in the `title` argument, as before, and in a title read
+  from the draft. That script ended the draft's title line at a `\n` only,
+  so the draft `# Title\rBody line`, a blank line, then `More` was titled
+  `Title\rBody line`.
+- **Version 9**: in a title read from the draft, for the same reason.
+- **Version 10 or later**: never. The title line ends at a `\r` too.
+
+The collector does not reject such a title, because a rejected outbox is a
+content failure and the run-start recovery clears an outbox that fails that
+way, so the note would be lost. The title needs no rejection to be
+repaired: the next seed of the draft writes
+its line break as one space, as it does for any stored title with a line
+break (see _The draft file_).
+
+The gate is needed because outboxes of the earlier shape are still written
+after an update. A running `node` process keeps the script it was started
+from, so a turn that outlives its connection, or is taken over, finishes on
+the script and the prompt it started with. Stripping a `#` from every title would instead have
 titled `# #12 follow-up` as `12 follow-up` for a remote session only.
 `outbox_state` is the one place a snapshot becomes a submission, so the
 per-turn collection, the sweep and the run-start recovery needed no change
@@ -1990,7 +2004,7 @@ Blox:
 note draft at <path>` names the same file. After the `write_note` call,
    `~/.staged/sessions/<session-id>/` on the workstation holds `draft.md`,
    `note.md` (the draft without its title line, trimmed), `meta.json` (its
-   `title` is the text of that line and its `helperVersion` is 9) and `done`.
+   `title` is the text of that line and its `helperVersion` is 10) and `done`.
    `done` holds 32 hex characters, and a second `write_note` call changes
    them. The commands before the agent starts are the ones that ran before the draft
    existed (the install probe, the outbox read, the clear); none was added
@@ -2151,7 +2165,7 @@ workstation outbox; storing it`, the note fills in on the timeline, the
    `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{}}}' | node
 ~/.staged/bin/staged-mcp.cjs <session-id> <turn-id>`. The result reads
    `Saved note "Hand" (15 bytes from the draft file). …`, `meta.json` holds
-   `"title":"Hand"` and `"helperVersion":9`, and `note.md` holds
+   `"title":"Hand"` and `"helperVersion":10`, and `note.md` holds
    `Written by hand` with no heading. Without the draft the same call
    answers `isError: true` naming the missing file and writes nothing into
    the outbox. So does a draft with no title line
@@ -2183,7 +2197,7 @@ each bad draft rejected by path without touching the slot, a draft with no
 title line or only a title line rejected the same way, a stale `title`
 accepted when it agrees with the title line and rejected when it does not,
 and `from_parts` beside `from_parts_as_written` for the two outbox title
-rules, a `\r` in the title included),
+rules, a `\r` in the title stored by both),
 `session_runner::tests::note_draft` (a fresh local run removes a stale draft
 and creates none, an amending run seeds it with the title line and the body
 for branch and project notes and with the same text on both transports, a
@@ -2218,8 +2232,9 @@ injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),
 marker that changed between the reads and a marker whose token changed
 between them, with equal, differing, empty and half-empty tokens,
 `outbox_state` keeping a version 8 title as written and normalizing the
-title of an earlier or unversioned outbox, and rejecting a title with a
-`\r` from version 8 while still collecting one from an earlier script, the
+title of an earlier or unversioned outbox, and storing a title with a
+`\r` at every version, through the collect script and the run-start
+recovery too, the
 collect script printing the token on both marker lines under a local `sh`,
 a whole rewrite made to land between the script's two file reads never
 collected as one note, two `write_note` calls writing different tokens,

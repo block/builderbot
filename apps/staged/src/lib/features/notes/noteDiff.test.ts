@@ -244,6 +244,25 @@ describe('computeNoteDiff', () => {
     expect(diff.hunks.map((hunk) => hunk.kind)).toEqual(['removed', 'added']);
   });
 
+  it('keeps a reworded block paired when the block before it moved and was edited', () => {
+    // The edited intro now stands after `middle`. `computeLineDiff` pairs it
+    // with the old one across `middle`, and the outro with its rewording.
+    const editedIntro = unit('The cache is warmed when the app first starts.');
+    const rewordedOutro = unit('Nothing is written to disk until the app closes.');
+    const diff = computeNoteDiff([intro, middle, outro], [middle, editedIntro, rewordedOutro]);
+
+    // The moved block's two halves stand where they are, and the reworded
+    // one stays a pair: the half that has lost its other half goes first.
+    expect(diff.ops.map((op) => op.type)).toEqual(['removed', 'equal', 'added', 'modified']);
+    const reworded = diff.ops[3];
+    if (reworded.type !== 'modified')
+      throw new Error(`expected a modified op, got ${reworded.type}`);
+    expect([reworded.previousIndex, reworded.currentIndex]).toEqual([2, 2]);
+    expect(covered(outro.text, reworded.previousRanges)).toEqual(['window']);
+    expect(covered(rewordedOutro.text, reworded.currentRanges)).toEqual(['app']);
+    expect(diff.hunks.map((hunk) => hunk.kind)).toEqual(['removed', 'modified']);
+  });
+
   describe('blocks too long for computeLineDiff to compare', () => {
     const before = unit(longParagraph('word', 220));
     const after = unit(before.text.replace('word7 ', 'changed7 ').replace(' word150', ' other150'));

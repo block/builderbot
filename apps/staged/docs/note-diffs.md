@@ -21,6 +21,14 @@ that replace a note's text: `update_note_title_and_content`,
   `get_note_previous_version`. There is no version picker.
 - Nothing was backfilled. A note written before the migration has no versions,
   and so no bar, until it is next revised.
+- Moving a note to another project is not a revision and keeps its versions,
+  but it does rewrite the note: references to media the move copied point at
+  the copies, and a branch note's title can gain a suffix to stay unique
+  where it lands. The move rewrites the note's versions the same way, in its
+  transaction (`carry_move_into_note_versions`), so the bar after a move shows
+  what the last revision changed and nothing the move did. A version's
+  references to media the note no longer embeds are left as written. A copy
+  is a new note and starts with no versions.
 - The diff is over the rendered note's blocks (a paragraph, a list item, a
   table row, a diagram), not the markdown source: `noteDiffUnits.ts` reads the
   blocks, `noteDiff.ts` compares them, and `NoteChangeBar.svelte` and
@@ -124,7 +132,8 @@ Open **Note diffs demo** from the projects grid and press the note. The bar
 at the right of the note should carry the six markers above, in that order.
 Hover each one, press an orange one to open the previous version, scroll
 either pane, and press Escape twice: once for the previous version, once for
-the note.
+the note. With the find field open (Cmd+F) and focused, Escape closes the
+search and nothing else; the previous version stays as it was.
 
 To make a version by hand instead, revise a note of your own. An agent
 rewriting its note keeps the text it replaced, and so does editing and saving

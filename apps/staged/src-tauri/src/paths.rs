@@ -35,6 +35,28 @@ pub fn default_data_dir() -> Option<PathBuf> {
     resolve_data_dir(None, dirs::home_dir())
 }
 
+/// Every directory that holds Staged's data as far as this process can
+/// tell: [`default_data_dir`], and [`data_dir`] when the override names
+/// another. For code that writes scratch files of its own and must stay out
+/// of an installed Staged's data whether or not an override is in force.
+pub fn all_data_dirs() -> Vec<PathBuf> {
+    resolve_all_data_dirs(std::env::var_os(DATA_DIR_ENV), dirs::home_dir())
+}
+
+/// [`all_data_dirs`] over its two inputs, the default directory first.
+pub(crate) fn resolve_all_data_dirs(
+    requested: Option<OsString>,
+    home: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = resolve_data_dir(None, home.clone()).into_iter().collect();
+    if let Some(in_use) = resolve_data_dir(requested, home) {
+        if !dirs.contains(&in_use) {
+            dirs.push(in_use);
+        }
+    }
+    dirs
+}
+
 /// [`data_dir`] over its two inputs: the override, if usable, else `.staged`
 /// under `home`.
 ///
@@ -215,6 +237,39 @@ mod tests {
             resolve_data_dir(requested, None),
             Some(PathBuf::from("/tmp/staged-isolated/.staged"))
         );
+    }
+
+    #[test]
+    fn all_data_dirs_keeps_the_default_directory_beside_an_override() {
+        let requested = Some(OsString::from("/tmp/staged-isolated/.staged"));
+        assert_eq!(
+            resolve_all_data_dirs(requested.clone(), home()),
+            vec![
+                PathBuf::from("/Users/someone/.staged"),
+                PathBuf::from("/tmp/staged-isolated/.staged"),
+            ]
+        );
+        // Without a home directory there is no default to list.
+        assert_eq!(
+            resolve_all_data_dirs(requested, None),
+            vec![PathBuf::from("/tmp/staged-isolated/.staged")]
+        );
+    }
+
+    #[test]
+    fn all_data_dirs_is_the_default_directory_alone_without_a_usable_override() {
+        let default = vec![PathBuf::from("/Users/someone/.staged")];
+        assert_eq!(resolve_all_data_dirs(None, home()), default);
+        // An override that names the default directory is not listed twice,
+        // and a relative one is ignored, as `data_dir` ignores it.
+        for requested in ["/Users/someone/.staged", "staged-data", ""] {
+            assert_eq!(
+                resolve_all_data_dirs(Some(OsString::from(requested)), home()),
+                default,
+                "{requested:?}"
+            );
+        }
+        assert!(resolve_all_data_dirs(None, None).is_empty());
     }
 
     #[test]

@@ -12,7 +12,8 @@
  * interpolating between the anchors around it. The line kept level is the
  * reference line, a third of the way down each pane: a block there in one
  * pane is there in the other, however different the text above it. Through a
- * stretch only one version has, the other pane holds still.
+ * stretch only one version has, the other pane holds still, so a change is
+ * scrolled to from the pane that has its first block (`hunkLead`).
  */
 
 import type { NoteDiffHunk, NoteDiffOp, NoteDiffSide } from './noteDiff';
@@ -64,6 +65,41 @@ export function hunkExtent(
   if (next) return { top: next.top, height: 0 };
   const last = boxes[boxes.length - 1];
   return last ? { top: last.top + last.height, height: 0 } : null;
+}
+
+/** Where a hunk is put on a pane's reference line: the pane, and the offset in it. */
+export interface NoteDiffHunkLead {
+  side: NoteDiffSide;
+  offset: number;
+}
+
+/**
+ * The pane a hunk is placed from when it is scrolled to, and the offset
+ * that goes on that pane's reference line. The other pane follows through
+ * the scroll map.
+ *
+ * A hunk is placed from the note, at its first block there, unless it
+ * starts with blocks only the previous version has. On the note's side
+ * those are a gap of no height, and the map sends a gap to the block after
+ * it: the previous pane would show where the removed text ends, with its
+ * start above the line and out of view when it is tall. Such a hunk is
+ * placed from the previous version instead, its first block on that pane's
+ * line, and the note follows to the gap.
+ *
+ * The previous version is measured only while it is shown. Without it the
+ * hunk is placed from the note. `null` when the side it would be placed
+ * from has nothing measured to place it by.
+ */
+export function hunkLead(
+  hunk: NoteDiffHunk,
+  boxes: Record<NoteDiffSide, readonly NoteDiffUnitBox[]>
+): NoteDiffHunkLead | null {
+  if (hunk.ops[0]?.type === 'removed') {
+    const extent = hunkExtent(hunk, 'previous', boxes.previous);
+    if (extent) return { side: 'previous', offset: extent.top };
+  }
+  const extent = hunkExtent(hunk, 'current', boxes.current);
+  return extent ? { side: 'current', offset: extent.top } : null;
 }
 
 /**

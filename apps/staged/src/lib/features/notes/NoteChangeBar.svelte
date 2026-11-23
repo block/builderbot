@@ -30,7 +30,7 @@
     clearNoteDiffMarks,
     pointAtNoteDiffHunk,
   } from './noteDiffHighlights';
-  import { hunkExtent, scrollTopForOffset } from './noteDiffScroll';
+  import { hunkExtent, hunkLead, scrollTopForOffset } from './noteDiffScroll';
   import type { NoteDiffState } from './noteDiffState.svelte';
   import {
     extractNoteDiffUnits,
@@ -115,13 +115,17 @@
     return untrack(() => pointAtNoteDiffHunk(el, current, hunk, 'current'));
   });
 
-  /** Put the selected change on the note's reference line. */
+  /**
+   * Put the selected change on the note's reference line. One that starts
+   * with text only the previous version has is that version's pane to
+   * place, while it is shown (see `hunkLead`): the note follows it there.
+   */
   function alignActive() {
     const scroller = scrollEl;
     const hunk = noteDiff.activeHunk;
     if (!scroller || !hunk) return;
-    const extent = hunkExtent(hunk, 'current', noteDiff.boxes.current);
-    if (extent) scroller.scrollTop = scrollTopForOffset(extent.top, scroller);
+    const lead = hunkLead(hunk, noteDiff.boxes);
+    if (lead?.side === 'current') scroller.scrollTop = scrollTopForOffset(lead.offset, scroller);
   }
 
   // Measure the blocks, now and whenever the note is laid out again: an

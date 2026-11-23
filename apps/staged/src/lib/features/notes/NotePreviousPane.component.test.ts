@@ -218,6 +218,83 @@ describe('NotePreviousPane', () => {
     expect(currentScrollEl.scrollTop).toBe(150);
   });
 
+  it('starts a selected removal on its line, and puts the note at the gap', () => {
+    const { noteDiff, scrollEl, currentScrollEl } = render();
+
+    // "Logs are kept for a week" is 200px down this version and the line is
+    // 100px down the pane. The note has no such block: placed from the note,
+    // this pane would show the block after it and the paragraph would end on
+    // the line instead of starting there.
+    noteDiff.select(noteDiff.hunks[0].id, true);
+    flushSync();
+
+    expect(scrollEl.scrollTop).toBe(100);
+    // The gap, 200px down the note, on the note's line.
+    expect(currentScrollEl.scrollTop).toBe(100);
+
+    // The browser reports both moves: neither is answered.
+    scrollEl.dispatchEvent(new Event('scroll'));
+    currentScrollEl.dispatchEvent(new Event('scroll'));
+    expect(scrollEl.scrollTop).toBe(100);
+    expect(currentScrollEl.scrollTop).toBe(100);
+  });
+
+  it('is not pulled off a selected removal by the note’s scroll to the gap', () => {
+    // The change bar has put the gap on the note's line already, as it does
+    // before this pane is measured, and the event for that is still to come.
+    const { noteDiff, scrollEl, currentScrollEl } = render({ currentScrollTop: 100 });
+    expect(scrollEl.scrollTop).toBe(200);
+
+    noteDiff.select(noteDiff.hunks[0].id, true);
+    flushSync();
+    expect(scrollEl.scrollTop).toBe(100);
+    expect(currentScrollEl.scrollTop).toBe(100);
+
+    // The note is where this pane wants it, so the event tells it nothing:
+    // answered, it would put the block after the removed text on the line.
+    currentScrollEl.dispatchEvent(new Event('scroll'));
+    expect(scrollEl.scrollTop).toBe(100);
+  });
+
+  it('keeps a selected removal on its line through a new layout, until the reader scrolls', () => {
+    const { noteDiff, contentEl, scrollEl, currentScrollEl } = render();
+    noteDiff.select(noteDiff.hunks[0].id, true);
+    flushSync();
+    expect(scrollEl.scrollTop).toBe(100);
+
+    // Half the viewport: the line is 50px down instead of 100.
+    layOut(contentEl, scrollEl, VIEWPORT / 2);
+    Object.defineProperty(currentScrollEl, 'clientHeight', { configurable: true, value: 150 });
+    resize();
+    flushSync();
+    expect(scrollEl.scrollTop).toBe(150);
+    expect(currentScrollEl.scrollTop).toBe(150);
+
+    // The reader scrolls this pane themselves: it stays where they put it.
+    scrollEl.dispatchEvent(new Event('wheel'));
+    scrollTo(scrollEl, 0);
+    expect(currentScrollEl.scrollTop).toBe(0);
+    layOut(contentEl, scrollEl, VIEWPORT);
+    Object.defineProperty(currentScrollEl, 'clientHeight', { configurable: true, value: 300 });
+    resize();
+    flushSync();
+    expect(scrollEl.scrollTop).toBe(0);
+    expect(currentScrollEl.scrollTop).toBe(0);
+  });
+
+  it('leaves a selected change the note has blocks for to the note', () => {
+    const { noteDiff, scrollEl, currentScrollEl } = render();
+
+    // The reworded paragraph is placed by the note's change bar, which is
+    // not here: nothing moves until the note does.
+    noteDiff.select(noteDiff.hunks[1].id, true);
+    flushSync();
+    expect(scrollEl.scrollTop).toBe(0);
+
+    scrollTo(currentScrollEl, 200);
+    expect(scrollEl.scrollTop).toBe(300);
+  });
+
   it('does not answer the scroll it caused', () => {
     const { scrollEl, currentScrollEl } = render();
 

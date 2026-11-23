@@ -20,6 +20,12 @@
   is put back in step with it. A scroll this pane caused is not answered,
   or the two would chase each other through the map's rounding.
 
+  A selected change is scrolled to by the pane that has its first block.
+  That is the note, through its change bar, except for a change that starts
+  with text only this version has: the note has a gap there, which the map
+  cannot tell from the block after it, so this pane puts the text's start on
+  its own line and the note follows (`hunkLead`).
+
   The two scroll areas have to be the same box for that line to be level:
   the note's pane carries the same header, and `bottomInset` is the height
   of what stands under the note's scroll area, kept clear here too.
@@ -33,7 +39,12 @@
     clearNoteDiffMarks,
     pointAtNoteDiffHunk,
   } from './noteDiffHighlights';
-  import { buildScrollAnchors, syncedScrollTop } from './noteDiffScroll';
+  import {
+    buildScrollAnchors,
+    hunkLead,
+    scrollTopForOffset,
+    syncedScrollTop,
+  } from './noteDiffScroll';
   import { sameNoteDiffUnits, type NoteDiffState } from './noteDiffState.svelte';
   import {
     extractNoteDiffUnits,
@@ -77,6 +88,8 @@
   }: Props = $props();
 
   let scrollEl = $state<HTMLElement>();
+  /** The scroll area's visible height as last measured: the reference line moves with it. */
+  let paneHeight = $state(0);
   /** The version's blocks as last read; none when they are not the ones the diff compared. */
   let units = $state.raw<NoteDiffDomUnit[]>([]);
 
@@ -111,7 +124,10 @@
     const previous = units;
     if (!el || !scroller) return;
 
-    const measure = () => noteDiff.setBoxes('previous', measureNoteDiffUnits(previous, scroller));
+    const measure = () => {
+      noteDiff.setBoxes('previous', measureNoteDiffUnits(previous, scroller));
+      paneHeight = scroller.clientHeight;
+    };
     untrack(measure);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     observer?.observe(el);
@@ -128,7 +144,7 @@
       : []
   );
 
-  /** The pane the reader last scrolled, which the other follows. */
+  /** The pane the reader last scrolled, or a selected change was placed from, which the other follows. */
   let leader: NoteDiffSide = 'current';
   /** Where this pane last put each scroll area, until the scroll event for it arrives. */
   const echoes = new Map<HTMLElement, number>();
@@ -137,16 +153,26 @@
     const current = currentScrollEl;
     const previous = scrollEl;
     const map = anchors;
+    // A change was selected, which may be this pane's to place, or the panes
+    // changed height under the same blocks.
+    void noteDiff.alignRequest;
+    void paneHeight;
     if (!current || !previous) return;
     const panes = { current, previous };
 
+    const scrollPane = (pane: HTMLElement, top: number) => {
+      pane.scrollTop = top;
+      // Read back: the pane may have rounded it, or have no further to go.
+      // Noted even when the pane was there already. The event for an earlier
+      // move may still be on its way (the change bar's, placing a change
+      // before this pane was measured), and one that reports the place this
+      // pane wants says nothing new.
+      echoes.set(pane, pane.scrollTop);
+    };
     const follow = (from: NoteDiffSide) => {
       const source = panes[from];
       const target = panes[from === 'current' ? 'previous' : 'current'];
-      const before = target.scrollTop;
-      target.scrollTop = syncedScrollTop(map, from, source, target);
-      // Read back: the pane may have rounded it, or have no further to go.
-      if (target.scrollTop !== before) echoes.set(target, target.scrollTop);
+      scrollPane(target, syncedScrollTop(map, from, source, target));
     };
     const scrolled = (side: NoteDiffSide) => () => {
       const pane = panes[side];
@@ -157,8 +183,20 @@
       follow(side);
     };
 
-    // The panes were laid out again, or this one has just opened.
-    follow(leader);
+    // The panes were laid out again, this one has just opened, or a change
+    // was selected. While the selected change is being followed, the pane it
+    // is placed from leads (see `hunkLead`): the note's change bar puts a
+    // change on the note's line, and one that starts with text only this
+    // version has is put on this pane's line here.
+    untrack(() => {
+      const hunk = noteDiff.following ? noteDiff.activeHunk : null;
+      const lead = hunk ? hunkLead(hunk, noteDiff.boxes) : null;
+      if (lead) leader = lead.side;
+      if (lead?.side === 'previous') {
+        scrollPane(previous, scrollTopForOffset(lead.offset, previous));
+      }
+      follow(leader);
+    });
     const onCurrent = scrolled('current');
     const onPrevious = scrolled('previous');
     current.addEventListener('scroll', onCurrent, { passive: true });

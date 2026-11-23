@@ -62,7 +62,7 @@ pub use branch_move::{BranchMove, RepoPlacement, WorkdirMove};
 pub use control_grants::{renewed_expiry, ControlGrantRecord, CONTROL_GRANT_LIFETIME_MS};
 pub use messages::TranscriptWindow;
 pub use models::*;
-pub use note_transfer::ChildNoteMove;
+pub use note_transfer::{no_media_retargeted, ChildNoteMove, MediaRetarget};
 pub use project_activity::ProjectActivity;
 pub use project_notes::DeletedProjectNoteSessions;
 pub use project_search::{ProjectSearchItem, ProjectSearchItemKind};

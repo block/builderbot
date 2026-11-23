@@ -4,7 +4,9 @@ import type { NoteDiffHunk, NoteDiffOp } from './noteDiff';
 import {
   buildScrollAnchors,
   hunkExtent,
+  hunkLead,
   mapScrollOffset,
+  REFERENCE_LINE_FRACTION,
   scrollTopForOffset,
   syncedScrollTop,
   type NoteDiffPaneScroll,
@@ -56,6 +58,106 @@ describe('hunkExtent', () => {
   it('is nowhere on a side with nothing measured', () => {
     expect(hunkExtent(hunk({ kind: 'removed', previousIndices: [0] }), 'current', [])).toBeNull();
     expect(hunkExtent(hunk({ currentIndices: [7] }), 'current', boxes)).toBeNull();
+  });
+});
+
+describe('hunkLead', () => {
+  // The previous version has a 300px paragraph the current one lacks, with a
+  // shared block either side and 16px between blocks.
+  const previousBoxes = [box(0, 1000), box(1016, 300), box(1332, 100), box(1448, 2000)];
+  const currentBoxes = [box(0, 1000), box(1016, 100), box(1132, 2000)];
+  const boxes = { previous: previousBoxes, current: currentBoxes };
+  const removed = hunk({
+    kind: 'removed',
+    ops: [{ type: 'removed', previousIndex: 1 }],
+    previousIndices: [1],
+    previousStart: 1,
+    currentStart: 1,
+  });
+
+  it('places a change from the note where the note has its first block', () => {
+    const added = hunk({
+      kind: 'added',
+      ops: [{ type: 'added', currentIndex: 1 }],
+      currentIndices: [1],
+      previousStart: 2,
+      currentStart: 1,
+    });
+    expect(hunkLead(added, boxes)).toEqual({ side: 'current', offset: 1016 });
+
+    const reworded = hunk({
+      ops: [
+        {
+          type: 'modified',
+          previousIndex: 2,
+          currentIndex: 1,
+          previousRanges: [],
+          currentRanges: [],
+          wholeUnit: true,
+        },
+      ],
+      previousIndices: [2],
+      currentIndices: [1],
+      previousStart: 2,
+      currentStart: 1,
+    });
+    expect(hunkLead(reworded, boxes)).toEqual({ side: 'current', offset: 1016 });
+  });
+
+  it('places a removal from the previous version, at its first block', () => {
+    expect(hunkLead(removed, boxes)).toEqual({ side: 'previous', offset: 1016 });
+  });
+
+  it('places a change that starts with a removal from the previous version', () => {
+    const replaced = hunk({
+      ops: [
+        { type: 'removed', previousIndex: 1 },
+        { type: 'added', currentIndex: 1 },
+      ],
+      previousIndices: [1],
+      currentIndices: [1],
+      previousStart: 1,
+      currentStart: 1,
+    });
+    expect(hunkLead(replaced, boxes)).toEqual({ side: 'previous', offset: 1016 });
+  });
+
+  it('places a removal from the note, at the gap, while the previous version is not measured', () => {
+    expect(hunkLead(removed, { previous: [], current: currentBoxes })).toEqual({
+      side: 'current',
+      offset: 1016,
+    });
+  });
+
+  it('places nothing with neither side measured', () => {
+    expect(hunkLead(removed, { previous: [], current: [] })).toBeNull();
+  });
+
+  it('starts removed text on the previous pane’s line, the note following to the gap', () => {
+    const anchors = buildScrollAnchors(
+      [
+        { type: 'equal', previousIndex: 0, currentIndex: 0 },
+        { type: 'removed', previousIndex: 1 },
+        { type: 'equal', previousIndex: 2, currentIndex: 1 },
+        { type: 'equal', previousIndex: 3, currentIndex: 2 },
+      ],
+      previousBoxes,
+      currentBoxes
+    );
+    const previous = pane(0, 3448, 600);
+    const current = pane(0, 3132, 600);
+    const line = 600 * REFERENCE_LINE_FRACTION;
+
+    const lead = hunkLead(removed, boxes)!;
+    previous.scrollTop = scrollTopForOffset(lead.offset, previous);
+    current.scrollTop = syncedScrollTop(anchors, 'previous', previous, current);
+
+    // The removed paragraph starts on the line and runs down the pane from
+    // it, where the note has the gap it left: between the block before it,
+    // which ends 1000px down the note, and the one after, 1016px down.
+    expect(previousBoxes[1].top - previous.scrollTop).toBe(line);
+    expect(current.scrollTop + line).toBeGreaterThan(1000);
+    expect(current.scrollTop + line).toBeLessThan(1016);
   });
 });
 

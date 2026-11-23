@@ -12,7 +12,10 @@
 //!    directory: copied, or on a move hard-linked (see below). Files are
 //!    cheap to put back and rows are not, so the filesystem goes first.
 //! 3. One transaction rewrites (move) or inserts (copy) the note row together
-//!    with the rows for its media. Once it commits, the paths re-homed rows
+//!    with the rows for its media. A move rewrites the note's stored versions
+//!    there too, re-pointing the references its body had re-pointed
+//!    ([`retarget_media`]), so the note still differs from its previous
+//!    version only by what a revision changed. Once it commits, the paths re-homed rows
 //!    no longer name are unlinked; if it fails, the copies and links are
 //!    removed. A source file is never touched before the commit, so a row
 //!    finds its file at every point, and a crash leaves at worst a spare link.
@@ -239,6 +242,8 @@ where
             &media.content,
             &media.images,
             &media.rehomed,
+            // The note's stored versions take the rewrite its body took.
+            &|_, text| retarget_media(text, &media.renamed),
         ),
         TransferMode::Copy => {
             let mut copy = Note::new_standalone(&target_branch.id, &note.title, &media.content)
@@ -468,8 +473,15 @@ fn move_project_note_now(
         return Err(e);
     }
 
-    // Step 3: the transaction, parent and children together.
+    // Step 3: the transaction, parent and children together. Each note's
+    // stored versions take the rewrite its own body took; `staged` holds the
+    // parent's media first, then each child's in `plan` order.
     let parent_media = &staged[0];
+    let renamed_by_note: HashMap<&str, &HashMap<String, String>> =
+        std::iter::once(note.id.as_str())
+            .chain(plan.iter().map(|child| child.note_id.as_str()))
+            .zip(staged.iter().map(|media| &media.renamed))
+            .collect();
     let result = store.move_project_note_to_project(
         &note.id,
         &note.project_id,
@@ -479,6 +491,7 @@ fn move_project_note_now(
         &parent_media.images,
         &parent_media.rehomed,
         &plan,
+        &|note_id, text| retarget_media(text, renamed_by_note.get(note_id)?),
     );
     let previous_contents: Vec<&str> = std::iter::once(note.content.as_str())
         .chain(
@@ -832,6 +845,10 @@ struct StagedMedia {
     content: String,
     images: Vec<Image>,
     rehomed: Vec<Image>,
+    /// How the body was rewritten: each source id that was copied, and the
+    /// reference target of its copy. Text the note held before takes the
+    /// same rewrite (see [`retarget_media`]).
+    renamed: HashMap<String, String>,
     /// The file written for each of `images`, under the copy's fresh id.
     copies: Vec<PathBuf>,
     /// A hard link for each of `rehomed` (by id), at the path its row names
@@ -939,6 +956,7 @@ fn stage_media(
         content: content.to_owned(),
         images: Vec::new(),
         rehomed: Vec::new(),
+        renamed: HashMap::new(),
         copies: Vec::new(),
         links: Vec::new(),
         superseded: Vec::new(),
@@ -948,7 +966,6 @@ fn stage_media(
     // re-homed and its references stay as written. The same id is only put
     // in place once however often the note embeds it.
     let mut landed = HashMap::<String, Option<String>>::new();
-    let mut edits = Vec::new();
     // What else uses the note's media, read for all of it the first time a
     // row could move as it is: one pass per note, not one per attachment.
     let mut references = None;
@@ -957,79 +974,67 @@ fn stage_media(
             let Some((id, _)) = refs::stored_ref(&reference.target) else {
                 continue;
             };
-            let replacement = match landed.get(id) {
-                Some(replacement) => replacement.clone(),
-                None => {
-                    let Some(source) = store.get_image(id).map_err(|e| e.to_string())? else {
-                        continue;
-                    };
-                    let source_path =
-                        image_file_path(&source.project_id, &source.id, &source.filename)?;
-                    let filename = store
-                        .unique_image_filename_excluding(
-                            branch_id,
-                            project_id,
-                            &source.filename,
-                            reserved,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    let rehomes = match &rehome {
-                        Some(from) if from.holds(&source) => {
-                            if references.is_none() {
-                                references = Some(
-                                    store
-                                        .media_references(
-                                            refs::media_ids(content).iter().map(String::as_str),
-                                            Some(from.note_id),
-                                        )
-                                        .map_err(|e| e.to_string())?,
-                                );
-                            }
-                            references
-                                .as_ref()
-                                .is_some_and(|references| references.unused(&source.id))
-                        }
-                        _ => false,
-                    };
-                    let replacement = if rehomes {
-                        if !rehome_file(&source_path, project_id, &source, &mut staged)? {
-                            continue;
-                        }
-                        staged.rehomed.push(Image {
-                            project_id: project_id.to_owned(),
-                            branch_id: branch_id.map(str::to_owned),
-                            filename: filename.clone(),
-                            session_id: Some(owner_session.to_owned()),
-                            ..source
-                        });
-                        None
-                    } else {
-                        let Some(copy) = copy_file(
-                            &source_path,
-                            &source,
-                            branch_id,
-                            project_id,
-                            &filename,
-                            owner_session,
-                            &mut staged,
-                        )?
-                        else {
-                            continue;
-                        };
-                        Some(format!(
-                            "staged-media://{}.{}",
-                            copy.id,
-                            files::extension(&copy.filename)
-                        ))
-                    };
-                    reserved.insert(filename);
-                    landed.insert(id.to_owned(), replacement.clone());
-                    replacement
-                }
-            };
-            if let Some(replacement) = replacement {
-                edits.push((reference.destination, replacement));
+            if landed.contains_key(id) {
+                continue;
             }
+            let Some(source) = store.get_image(id).map_err(|e| e.to_string())? else {
+                continue;
+            };
+            let source_path = image_file_path(&source.project_id, &source.id, &source.filename)?;
+            let filename = store
+                .unique_image_filename_excluding(branch_id, project_id, &source.filename, reserved)
+                .map_err(|e| e.to_string())?;
+            let rehomes = match &rehome {
+                Some(from) if from.holds(&source) => {
+                    if references.is_none() {
+                        references = Some(
+                            store
+                                .media_references(
+                                    refs::media_ids(content).iter().map(String::as_str),
+                                    Some(from.note_id),
+                                )
+                                .map_err(|e| e.to_string())?,
+                        );
+                    }
+                    references
+                        .as_ref()
+                        .is_some_and(|references| references.unused(&source.id))
+                }
+                _ => false,
+            };
+            let replacement = if rehomes {
+                if !rehome_file(&source_path, project_id, &source, &mut staged)? {
+                    continue;
+                }
+                staged.rehomed.push(Image {
+                    project_id: project_id.to_owned(),
+                    branch_id: branch_id.map(str::to_owned),
+                    filename: filename.clone(),
+                    session_id: Some(owner_session.to_owned()),
+                    ..source
+                });
+                None
+            } else {
+                let Some(copy) = copy_file(
+                    &source_path,
+                    &source,
+                    branch_id,
+                    project_id,
+                    &filename,
+                    owner_session,
+                    &mut staged,
+                )?
+                else {
+                    continue;
+                };
+                Some(format!(
+                    "staged-media://{}.{}",
+                    copy.id,
+                    files::extension(&copy.filename)
+                ))
+            };
+            reserved.insert(filename);
+            landed.insert(id.to_owned(), replacement);
         }
         Ok(())
     })();
@@ -1037,11 +1042,44 @@ fn stage_media(
         staged.discard(store);
         return Err(e);
     }
-    // Apply back to front so earlier offsets stay valid.
-    for (span, replacement) in edits.into_iter().rev() {
-        staged.content.replace_range(span, &replacement);
+    staged.renamed = landed
+        .into_iter()
+        .filter_map(|(id, replacement)| Some((id, replacement?)))
+        .collect();
+    if let Some(rewritten) = retarget_media(content, &staged.renamed) {
+        staged.content = rewritten;
     }
     Ok(staged)
+}
+
+/// `text` with every stored media reference to an id in `renamed` re-pointed
+/// at that id's new target, or `None` when it holds none of them.
+///
+/// This is the whole of what a transfer does to a note's text. A move
+/// applies it to the note's body and, through the store, to the bodies of
+/// the note's stored versions, which name the same media under the same
+/// ids: versions left behind would differ from the moved note in every
+/// reference the move re-pointed.
+fn retarget_media(text: &str, renamed: &HashMap<String, String>) -> Option<String> {
+    if renamed.is_empty() {
+        return None;
+    }
+    let edits: Vec<_> = refs::extract_media_refs(text)
+        .into_iter()
+        .filter_map(|reference| {
+            let (id, _) = refs::stored_ref(&reference.target)?;
+            Some((reference.destination, renamed.get(id)?))
+        })
+        .collect();
+    if edits.is_empty() {
+        return None;
+    }
+    let mut rewritten = text.to_owned();
+    // Apply back to front so earlier offsets stay valid.
+    for (span, replacement) in edits.into_iter().rev() {
+        rewritten.replace_range(span, replacement);
+    }
+    Some(rewritten)
 }
 
 /// Hard-link `source`'s file into `project_id`'s media directory, where its
@@ -1270,6 +1308,7 @@ mod tests {
     use crate::note_media::tests::PNG;
     use crate::store::images::{take_reference_passes, ReferencePasses};
     use crate::store::models::{Project, ProjectRepo, Session};
+    use crate::store::no_media_retargeted;
 
     struct Fixture {
         store: Store,
@@ -2021,6 +2060,138 @@ mod tests {
 
     /// Staging a move reads what else uses the note's media once, and takes
     /// along exactly the rows the per-image check calls the note's alone.
+    /// A move copies media something else still uses and re-points the note
+    /// at the copies. The note's stored versions name the same media, and
+    /// take the same rewrite: left as written, the viewer would show every
+    /// such image as changed by the note's last revision.
+    #[tokio::test]
+    async fn a_moved_notes_versions_follow_its_media_to_the_copies() {
+        let f = fixture();
+        // A timeline attachment stays on its timeline, so the note gets a
+        // copy; the note's own attachment goes along under its id.
+        let shared = f.attachment_with_session("shared.png", None);
+        let own = f.attachment("own.png");
+        let dropped = f.attachment_with_session("dropped.png", None);
+        let body = |lead: &str, shared_id: &str, last: &str| {
+            format!(
+                "{lead} ![s](staged-media://{shared_id}.png) ![o](staged-media://{}.png){last}\n\n\
+                 ```\n![s](staged-media://{}.png)\n```",
+                own.id, shared.id
+            )
+        };
+        let dropped_ref = format!(" ![d](staged-media://{}.png)", dropped.id);
+        let note = f.note("Shots", &body("Before", &shared.id, &dropped_ref));
+        f.store
+            .update_note_title_and_content(
+                &note.id,
+                "Shots",
+                &body("After", &shared.id, ""),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let moved = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        let copy_id = refs::media_ids(&moved.content)
+            .into_iter()
+            .find(|id| *id != own.id)
+            .expect("the shared image was copied");
+        assert_ne!(copy_id, shared.id);
+        // The reference in the code block is text, not an embed: as written.
+        assert_eq!(moved.content, body("After", &copy_id, ""));
+        // The version reads as the note does but for what the revision
+        // changed: the lead, and the image it dropped, which the move did
+        // not carry and so did not re-point.
+        let previous = f
+            .store
+            .get_previous_note_version(&note.id)
+            .unwrap()
+            .expect("the revision kept a version");
+        assert_eq!(previous.content, body("Before", &copy_id, &dropped_ref));
+    }
+
+    /// The same for a project note and the children that move with it, each
+    /// by the rewrite its own body took.
+    #[tokio::test]
+    async fn a_moved_familys_versions_follow_each_notes_media() {
+        let f = fixture();
+        let mut parent_shot = Image::new(
+            None,
+            &f.source.id,
+            "parent.png",
+            "image/png",
+            PNG.len() as i64,
+            false,
+        );
+        // Without a session it is not the note's to take: it is copied.
+        parent_shot.session_id = None;
+        let path = image_file_path(&f.source.id, &parent_shot.id, &parent_shot.filename).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, PNG).unwrap();
+        f.store.create_image(&parent_shot).unwrap();
+        let child_shot = f.attachment_with_session("child.png", None);
+        let embed = |lead: &str, id: &str| format!("{lead} ![a](staged-media://{id}.png)");
+
+        let parent = ProjectNote::new(&f.source.id, "Plan", &embed("Before", &parent_shot.id));
+        f.store.create_project_note(&parent).unwrap();
+        f.store
+            .update_project_note_title_and_content(
+                &parent.id,
+                "Plan",
+                &embed("After", &parent_shot.id),
+                None,
+                None,
+            )
+            .unwrap();
+        let (child, _session) = f.child_of(&parent, &f.source_branch.id, "Findings");
+        for lead in ["Before", "After"] {
+            f.store
+                .update_note_title_and_content(
+                    &child.id,
+                    "Findings",
+                    &embed(lead, &child_shot.id),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let moved = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        let previous = |note_id: &str| {
+            f.store
+                .get_previous_note_version(note_id)
+                .unwrap()
+                .expect("the revision kept a version")
+                .content
+        };
+        let parent_copy = refs::media_ids(&moved.content).into_iter().next().unwrap();
+        assert_ne!(parent_copy, parent_shot.id);
+        assert_eq!(previous(&parent.id), embed("Before", &parent_copy));
+        let child = f.store.get_note(&child.id).unwrap().unwrap();
+        let child_copy = refs::media_ids(&child.content).into_iter().next().unwrap();
+        assert_ne!(child_copy, child_shot.id);
+        assert_ne!(child_copy, parent_copy);
+        assert_eq!(previous(&child.id), embed("Before", &child_copy));
+    }
+
     #[test]
     fn staging_a_move_checks_its_media_in_one_pass_and_rehomes_what_the_per_image_check_would() {
         let f = fixture();
@@ -2265,6 +2436,7 @@ mod tests {
             &media.content,
             &media.images,
             &media.rehomed,
+            &no_media_retargeted,
         );
         let err = finish(&f.store, TransferMode::Move, &note.content, media, result).unwrap_err();
 
@@ -2322,6 +2494,7 @@ mod tests {
                     &media.content,
                     &media.images,
                     &media.rehomed,
+                    &no_media_retargeted,
                 )
             };
 

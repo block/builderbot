@@ -2,7 +2,8 @@
 //!
 //! An `#[ignore]`d test, so it never runs in CI. It creates a throwaway
 //! SQLite database per dataset size inside `STAGED_BOARD_BENCH_DIR` (which
-//! must not lead into `~/.staged`, through `..` or a symlink either), seeds
+//! must not lead into `~/.staged`, through `..` or a symlink either, nor
+//! into the directory `STAGED_DATA_DIR` names when that is set), seeds
 //! it through the real `Store` write methods, then times the reads the frontend issues to fill the board:
 //! `list_projects`, `get_tag_state`, `get_all_repo_badges`, and the branch
 //! and repo lists of every project. Those lists are timed both ways the app
@@ -311,46 +312,53 @@ fn bench_dir() -> PathBuf {
         std::env::var("STAGED_BOARD_BENCH_DIR")
             .expect("set STAGED_BOARD_BENCH_DIR to a throwaway directory"),
     );
-    let real_data = crate::paths::data_dir().expect("home directory");
-    guarded_bench_dir(&dir, &real_data).unwrap_or_else(|refusal| panic!("{refusal}"))
+    // `~/.staged` as well as the directory `STAGED_DATA_DIR` names: with the
+    // override set, `paths::data_dir()` alone is the scratch directory, and
+    // the installed one would go unguarded.
+    let data_dirs = crate::paths::all_data_dirs();
+    assert!(!data_dirs.is_empty(), "home directory");
+    guarded_bench_dir(&dir, &data_dirs).unwrap_or_else(|refusal| panic!("{refusal}"))
 }
 
 /// [`guarded_scratch_dir`] for the benchmark's directory, where it deletes
 /// and rewrites `data-<n>.db` files.
-fn guarded_bench_dir(dir: &Path, data_dir: &Path) -> Result<PathBuf, String> {
-    guarded_scratch_dir("STAGED_BOARD_BENCH_DIR", dir, data_dir)
+fn guarded_bench_dir(dir: &Path, data_dirs: &[PathBuf]) -> Result<PathBuf, String> {
+    guarded_scratch_dir("STAGED_BOARD_BENCH_DIR", dir, data_dirs)
 }
 
 /// Create a scratch directory and return its real path, or refuse it when
-/// that path is inside `data_dir`. What runs in it writes database files of
-/// its own, so the check is made on where the path really leads, not on how
-/// it is spelled: a relative path, a `..` that climbs back in, and a symlink
-/// into the data directory are all resolved first. `var` is the environment
-/// variable `dir` came from, for the refusal.
+/// that path is inside one of `data_dirs`. What runs in it writes database
+/// files of its own, so the check is made on where the path really leads,
+/// not on how it is spelled: a relative path, a `..` that climbs back in,
+/// and a symlink into a data directory are all resolved first. `var` is the
+/// environment variable `dir` came from, for the refusal.
 ///
-/// Checked before anything is created, so a refused path leaves the data
-/// directory untouched, and once more on the created directory's canonical
-/// path, in case the path changed under the check.
+/// Checked against every data directory before anything is created, so a
+/// refused path leaves them all untouched, and once more on the created
+/// directory's canonical path, in case the path changed under the check.
 pub(crate) fn guarded_scratch_dir(
     var: &str,
     dir: &Path,
-    data_dir: &Path,
+    data_dirs: &[PathBuf],
 ) -> Result<PathBuf, String> {
     // Resolved the same way as the scratch directory, so a symlink on the
-    // way to the data directory does not hide it, whether or not the data
+    // way to a data directory does not hide it, whether or not the data
     // directory exists yet.
-    let real_data_dir = resolve_without_creating(data_dir)?;
-    let refuse_inside_data_dir = |path: &Path| {
-        if path.starts_with(&real_data_dir) {
-            Err(format!(
-                "{var} must not be inside {}: {} resolves to {}",
-                data_dir.display(),
-                dir.display(),
-                path.display()
-            ))
-        } else {
-            Ok(())
-        }
+    let real_data_dirs = data_dirs
+        .iter()
+        .map(|data_dir| Ok((data_dir, resolve_without_creating(data_dir)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    let refuse_inside_data_dir = |path: &Path| match real_data_dirs
+        .iter()
+        .find(|(_, real_data_dir)| path.starts_with(real_data_dir))
+    {
+        Some((data_dir, _)) => Err(format!(
+            "{var} must not be inside {}: {} resolves to {}",
+            data_dir.display(),
+            dir.display(),
+            path.display()
+        )),
+        None => Ok(()),
     };
 
     let resolved = resolve_without_creating(dir)?;
@@ -424,7 +432,8 @@ mod guard_tests {
     fn a_directory_outside_the_data_directory_is_created_and_returned() {
         let (_temp, root, data) = sandbox();
 
-        let dir = guarded_bench_dir(&root.join("bench/run-1"), &data).unwrap();
+        let dir =
+            guarded_bench_dir(&root.join("bench/run-1"), std::slice::from_ref(&data)).unwrap();
 
         assert_eq!(dir, root.join("bench/run-1"));
         assert!(dir.is_dir());
@@ -435,12 +444,13 @@ mod guard_tests {
     fn a_directory_inside_the_data_directory_is_refused_and_not_created() {
         let (_temp, _root, data) = sandbox();
 
-        let refusal = guarded_bench_dir(&data.join("bench"), &data).unwrap_err();
+        let refusal =
+            guarded_bench_dir(&data.join("bench"), std::slice::from_ref(&data)).unwrap_err();
 
         assert!(refusal.contains("must not be inside"), "{refusal}");
         assert!(entries(&data).is_empty());
         // The data directory itself is refused too.
-        assert!(guarded_bench_dir(&data, &data).is_err());
+        assert!(guarded_bench_dir(&data, std::slice::from_ref(&data)).is_err());
     }
 
     /// `std::path::absolute` keeps `..`, so this path does not start with
@@ -455,7 +465,7 @@ mod guard_tests {
             let path = root.join(detour);
             assert!(!path.starts_with(&data), "the spelling hides it: {detour}");
 
-            let refusal = guarded_bench_dir(&path, &data).unwrap_err();
+            let refusal = guarded_bench_dir(&path, std::slice::from_ref(&data)).unwrap_err();
 
             assert!(refusal.contains("must not be inside"), "{refusal}");
         }
@@ -471,7 +481,7 @@ mod guard_tests {
 
         // The link itself, and a directory yet to be made behind it.
         for path in [root.join("link"), root.join("link/bench")] {
-            let refusal = guarded_bench_dir(&path, &data).unwrap_err();
+            let refusal = guarded_bench_dir(&path, std::slice::from_ref(&data)).unwrap_err();
 
             assert!(refusal.contains("must not be inside"), "{refusal}");
         }
@@ -487,8 +497,8 @@ mod guard_tests {
         std::os::unix::fs::symlink(&data, root.join("home-link")).unwrap();
         let spelled = root.join("home-link");
 
-        assert!(guarded_bench_dir(&data.join("bench"), &spelled).is_err());
-        assert!(guarded_bench_dir(&spelled.join("bench"), &spelled).is_err());
+        assert!(guarded_bench_dir(&data.join("bench"), std::slice::from_ref(&spelled)).is_err());
+        assert!(guarded_bench_dir(&spelled.join("bench"), std::slice::from_ref(&spelled)).is_err());
         assert!(entries(&data).is_empty());
     }
 
@@ -503,13 +513,14 @@ mod guard_tests {
         let spelled = root.join("home/.staged");
 
         for path in [spelled.join("bench"), root.join("volume/.staged/bench")] {
-            let refusal = guarded_bench_dir(&path, &spelled).unwrap_err();
+            let refusal = guarded_bench_dir(&path, std::slice::from_ref(&spelled)).unwrap_err();
 
             assert!(refusal.contains("must not be inside"), "{refusal}");
         }
         assert!(!root.join("volume/.staged").exists());
         // Beside it is still outside it.
-        let dir = guarded_bench_dir(&root.join("home/bench"), &spelled).unwrap();
+        let dir =
+            guarded_bench_dir(&root.join("home/bench"), std::slice::from_ref(&spelled)).unwrap();
         assert_eq!(dir, root.join("volume/bench"));
     }
 
@@ -523,18 +534,45 @@ mod guard_tests {
         std::os::unix::fs::symlink(data.join("bench"), root.join("link")).unwrap();
 
         for path in [root.join("link"), root.join("link/run-1")] {
-            let refusal = guarded_bench_dir(&path, &data).unwrap_err();
+            let refusal = guarded_bench_dir(&path, std::slice::from_ref(&data)).unwrap_err();
 
             assert!(refusal.contains("cannot create"), "{refusal}");
         }
         assert!(entries(&data).is_empty());
     }
 
+    /// With `STAGED_DATA_DIR` set, `paths::data_dir()` is the scratch
+    /// directory it names. `~/.staged` is still not the benchmark's to
+    /// write in, and neither is the directory in use.
+    #[test]
+    fn the_installed_directory_is_refused_while_an_override_names_another() {
+        let (_temp, root, _data) = sandbox();
+        let home = root.join("home");
+        let installed = home.join(".staged");
+        let scratch = root.join("scratch");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::create_dir(&scratch).unwrap();
+        let data_dirs =
+            crate::paths::resolve_all_data_dirs(Some(scratch.clone().into()), Some(home));
+
+        for inside in [installed.join("bench"), scratch.join("bench")] {
+            let refusal = guarded_bench_dir(&inside, &data_dirs).unwrap_err();
+
+            assert!(refusal.contains("must not be inside"), "{refusal}");
+        }
+        assert!(entries(&installed).is_empty());
+        assert!(entries(&scratch).is_empty());
+        // Beside both is outside both.
+        let dir = guarded_bench_dir(&root.join("bench"), &data_dirs).unwrap();
+        assert_eq!(dir, root.join("bench"));
+    }
+
     #[test]
     fn a_parent_reference_that_stays_outside_is_resolved() {
         let (_temp, root, data) = sandbox();
 
-        let dir = guarded_bench_dir(&root.join("a/b/../bench"), &data).unwrap();
+        let dir =
+            guarded_bench_dir(&root.join("a/b/../bench"), std::slice::from_ref(&data)).unwrap();
 
         assert_eq!(dir, root.join("a/bench"));
         assert!(!root.join("a/b").exists());

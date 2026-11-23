@@ -21,10 +21,24 @@
     onNext: () => void;
     onPrevious: () => void;
     onClose: () => void;
+    /**
+     * Escape in the field closes the search and goes no further. Without
+     * this the key carries on to whatever else listens for it, so a dialog
+     * around the search closes on the same press.
+     */
+    containEscape?: boolean;
   }
 
-  let { visible, matchCount, currentIndex, onSearch, onNext, onPrevious, onClose }: Props =
-    $props();
+  let {
+    visible,
+    matchCount,
+    currentIndex,
+    onSearch,
+    onNext,
+    onPrevious,
+    onClose,
+    containEscape = false,
+  }: Props = $props();
 
   let inputEl = $state<HTMLInputElement | null>(null);
   let query = $state('');
@@ -44,6 +58,8 @@
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
+      // A dialog's escape layer listens on the document, past this field.
+      if (containEscape) e.stopPropagation();
       onClose();
     } else if (e.key === 'Enter') {
       e.preventDefault();

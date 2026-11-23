@@ -5,7 +5,7 @@ use rusqlite::params;
 
 use super::models::*;
 use super::note_versions::MAX_NOTE_VERSIONS;
-use super::Store;
+use super::{no_media_retargeted, Store};
 
 struct Fixture {
     store: Store,
@@ -510,6 +510,7 @@ fn a_moved_note_keeps_its_versions() {
             "second body",
             &[],
             &[],
+            &no_media_retargeted,
         )
         .unwrap();
 
@@ -549,10 +550,175 @@ fn a_moved_project_note_keeps_its_versions() {
             &[],
             &[],
             &[],
+            &no_media_retargeted,
         )
         .unwrap();
 
     assert_eq!(moved.id, note.id);
     assert_eq!(moved.project_id, target.id);
     assert_eq!(versions(&f.store, &note.id), before);
+}
+
+/// A move re-points the body's references to the media it copied. The
+/// versions take the same rewrite, or every one of those images would read
+/// as changed by the note's last revision.
+#[test]
+fn a_moved_notes_versions_take_the_moves_media_rewrite() {
+    let f = fixture();
+    let target = Project::named("target");
+    f.store.create_project(&target).unwrap();
+    let target_branch = Branch::new(&target.id, "other", "main");
+    f.store.create_branch(&target_branch).unwrap();
+    let note = stub_note(&f);
+    revise(
+        &f.store,
+        &note.id,
+        "Plan",
+        "first ![a](staged-media://old.png)",
+    );
+    revise(
+        &f.store,
+        &note.id,
+        "Plan",
+        "second ![a](staged-media://old.png)",
+    );
+    revise(
+        &f.store,
+        &note.id,
+        "Plan",
+        "third ![a](staged-media://old.png)",
+    );
+    let other = stub_note(&f);
+    revise(
+        &f.store,
+        &other.id,
+        "Other",
+        "first ![a](staged-media://old.png)",
+    );
+    revise(
+        &f.store,
+        &other.id,
+        "Other",
+        "second ![a](staged-media://old.png)",
+    );
+
+    let moved_id = note.id.clone();
+    f.store
+        .move_note_to_branch(
+            &note.id,
+            &f.branch.id,
+            &target_branch.id,
+            "third ![a](staged-media://new.png)",
+            &[],
+            &[],
+            &|note_id, text| {
+                assert_eq!(note_id, moved_id);
+                text.contains("old").then(|| text.replace("old", "new"))
+            },
+        )
+        .unwrap();
+
+    let bodies: Vec<String> = versions(&f.store, &note.id)
+        .into_iter()
+        .map(|version| version.content)
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            "first ![a](staged-media://new.png)",
+            "second ![a](staged-media://new.png)"
+        ]
+    );
+    // A note that did not move is not touched.
+    assert_eq!(
+        versions(&f.store, &other.id)[0].content,
+        "first ![a](staged-media://old.png)"
+    );
+}
+
+/// A branch note's title gains a suffix when the destination has one of the
+/// same name. A version under the old name is the same heading, not a
+/// retitle; one under another name was retitled by a revision.
+#[test]
+fn a_moved_notes_versions_take_the_title_it_lands_with() {
+    let f = fixture();
+    let target = Project::named("target");
+    f.store.create_project(&target).unwrap();
+    let target_branch = Branch::new(&target.id, "other", "main");
+    f.store.create_branch(&target_branch).unwrap();
+    f.store
+        .create_note(&Note::new(&target_branch.id, "Plan", "already here"))
+        .unwrap();
+    let note = stub_note(&f);
+    revise(&f.store, &note.id, "Draft", "first body");
+    revise(&f.store, &note.id, "Plan", "second body");
+    revise(&f.store, &note.id, "Plan", "third body");
+
+    let moved = f
+        .store
+        .move_note_to_branch(
+            &note.id,
+            &f.branch.id,
+            &target_branch.id,
+            "third body",
+            &[],
+            &[],
+            &no_media_retargeted,
+        )
+        .unwrap();
+
+    assert_ne!(moved.title, "Plan");
+    let titles: Vec<String> = versions(&f.store, &note.id)
+        .into_iter()
+        .map(|version| version.title)
+        .collect();
+    assert_eq!(titles, ["Draft".to_string(), moved.title.clone()]);
+    // What the viewer compares the note with reads the same but for the body.
+    let previous = f
+        .store
+        .get_previous_note_version(&note.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(previous.title, moved.title);
+    assert_eq!(previous.content, "second body");
+}
+
+/// A failed move leaves the versions as they were, with the note.
+#[test]
+fn a_refused_move_leaves_the_versions_as_they_were() {
+    let f = fixture();
+    let target = Project::named("target");
+    f.store.create_project(&target).unwrap();
+    let target_branch = Branch::new(&target.id, "other", "main");
+    f.store.create_branch(&target_branch).unwrap();
+    let parent = stub_project_note(&f);
+    revise_project_note(
+        &f.store,
+        &parent.id,
+        "Research",
+        "first ![a](staged-media://old.png)",
+    );
+    revise_project_note(
+        &f.store,
+        &parent.id,
+        "Research",
+        "second ![a](staged-media://old.png)",
+    );
+    let before = versions(&f.store, &parent.id);
+
+    // The body the plan read is not the one the note holds.
+    let refused = f.store.move_project_note_to_project(
+        &parent.id,
+        &f.project.id,
+        "a body read earlier",
+        &target.id,
+        "second ![a](staged-media://new.png)",
+        &[],
+        &[],
+        &[],
+        &|_, text| Some(text.replace("old", "new")),
+    );
+
+    assert!(refused.is_err());
+    assert_eq!(versions(&f.store, &parent.id), before);
 }

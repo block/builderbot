@@ -139,7 +139,7 @@ export function computeNoteDiff(
  * unchanged lines between them, so a pair can sit on opposite sides of one: a
  * block that was edited and moved, or just moved. Such a pair cannot be one
  * op in an ordered list. Each half is emitted where it stands, as a removal
- * and an addition.
+ * and an addition, without taking apart a later pair that stands together.
  */
 function walkOps(
   previous: readonly NoteDiffUnit[],
@@ -147,6 +147,7 @@ function walkOps(
   lineDiff: ReturnType<typeof computeLineDiff>
 ): NoteDiffOp[] {
   const pairs = new Map(lineDiff.modifiedPairs.map((pair) => [pair.beforeLineIndex, pair]));
+  const pairsByAfter = new Map(lineDiff.modifiedPairs.map((pair) => [pair.afterLineIndex, pair]));
   const ops: NoteDiffOp[] = [];
   let p = 0;
   let c = 0;
@@ -180,8 +181,14 @@ function walkOps(
       ops.push({ type: 'added', currentIndex: c++ });
       continue;
     }
-    // Half of a pair that straddles an unchanged unit.
-    if (before === 'modified') {
+    // Half of a pair that straddles an unchanged unit. When both sides hold
+    // one they are halves of two pairs, and pairs do not cross, so one of
+    // them has its other half behind it already and stands alone. That one
+    // goes first: emitting the other would take apart a pair whose halves
+    // are about to meet.
+    const afterPair = after === 'modified' ? pairsByAfter.get(c) : undefined;
+    const afterIsOrphan = afterPair !== undefined && afterPair.beforeLineIndex < p;
+    if (before === 'modified' && !afterIsOrphan) {
       ops.push({ type: 'removed', previousIndex: p++ });
       continue;
     }

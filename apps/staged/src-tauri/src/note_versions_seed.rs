@@ -90,7 +90,7 @@ fn guarded_seed_dir(dir: &Path, installed_data_dir: &Path) -> Result<PathBuf, St
             dir.display()
         ));
     }
-    guarded_scratch_dir(SEED_DIR_ENV, dir, installed_data_dir)
+    guarded_scratch_dir(SEED_DIR_ENV, dir, &[installed_data_dir.to_path_buf()])
 }
 
 /// Where `path` would be were `data_dir` the data directory. `path` comes

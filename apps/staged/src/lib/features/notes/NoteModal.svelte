@@ -40,7 +40,8 @@
   the window has room for two panes; elsewhere it scrolls to the change and
   keeps it lit. The previous version takes the place the chat would, so
   opening either closes the other. Escape closes the previous version before
-  it closes the note.
+  it closes the note; in the find field it closes the search and nothing
+  else.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -359,27 +360,35 @@
   // (video, unreadable file, failed lookup) is kept as null so it is not
   // asked again and renders on the CSS caps alone.
   let mediaDimensions = $state<Record<string, ImageDimensions | null>>({});
+  /** The ids a lookup is out for, so no id is asked for twice. */
+  const mediaDimensionsAsked = new Set<string>();
   let noteMediaImageIds = $derived(collectStagedMediaImageIds(noteMarkdown));
   let mediaDimensionsKnown = $derived(noteMediaImageIds.every((id) => id in mediaDimensions));
+  // The previous version's images are looked up here too. Its ids arrive
+  // while the note's own lookup may still be out, and that lookup is left to
+  // answer: every answer is kept, whatever the viewer shows by then, since
+  // it is true of the id for good. Dropping it to ask again with the new
+  // ids would hold the note's first render back for a second round trip.
   $effect(() => {
     if (!open) return;
     const wanted = new Set([...noteMediaImageIds, ...previousMediaImageIds]);
-    const missing = [...wanted].filter((id) => !(id in mediaDimensions));
+    const missing = [...wanted].filter(
+      (id) => !(id in mediaDimensions) && !mediaDimensionsAsked.has(id)
+    );
     if (!missing.length) return;
-    let cancelled = false;
+    for (const id of missing) mediaDimensionsAsked.add(id);
     const record = (found: Record<string, ImageDimensions>) => {
-      if (cancelled) return;
       const next = { ...mediaDimensions };
-      for (const id of missing) next[id] = found[id] ?? null;
+      for (const id of missing) {
+        next[id] = found[id] ?? null;
+        mediaDimensionsAsked.delete(id);
+      }
       mediaDimensions = next;
     };
     getMediaDimensions(missing).then(record, (error) => {
       console.warn('Failed to load note image dimensions', error);
       record({});
     });
-    return () => {
-      cancelled = true;
-    };
   });
   // The note is not rendered until everything its render needs is in — its
   // images' dimensions (a local lookup) and, for a note with a pikchr
@@ -1038,6 +1047,7 @@
               visible={searchVisible}
               {matchCount}
               currentIndex={currentMatchIndex}
+              containEscape
               onSearch={performSearch}
               onNext={nextMatch}
               onPrevious={previousMatch}

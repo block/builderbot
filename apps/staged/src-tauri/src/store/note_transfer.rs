@@ -24,6 +24,16 @@
 //! would otherwise be silently overwritten; matching zero rows fails the
 //! transaction instead, so the media rows roll back with it.
 //!
+//! A moved note's stored versions (see `note_versions`) are rewritten as its
+//! body and title are, in the same transaction. The body arrives with the
+//! references to copied media re-pointed at the copies, and the title may
+//! gain a suffix to stay unique on the destination branch; versions left as
+//! they were would differ from the note in both, and the viewer would show a
+//! move as a change to every image it re-pointed and to the heading. The
+//! store does not parse markdown, so the caller hands over the rewrite it
+//! applied to the body as a function ([`MediaRetarget`]) and the versions are
+//! read and put through it here, where no revision can land in between.
+//!
 //! A project-note move keys the parent's and every child's `UPDATE` on the
 //! body the caller read, too. The body it hands over, and the media rows
 //! that come with it, were rewritten from that read, and staging the media
@@ -35,6 +45,17 @@ use rusqlite::{params, OptionalExtension, Transaction};
 
 use super::models::{Branch, Image, Note, ProjectNote, ProjectRepo};
 use super::{now_timestamp, Store, StoreChange, StoreError};
+
+/// A move's media rewrite, for text the store reads under the transaction:
+/// given a moving note's id and a text that note held before (the body of one
+/// of its versions), the text with its media references re-pointed as the
+/// note's body was, or `None` when it holds none that the move re-pointed.
+pub type MediaRetarget<'a> = &'a dyn Fn(&str, &str) -> Option<String>;
+
+/// The [`MediaRetarget`] of a move that re-pointed no media.
+pub fn no_media_retargeted(_note_id: &str, _text: &str) -> Option<String> {
+    None
+}
 
 /// One child note's share of a project-note move: where the command layer
 /// last saw it and what its body read then, the destination branch it
@@ -126,6 +147,11 @@ impl Store {
     /// that parent cascade into another project. (A project note moved
     /// through [`Store::move_project_note_to_project`] takes its children
     /// with it instead.)
+    ///
+    /// The note's versions take the same rewrite: `retarget` is the one that
+    /// turned the note's body into `content`, and a version that carries the
+    /// title the note had takes the title it lands with.
+    #[allow(clippy::too_many_arguments)]
     pub fn move_note_to_branch(
         &self,
         note_id: &str,
@@ -134,6 +160,7 @@ impl Store {
         content: &str,
         media: &[Image],
         rehomed: &[Image],
+        retarget: MediaRetarget<'_>,
     ) -> Result<Note, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -172,6 +199,7 @@ impl Store {
         if changed != 1 {
             return Err(relocated_during_transfer(&existing.title));
         }
+        Self::carry_move_into_note_versions(&tx, note_id, &existing.title, &title, retarget)?;
         // The note's session is scheduled by `sessions.branch_id`, so it moves
         // with the note; otherwise the destination branch would never see the
         // session as queued or running work, and its completion would drain
@@ -239,6 +267,8 @@ impl Store {
     /// child the plan did not cover (spawned, moved or re-parented since it was
     /// made) fails the whole transaction rather than leaving a cross-project
     /// link behind.
+    ///
+    /// `retarget` covers the parent and every child, each by its id.
     #[allow(clippy::too_many_arguments)]
     pub fn move_project_note_to_project(
         &self,
@@ -250,6 +280,7 @@ impl Store {
         media: &[Image],
         rehomed: &[Image],
         children: &[ChildNoteMove],
+        retarget: MediaRetarget<'_>,
     ) -> Result<ProjectNote, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -327,6 +358,13 @@ impl Store {
                     relocated_during_transfer(&child_title)
                 });
             }
+            Self::carry_move_into_note_versions(
+                &tx,
+                &child.note_id,
+                &child_title,
+                &title,
+                retarget,
+            )?;
             // Same as `move_note_to_branch`: the session is scheduled by
             // `sessions.branch_id` and has to arrive with its note.
             if let Some(session_id) = session_id.as_deref() {
@@ -393,6 +431,14 @@ impl Store {
                 Some(false) => updated_during_transfer(&existing.title),
             });
         }
+        // A project note keeps its title through a move.
+        Self::carry_move_into_note_versions(
+            &tx,
+            note_id,
+            &existing.title,
+            &existing.title,
+            retarget,
+        )?;
         tx.commit()?;
 
         self.publish(StoreChange::Notes {
@@ -709,6 +755,7 @@ mod tests {
                 "new body",
                 std::slice::from_ref(&image),
                 &[],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -749,6 +796,7 @@ mod tests {
                 "body",
                 &[],
                 &[],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -791,6 +839,7 @@ mod tests {
                     "new body",
                     std::slice::from_ref(&image),
                     &[],
+                    &no_media_retargeted,
                 )
                 .unwrap_err();
 
@@ -826,6 +875,7 @@ mod tests {
                 "body",
                 &[],
                 &[],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -850,6 +900,7 @@ mod tests {
                 "mine",
                 &[],
                 &[],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -874,6 +925,7 @@ mod tests {
                 "body",
                 std::slice::from_ref(&image),
                 &[],
+                &no_media_retargeted,
             )
             .unwrap_err();
 
@@ -911,6 +963,7 @@ mod tests {
                 "new body",
                 std::slice::from_ref(&image),
                 &[],
+                &no_media_retargeted,
             )
             .unwrap_err();
 
@@ -962,6 +1015,7 @@ mod tests {
                 std::slice::from_ref(&image),
                 &[],
                 &[child_move(&child, &f.target_branch.id)],
+                &no_media_retargeted,
             )
             .unwrap_err();
 
@@ -1021,6 +1075,7 @@ mod tests {
                     std::slice::from_ref(&image),
                     &[],
                     std::slice::from_ref(&plan),
+                    &no_media_retargeted,
                 )
                 .unwrap_err();
 
@@ -1088,6 +1143,7 @@ mod tests {
                     std::slice::from_ref(&image),
                     &[],
                     std::slice::from_ref(&plan),
+                    &no_media_retargeted,
                 )
                 .unwrap_err();
 
@@ -1133,6 +1189,7 @@ mod tests {
                 &[],
                 &[],
                 &[child_move(&child, &f.target_branch.id)],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -1176,6 +1233,7 @@ mod tests {
                     media: vec![image.clone()],
                     ..child_move(&child, &f.target_branch.id)
                 }],
+                &no_media_retargeted,
             )
             .unwrap_err();
 
@@ -1220,6 +1278,7 @@ mod tests {
                 &[],
                 &[],
                 &[child_move(&planned, &f.target_branch.id)],
+                &no_media_retargeted,
             )
             .unwrap_err();
 
@@ -1308,6 +1367,7 @@ mod tests {
                     media: vec![image.clone()],
                     ..child_move(&child, &f.target_branch.id)
                 }],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -1386,6 +1446,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -1474,6 +1535,7 @@ mod tests {
                 &content,
                 &[],
                 &[rehomed_onto(&f, &image, "shot 2.png", &owner.id)],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -1529,6 +1591,7 @@ mod tests {
                     &content,
                     &[],
                     &[rehomed_onto(&f, &image, "shot.png", &session.id)],
+                    &no_media_retargeted,
                 )
                 .unwrap_err();
 
@@ -1578,6 +1641,7 @@ mod tests {
                 &content,
                 &[],
                 &rehomed,
+                &no_media_retargeted,
             )
             .unwrap();
         assert_eq!(
@@ -1597,6 +1661,7 @@ mod tests {
                 &content,
                 &[],
                 &[],
+                &no_media_retargeted,
             )
             .unwrap();
         assert_eq!(take_reference_passes(), ReferencePasses::default());
@@ -1658,6 +1723,7 @@ mod tests {
                     &content,
                     &[],
                     &rehomed,
+                    &no_media_retargeted,
                 )
                 .unwrap_err();
 
@@ -1700,6 +1766,7 @@ mod tests {
                     ..image.clone()
                 }],
                 &[],
+                &no_media_retargeted,
             )
             .unwrap();
 
@@ -1802,6 +1869,7 @@ mod tests {
                 &self.media,
                 &self.rehomed,
                 std::slice::from_ref(&self.plan),
+                &no_media_retargeted,
             )
         }
 

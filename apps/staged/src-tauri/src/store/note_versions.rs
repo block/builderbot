@@ -13,11 +13,21 @@
 //! at most one row across the two tables. Rows go when their note does, by
 //! trigger (migration 0051), and a move between projects keeps the note's id
 //! and so its versions. A copy is a new note and starts with none.
+//!
+//! A move is not a revision, but it does rewrite the note: references to
+//! media it copied are re-pointed at the copies, and a branch note's title
+//! may gain a suffix to stay unique where it lands. The note's versions are
+//! rewritten the same way, in the move's transaction
+//! ([`Store::carry_move_into_note_versions`]), so that what differs between
+//! a note and its previous version is only ever what a revision changed.
+//! References a version holds to media the note no longer embeds are not
+//! part of the move and stay as written.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::models::NoteVersion;
+use super::note_transfer::MediaRetarget;
 use super::{Store, StoreError};
 
 /// How many versions a note keeps. Each revision past this drops the oldest.
@@ -86,6 +96,43 @@ impl Store {
                )",
             params![note_id, MAX_NOTE_VERSIONS as i64],
         )?;
+        Ok(())
+    }
+
+    /// Rewrite `note_id`'s versions as a move rewrote the note, on the
+    /// move's transaction.
+    ///
+    /// `retarget` is the media rewrite that was applied to the note's body
+    /// (see [`MediaRetarget`]); each version's body is put through it. A
+    /// version that carries `title_before`, the title the note had going in,
+    /// takes `title_after`, the one it lands with: the same heading renamed
+    /// by the move, where a version with any other title was retitled by a
+    /// revision and still shows as one.
+    pub(super) fn carry_move_into_note_versions(
+        conn: &Connection,
+        note_id: &str,
+        title_before: &str,
+        title_after: &str,
+        retarget: MediaRetarget<'_>,
+    ) -> Result<(), StoreError> {
+        if title_before != title_after {
+            conn.execute(
+                "UPDATE note_versions SET title = ?1 WHERE note_id = ?2 AND title = ?3",
+                params![title_after, note_id, title_before],
+            )?;
+        }
+        let bodies: Vec<(String, String)> = conn
+            .prepare("SELECT id, content FROM note_versions WHERE note_id = ?1")?
+            .query_map(params![note_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        for (version_id, content) in bodies {
+            if let Some(rewritten) = retarget(note_id, &content) {
+                conn.execute(
+                    "UPDATE note_versions SET content = ?1 WHERE id = ?2",
+                    params![rewritten, version_id],
+                )?;
+            }
+        }
         Ok(())
     }
 

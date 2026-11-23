@@ -245,6 +245,41 @@ describe('NoteChangeBar', () => {
     expect(marker('added').classList.contains('is-pointed')).toBe(true);
   });
 
+  it('scrolls the note to the gap a removal left while the previous version is not shown', () => {
+    const { noteDiff, scrollEl } = render(PREVIOUS_NOTE);
+
+    noteDiff.select(noteDiff.hunks[0].id, false);
+    flushSync();
+
+    // The gap is 200px down the note, above "See the design doc".
+    expect(scrollEl.scrollTop).toBe(100);
+  });
+
+  it('leaves a removal to the previous version’s pane once that is measured', () => {
+    const { noteDiff, contentEl, scrollEl } = render(PREVIOUS_NOTE);
+    // The previous version is shown and laid out as the note is: its pane
+    // puts the removed paragraph on its line, and the note follows it.
+    noteDiff.setBoxes(
+      'previous',
+      noteDiff.previousUnits!.map((_, index) => ({ top: index * 100, height: 100 }))
+    );
+    scrollEl.scrollTop = 40;
+
+    noteDiff.select(noteDiff.hunks[0].id, true);
+    flushSync();
+    expect(scrollEl.scrollTop).toBe(40);
+
+    // Nor on a new layout.
+    layOut(contentEl, scrollEl, 150);
+    resize();
+    expect(scrollEl.scrollTop).toBe(40);
+
+    // A change the note has blocks for is still the note's to place.
+    noteDiff.select(noteDiff.hunks[1].id, true);
+    flushSync();
+    expect(scrollEl.scrollTop).toBe(250);
+  });
+
   it('keeps the selected change on its line through a new layout, until the reader scrolls', () => {
     const { noteDiff, contentEl, scrollEl } = render(PREVIOUS_NOTE);
     noteDiff.select(noteDiff.hunks[1].id, false);

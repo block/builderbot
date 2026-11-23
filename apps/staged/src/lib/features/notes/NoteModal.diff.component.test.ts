@@ -86,10 +86,12 @@ import {
   HUNK_KINDS,
   PREVIOUS_NOTE,
 } from './testStubs/noteDiffFixtures';
+import { runSearchShortcut } from '../keyboard/searchTargets';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 import { viewport } from '../../shared/viewport.svelte';
 
 const MEDIA_ID = '3f2a9c1e-1234-4567-8123-123456789abc';
+const NOTE_MEDIA_ID = '7b1d4e2a-9876-4abc-8def-0123456789ab';
 const NOTE_DIALOG_WIDTH = 700;
 
 const stored = (markdown: string) => {
@@ -152,11 +154,20 @@ async function press(el: HTMLElement) {
   await settle();
 }
 
-async function pressEscape() {
-  document.dispatchEvent(
+async function pressEscape(target: EventTarget = document) {
+  target.dispatchEvent(
     new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
   );
   await settle();
+}
+
+const searchBar = () => document.querySelector<HTMLElement>('.search-bar');
+
+/** Open find-in-note, as the search shortcut does, and return its field. */
+async function openSearch() {
+  runSearchShortcut('find');
+  await settle();
+  return searchBar()!.querySelector<HTMLInputElement>('input')!;
 }
 
 beforeEach(() => {
@@ -252,6 +263,41 @@ describe('NoteModal change bar', () => {
   });
 });
 
+describe('NoteModal image sizes', () => {
+  it('does not hold the note back for the images of its previous version', async () => {
+    // Each lookup waits for the test, as a slow one would.
+    const lookups: {
+      ids: string[];
+      answer: (found: Record<string, ImageDimensions>) => void;
+    }[] = [];
+    commands.getMediaDimensions.mockImplementation(
+      (ids) => new Promise((answer) => lookups.push({ ids, answer }))
+    );
+    const withImage = (markdown: string, id: string) =>
+      `${markdown}\n\n![Figure](staged-media://${id}.png)`;
+    commands.getNotePreviousVersion.mockResolvedValue(
+      versionOf(withImage(PREVIOUS_NOTE, MEDIA_ID))
+    );
+
+    // The previous version arrives while the note's own lookup is out.
+    await open(stored(withImage(CURRENT_NOTE, NOTE_MEDIA_ID)));
+    // Its image is asked for on its own: the note's is not asked for twice.
+    expect(lookups.map((lookup) => lookup.ids)).toEqual([[NOTE_MEDIA_ID], [MEDIA_ID]]);
+    expect(notePane().querySelector('.markdown-content')).toBeNull();
+
+    // The note renders on its own lookup's answer, the other still out.
+    lookups[0].answer({ [NOTE_MEDIA_ID]: { width: 640, height: 480, density: 2 } });
+    await settle();
+    expect(note().querySelector('.markdown-media img')!.getAttribute('width')).toBe('320');
+    expect(bar()).toBeNull();
+
+    lookups[1].answer({ [MEDIA_ID]: { width: 200, height: 100, density: 1 } });
+    await settle();
+    expect(markers().length).toBeGreaterThan(0);
+    expect(lookups).toHaveLength(2);
+  });
+});
+
 describe('NoteModal previous version', () => {
   it('opens the previous version beside the note on a marker press, in the chat’s place', async () => {
     const { onChatOpenChange } = await open({ chatOpen: true });
@@ -336,6 +382,40 @@ describe('NoteModal previous version', () => {
 
     await pressEscape();
 
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('closes only the search on Escape in the find field, and keeps the previous version', async () => {
+    const { onClose } = await open();
+    await press(marker('modified'));
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
+    expect(previousPane()).not.toBeNull();
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The next Escape is the previous version's, and the one after the note's.
+    await pressEscape();
+    expect(previousPane()).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    await pressEscape();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('closes only the search on Escape in the find field when nothing of the diff is open', async () => {
+    const { onClose } = await open();
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
+    expect(dialog()).not.toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await pressEscape();
     expect(onClose).toHaveBeenCalledOnce();
   });
 

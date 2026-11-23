@@ -996,6 +996,7 @@
             onProjectTitleElement={selectedProjectId ? setProjectTitleElement : undefined}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
+            onRetryWorkspace={(branchId) => workspaceLifecycle.retryWorkspace(project.id, branchId)}
             {tagPickerRequest}
           />
         {/each}

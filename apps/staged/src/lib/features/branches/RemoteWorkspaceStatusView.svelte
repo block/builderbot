@@ -1,6 +1,7 @@
 <script lang="ts">
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import CirclePause from '@lucide/svelte/icons/circle-pause';
+  import { Button } from '$lib/components/ui/button';
   import Spinner from '../../shared/Spinner.svelte';
   import type { WorkspaceStatus } from '../../types';
 
@@ -8,9 +9,11 @@
     status: WorkspaceStatus;
     workspaceError?: string;
     fallbackError?: string | null;
+    /** Set the branch up again from `error`; no Retry button without it. */
+    onRetry?: () => void;
   }
 
-  let { status, workspaceError, fallbackError = null }: Props = $props();
+  let { status, workspaceError, fallbackError = null, onRetry }: Props = $props();
 </script>
 
 {#if status === 'starting'}
@@ -36,6 +39,9 @@
     <AlertCircle size={20} />
     <span class="status-text">Workspace error</span>
     <span class="status-hint">{workspaceError ?? fallbackError ?? 'Something went wrong.'}</span>
+    {#if onRetry}
+      <Button variant="outline" size="sm" class="mt-1" onclick={() => onRetry?.()}>Retry</Button>
+    {/if}
   </div>
 {/if}
 

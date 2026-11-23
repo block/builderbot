@@ -25,6 +25,7 @@ async fn dropping_the_request_future_mid_pull_no_longer_strands_the_marker() {
         Arc::clone(&store),
         Arc::clone(&registry),
         branch.id.clone(),
+        |_marker_session_id| async { Ok(()) },
         move || {
             released.recv().map_err(|e| e.to_string())?;
             Ok(())

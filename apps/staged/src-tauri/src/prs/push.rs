@@ -389,6 +389,10 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
     }
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    // No check that the clone is on the branch (`ensure_pipeline_checkout`):
+    // the push names its local branch in an explicit refspec, so it works
+    // from whatever the clone has checked out, a sibling branch with a live
+    // session included.
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
     let steps = build_push_pipeline_steps(&ctx.branch.branch_name, &remote_branch, variant);
 

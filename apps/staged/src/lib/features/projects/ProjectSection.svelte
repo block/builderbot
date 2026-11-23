@@ -93,6 +93,7 @@
     onProjectTitleElement?: (element: HTMLHeadingElement | null) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;
+    onRetryWorkspace?: (branchId: string) => void;
     /** Bumped to open the tag picker (the T shortcut, from ProjectHome). */
     tagPickerRequest?: number;
   }
@@ -113,6 +114,7 @@
     onProjectTitleElement,
     onRepoSelected,
     onRetryWorktree,
+    onRetryWorkspace,
     tagPickerRequest = 0,
   }: Props = $props();
 
@@ -1236,6 +1238,7 @@
         onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
         onMove={(targetProjectId) => onMoveBranch?.(branch.id, targetProjectId)}
         onRetryWorktree={() => onRetryWorktree?.(branch.id)}
+        onRetryWorkspace={onRetryWorkspace ? () => onRetryWorkspace(branch.id) : undefined}
       />
     {/each}
   </div>

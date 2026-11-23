@@ -5439,11 +5439,13 @@ fn mark_ai_handoff_step_failed<R: tauri::Runtime>(
 /// Error message for an aborted pipeline, or `None` when the abort is an expected
 /// outcome the session should still complete with.
 ///
-/// Only a pull produces an error. A push rejected as non-fast-forward completes so
+/// Only a push produces none. A push rejected as non-fast-forward completes so
 /// the frontend can read the steps and offer a force push, but a pull that can't
 /// fast-forward is a dead end whose fix is a user decision (rebase onto origin, or
 /// reset to origin) — and a pull drained off the branch queue runs headless, so
-/// the error status is the only way the user hears about it.
+/// the error status is the only way the user hears about it. The pull request
+/// pipeline's abort is a dead end too: the checkout has no local branch to push
+/// (`prs::create_pr`), and a completed session would read as "no PR URL found".
 ///
 /// The failing step's output is read back from the persisted pipeline, which
 /// `run_pipeline` writes before it returns `Aborted`.
@@ -5452,7 +5454,7 @@ fn aborted_pipeline_error(
     store: &Store,
     step_index: usize,
 ) -> Option<String> {
-    if config.pipeline.kind.as_ref() != Some(&PipelineKind::Pull) {
+    if config.pipeline.kind.as_ref() == Some(&PipelineKind::Push) {
         return None;
     }
 
@@ -5463,7 +5465,11 @@ fn aborted_pipeline_error(
         .and_then(|session| session.pipeline)
         .and_then(|pipeline| pipeline.steps.into_iter().nth(step_index));
     let Some(step) = step else {
-        return Some("Pull failed".to_string());
+        let what = match config.pipeline.kind {
+            Some(PipelineKind::Pull) => "Pull",
+            _ => "Pipeline",
+        };
+        return Some(format!("{what} failed"));
     };
 
     let detail = step
@@ -12806,13 +12812,14 @@ draft file"
     /// A session whose pipeline recorded `step_index` as failed, mirroring what
     /// `run_pipeline` persists before it returns `Aborted`.
     fn store_with_aborted_pipeline(
-        kind: PipelineKind,
+        kind: impl Into<Option<PipelineKind>>,
         steps: &[PipelineStep],
         step_index: usize,
         output: Option<&str>,
     ) -> (Store, PipelineConfig) {
         let store = Store::in_memory().unwrap();
-        let mut pipeline = PipelineExecution::from_steps(steps).with_kind(kind.clone());
+        let mut pipeline = PipelineExecution::from_steps(steps);
+        pipeline.kind = kind.into();
         pipeline.steps[step_index].status = StepStatus::Failed;
         pipeline.steps[step_index].output = output.map(str::to_string);
         let mut session =
@@ -12873,6 +12880,26 @@ draft file"
         assert_eq!(
             aborted_pipeline_error(&config, &store, 0).unwrap(),
             "Fetch origin/feature failed"
+        );
+    }
+
+    /// The pull request pipeline has no kind and aborts in one place: its
+    /// first step found no local branch to push. That ends the session in
+    /// `error` with the step's words, not `completed`, which the frontend
+    /// would report as a pull request session that printed no URL.
+    #[test]
+    fn aborted_pull_request_pipeline_reports_why_it_stopped() {
+        let steps = vec![abort_step("Check local branch")];
+        let (store, config) = store_with_aborted_pipeline(
+            None::<PipelineKind>,
+            &steps,
+            0,
+            Some("Local branch 'feature' does not exist in this clone.\n"),
+        );
+
+        assert_eq!(
+            aborted_pipeline_error(&config, &store, 0).unwrap(),
+            "Check local branch failed:\n\nLocal branch 'feature' does not exist in this clone."
         );
     }
 

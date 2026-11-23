@@ -129,7 +129,15 @@ pub(crate) async fn transfer_project_impl(
     // The guard has dropped either way — unwound, if the task panicked
     // outside the run's own catch — so what was queued for the transfer
     // waits on nothing now.
-    let release = || crate::session_queue::release_held_work(&app_handle, &store, &branch_ids);
+    //
+    // A transfer that stopped short may have resumed a workspace and left
+    // rows `Starting` whose clone it did not read as on their branch
+    // (`mark_resumed_rows_running`). Setup refused them while the transfer
+    // ran; it is asked for here, or they would wait for a window to load.
+    let release = || {
+        crate::workspace_setup::set_up_branches_left_starting(&app_handle, &store, &branch_ids);
+        crate::session_queue::release_held_work(&app_handle, &store, &branch_ids)
+    };
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {

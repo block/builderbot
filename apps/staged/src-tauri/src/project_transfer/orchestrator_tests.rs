@@ -227,6 +227,8 @@ struct FakeHost {
     /// Called at the start of every script run, at either end, on the
     /// thread running it.
     script_hook: Mutex<Option<Arc<dyn Fn(Side, &str) + Send + Sync>>>,
+    /// Called as a resume that worked returns, on the thread that asked.
+    resume_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl FakeHost {
@@ -249,6 +251,7 @@ impl FakeHost {
             script_vars: Mutex::default(),
             ignored_cap: Mutex::default(),
             script_hook: Mutex::default(),
+            resume_hook: Mutex::default(),
         };
         for repo in repos {
             let origin = host.origin(repo);
@@ -373,6 +376,11 @@ impl FakeHost {
     /// Run `hook` at the start of every script run from now on.
     fn on_every_script(&self, hook: impl Fn(Side, &str) + Send + Sync + 'static) {
         *self.script_hook.lock().unwrap() = Some(Arc::new(hook));
+    }
+
+    /// Run `hook` as every resume that worked returns, from now on.
+    fn on_resume(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.resume_hook.lock().unwrap() = Some(Arc::new(hook));
     }
 }
 
@@ -518,6 +526,10 @@ impl TransferHost for FakeHost {
             return Err(TransferError::Cancelled.to_string());
         }
         self.set_state(name, WorkspaceState::Running);
+        let hook = self.resume_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(())
     }
 
@@ -2644,6 +2656,100 @@ fn a_resume_honours_cancel_and_leaves_the_rows_running() {
     assert!(cancelled.result.is_err());
     assert_eq!(f.host.calls().iter().filter(|c| **c == resume).count(), 2);
     assert_eq!(status(), Some(WorkspaceStatus::Running), "resumed");
+}
+
+/// A resume vouches for the workstation being up, not for what its clone
+/// has checked out, and `Running` means both. A row whose clone the
+/// transfer's own inspection read as on another branch is left `Starting`
+/// when the transfer is blocked, not `Suspended` on a workstation that is
+/// up: `Starting` is what branch setup, asked for once the transfer has
+/// ended, acts on.
+#[test]
+fn a_resumed_row_whose_clone_is_on_another_branch_is_left_starting() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer(true).result.expect("to remote");
+    git(&f.checkout(0), &["checkout", "-b", "elsewhere"]);
+    f.host.set_state(&f.workspace(), WorkspaceState::Suspended);
+    f.store
+        .update_workspace_status_by_workspace_name(&f.workspace(), &WorkspaceStatus::Suspended)
+        .unwrap();
+
+    let err = f.transfer(true).result.unwrap_err();
+
+    assert!(f
+        .host
+        .calls()
+        .contains(&format!("resume {}", f.workspace())));
+    assert!(err.contains("has elsewhere checked out"), "{err}");
+    let row = f.store.get_branch(&f.branches[0].id).unwrap().unwrap();
+    assert_eq!(row.workspace_status, Some(WorkspaceStatus::Starting));
+    // The transfer is over and the row is one the setup trigger takes.
+    assert!(!crate::project_transfer::is_branch_transferring(&row.id));
+    assert_eq!(
+        crate::workspace_setup::startup_action(&row),
+        Some(crate::workspace_setup::StartupAction::SetUp)
+    );
+}
+
+/// The two ways a transfer stops between a resume that worked and its
+/// reading of the clones: a cancel that lands as the resume finishes, and a
+/// second inspection that fails (here: cancelled while it reads). The
+/// workstation is up and nothing was read, so the rows say `Starting`, which
+/// the setup trigger takes once the transfer has ended. They used to stay
+/// `Suspended`, which nothing polls.
+#[test]
+fn a_transfer_that_stops_right_after_a_resume_leaves_the_rows_starting() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer(true).result.expect("to remote");
+    let suspend = || {
+        f.host.set_state(&f.workspace(), WorkspaceState::Suspended);
+        f.store
+            .update_workspace_status_by_workspace_name(&f.workspace(), &WorkspaceStatus::Suspended)
+            .unwrap();
+    };
+    let left_starting = |how: &str| {
+        let row = f.store.get_branch(&f.branches[0].id).unwrap().unwrap();
+        assert_eq!(
+            row.workspace_status,
+            Some(WorkspaceStatus::Starting),
+            "{how}"
+        );
+        assert!(!crate::project_transfer::is_branch_transferring(&row.id));
+        assert_eq!(
+            crate::workspace_setup::startup_action(&row),
+            Some(crate::workspace_setup::StartupAction::SetUp),
+            "{how}"
+        );
+    };
+    let resumes = || {
+        let resume = format!("resume {}", f.workspace());
+        f.host.calls().iter().filter(|c| **c == resume).count()
+    };
+
+    suspend();
+    let project_id = f.project.id.clone();
+    f.host.on_resume(move || {
+        registry::cancel(&project_id);
+    });
+    let err = f.transfer(true).result.unwrap_err();
+    assert!(err.contains("transfer was cancelled"), "{err}");
+    assert_eq!(resumes(), 1);
+    left_starting("cancelled as the resume finished");
+
+    suspend();
+    let resumed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&resumed);
+    f.host.on_resume(move || flag.store(true, Ordering::SeqCst));
+    let project_id = f.project.id.clone();
+    f.host.on_every_script(move |_, _| {
+        if resumed.load(Ordering::SeqCst) {
+            registry::cancel(&project_id);
+        }
+    });
+    let err = f.transfer(true).result.unwrap_err();
+    assert!(err.contains("transfer was cancelled"), "{err}");
+    assert_eq!(resumes(), 2);
+    left_starting("the inspection after the resume failed");
 }
 
 // ---------------------------------------------------------------------------

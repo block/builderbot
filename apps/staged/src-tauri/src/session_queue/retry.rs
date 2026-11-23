@@ -15,6 +15,11 @@
 //! a fresh first attempt anyway. Entries are pruned on every drain to the rows
 //! still queued on the branch, so a row a Stop or a forced start took leaves
 //! nothing behind.
+//!
+//! A start that fails over something that is not the row's failure and will
+//! clear on its own is held instead ([`QueuedStartAttempts::hold`]): the
+//! row keeps its place and its attempts, and is looked at again after
+//! [`QUEUE_HOLD_RECHECK`].
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -53,11 +58,22 @@ pub(crate) fn queued_start_retry(failures: u32) -> QueuedStartRetry {
     }
 }
 
+/// How long a held row waits before the drain looks at what holds it again.
+/// A recheck is a database read, so it is short: the queue moves within
+/// seconds of the cause going away. It also tells the reconcile service
+/// that the queue waits on a `disconnected` holder, which costs a Blox call
+/// only when that service lets the ask through: once per
+/// `reconcile::QUEUE_HOLD_MIN_SPACING` for the holder, not on each recheck.
+pub(crate) const QUEUE_HOLD_RECHECK: Duration = Duration::from_secs(5);
+
 struct Attempt {
     failures: u32,
     /// When the next start may be tried; a kick before then leaves the row
     /// where it is rather than spending an attempt on it.
     retry_at: Instant,
+    /// The row is waiting on something other than its own failed start:
+    /// what the user was last told it waits on.
+    held: Option<String>,
 }
 
 /// Per-row pre-claim start failures, by branch.
@@ -86,6 +102,7 @@ impl QueuedStartAttempts {
                     Attempt {
                         failures,
                         retry_at: now + delay,
+                        held: None,
                     },
                 );
             }
@@ -99,6 +116,54 @@ impl QueuedStartAttempts {
         retry
     }
 
+    /// Keep `session_id` where it is until `until` without counting a failed
+    /// start against it. `reason` is what it waits on; returns whether that
+    /// is news: the row was not held, or was held over something else. A
+    /// hold is looked at again every few seconds, and the user is told once.
+    pub(crate) fn hold(
+        &self,
+        branch_id: &str,
+        session_id: &str,
+        until: Instant,
+        reason: &str,
+    ) -> bool {
+        let mut by_branch = self.by_branch.lock().unwrap();
+        let rows = by_branch.entry(branch_id.to_string()).or_default();
+        let previous = rows.get(session_id);
+        let failures = previous.map_or(0, |a| a.failures);
+        let news = previous.and_then(|a| a.held.as_deref()) != Some(reason);
+        rows.insert(
+            session_id.to_string(),
+            Attempt {
+                failures,
+                retry_at: until,
+                held: Some(reason.to_string()),
+            },
+        );
+        news
+    }
+
+    /// End `session_id`'s hold, keeping its attempts. Returns whether it
+    /// was held, which is when the user was told it waits.
+    pub(crate) fn release(&self, branch_id: &str, session_id: &str) -> bool {
+        self.by_branch
+            .lock()
+            .unwrap()
+            .get_mut(branch_id)
+            .and_then(|rows| rows.get_mut(session_id))
+            .is_some_and(|attempt| attempt.held.take().is_some())
+    }
+
+    /// Whether `session_id` was last left where it is by [`Self::hold`].
+    pub(crate) fn is_held(&self, branch_id: &str, session_id: &str) -> bool {
+        self.by_branch
+            .lock()
+            .unwrap()
+            .get(branch_id)
+            .and_then(|rows| rows.get(session_id))
+            .is_some_and(|attempt| attempt.held.is_some())
+    }
+
     /// Whether `session_id` is waiting out the delay from a failed start.
     pub(crate) fn in_backoff(&self, branch_id: &str, session_id: &str, now: Instant) -> bool {
         self.by_branch
@@ -110,19 +175,35 @@ impl QueuedStartAttempts {
     }
 
     /// Drop the branch's entries for rows that are no longer queued.
-    pub(crate) fn retain_queued(&self, branch_id: &str, still_queued: impl Fn(&str) -> bool) {
+    /// Returns whether a held row was among them.
+    pub(crate) fn retain_queued(
+        &self,
+        branch_id: &str,
+        still_queued: impl Fn(&str) -> bool,
+    ) -> bool {
         let mut by_branch = self.by_branch.lock().unwrap();
+        let mut dropped_held = false;
         if let Some(rows) = by_branch.get_mut(branch_id) {
-            rows.retain(|session_id, _| still_queued(session_id));
+            rows.retain(|session_id, attempt| {
+                let keep = still_queued(session_id);
+                dropped_held |= !keep && attempt.held.is_some();
+                keep
+            });
             if rows.is_empty() {
                 by_branch.remove(branch_id);
             }
         }
+        dropped_held
     }
 
-    /// Drop every entry for a branch that is gone.
-    pub(crate) fn forget_branch(&self, branch_id: &str) {
-        self.by_branch.lock().unwrap().remove(branch_id);
+    /// Drop every entry for a branch that is gone. Returns whether a held
+    /// row was among them.
+    pub(crate) fn forget_branch(&self, branch_id: &str) -> bool {
+        self.by_branch
+            .lock()
+            .unwrap()
+            .remove(branch_id)
+            .is_some_and(|rows| rows.values().any(|attempt| attempt.held.is_some()))
     }
 
     #[cfg(test)]

@@ -101,6 +101,34 @@ pub(crate) fn resolve_branch_pipeline_context(
     })
 }
 
+/// A pipeline's share of the checkout check every start on a remote branch
+/// makes (`workspace_setup::verify`): the clone its git steps run in is read
+/// to be on the branch, and put there when it is not. A rebase, squash,
+/// commit or pull in a clone that is on the base branch acts on the base. A
+/// push does not ask: it names its local branch in an explicit refspec and
+/// works from any HEAD. Neither does the pull request pipeline, whose steps
+/// and prompts all name the local branch (`create_pr`). A no-op for a local
+/// branch.
+///
+/// Call it once the pipeline is known to run now, before its row goes
+/// `running`, and keep what it returns until it has
+/// (`workspace_setup::verify::CheckoutHold`). `session_id` is the pipeline's
+/// row when it already exists (a queued one, a pull's marker).
+pub(crate) async fn ensure_pipeline_checkout(
+    app_handle: &tauri::AppHandle,
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    session_id: Option<&str>,
+) -> Result<crate::workspace_setup::verify::CheckoutHold, String> {
+    crate::workspace_setup::verify::ensure_session_checkout(
+        app_handle,
+        store,
+        branch,
+        session_id.unwrap_or_default(),
+    )
+    .await
+}
+
 /// Derive the base branch name, stripping the `origin/` prefix if present.
 ///
 /// GitHub's PR API expects the bare branch name, while local comparison

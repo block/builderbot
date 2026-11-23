@@ -670,7 +670,7 @@ function handleSessionEnd(
   }
 
   if (sessionType === 'pr' && branchId) {
-    handlePrCompletion(branchId, status);
+    handlePrCompletion(branchId, status, errorMessage);
     prStateStore.clearSessionTracking(branchId);
   }
 
@@ -734,8 +734,13 @@ function handlePullCompletion(
  * successful completion the branch is already marked created by the time
  * this runs; a completed session whose branch is still not created means no
  * PR URL was found in the output.
+ *
+ * A session that ended in `error` with a message says why in the PR error
+ * dialog: the pipeline stops itself, before any agent, when the checkout has
+ * no local branch to push (see `prs/create_pr.rs`), and that reason is the
+ * only thing that tells the user what to do.
  */
-function handlePrCompletion(branchId: string, status: SessionStatus) {
+function handlePrCompletion(branchId: string, status: SessionStatus, errorMessage?: string | null) {
   if (status === 'completed') {
     if (prStateStore.getPrState(branchId)?.state !== 'created') {
       prStateStore.setPrError(
@@ -743,6 +748,8 @@ function handlePrCompletion(branchId: string, status: SessionStatus) {
         'PR session completed but no PR URL was found in the output.'
       );
     }
+  } else if (status === 'error' && errorMessage) {
+    prStateStore.setPrError(branchId, errorMessage);
   } else {
     prStateStore.setPrError(
       branchId,

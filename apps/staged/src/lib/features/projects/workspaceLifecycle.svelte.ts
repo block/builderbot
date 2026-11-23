@@ -1,5 +1,6 @@
 import type { Branch, ProjectLocation, WorkspaceStatus } from '../../types';
 import * as commands from '../../api/commands';
+import { listenToEvent, type UnlistenFn } from '../../transport';
 import { toast } from 'svelte-sonner';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { agentState } from '../agents/agent.svelte';
@@ -11,10 +12,32 @@ interface LocalSetupTask {
   run: () => Promise<void>;
 }
 
-interface RemoteSetupTask {
+/** Payload of the backend's `workspace-setup-error` event: why a setup run
+ *  left the branch in `error`, or null once it has no reason any more.
+ *  `userRequested` marks the failure of a setup the user asked for (a new
+ *  branch, Retry, Resume), as opposed to one the backend ran on its own.
+ *  `notice` comes with a setup that worked and did something the user
+ *  should know of: it put commits it found on the base branch on this one.
+ *  With a `noticeTitle` it is about something else, under that heading: why
+ *  the branch's queued session is waiting. That heading with no `notice`
+ *  says the session no longer waits. */
+interface WorkspaceSetupErrorEvent {
   branchId: string;
-  workspaceName: string | null;
-  run: () => Promise<void>;
+  error: string | null;
+  userRequested?: boolean;
+  notice?: string;
+  noticeTitle?: string;
+}
+
+/** The heading the backend sends with why a branch's queued session is
+ *  waiting, and alone when it no longer is (`QUEUE_HELD_TITLE` in
+ *  `workspace_setup/failures.rs`). */
+const QUEUE_HELD_TITLE = 'Queued session is waiting';
+
+/** The one toast a branch has for why its queued session is waiting: a new
+ *  cause replaces the old one, and it is taken down when the wait is over. */
+function queueHeldToastId(branchId: string): string {
+  return `queue-held:${branchId}`;
 }
 
 interface WorkspaceLifecycleHooks {
@@ -48,31 +71,55 @@ class WorkspaceLifecycleController {
   private prerunOnSetup = new Set<string>();
 
   private activeLocalSetupCount = 0;
-  private activeRemoteSetupCount = 0;
   private readonly MAX_LOCAL_SETUP_CONCURRENCY = 1;
-  private readonly MAX_REMOTE_SETUP_CONCURRENCY = 4;
-  private activeRemoteWorkspaceStarts = new Set<string>();
 
   private localSetupTaskQueue: LocalSetupTask[] = [];
-  private remoteSetupTaskQueue: RemoteSetupTask[] = [];
 
   // Single adaptive poller: 3s while any workspace is starting, 30s while
-  // any is running, stopped otherwise.
+  // any is running, stopped otherwise. A remote branch's setup is the
+  // backend's from start to finish: this controller asks for it, and the
+  // poll and the `workspace-setup-error` event say how it went. It keeps no
+  // clock of its own on a `starting` branch; the backend's waits are bounded
+  // and end in `running` or `error` on the row.
   private readonly STARTING_POLL_MS = 3000;
   private readonly RUNNING_POLL_MS = 30_000;
-  private readonly STARTING_TIMEOUT_MS = 5 * 60 * 1000;
+  /** Bumped by start() and stop(), so an answer arriving after a restart
+   *  does not write into the next run's state. */
+  private generation = 0;
+  private unlistenSetupErrors: UnlistenFn | null = null;
+  /** Counts setup-error events, and the count at each branch's latest one,
+   *  so a setup-error snapshot does not overwrite a newer event. */
+  private setupErrorEventSeq = 0;
+  private setupErrorEventSeqByBranch = new Map<string, number>();
 
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollInFlight = false;
-  private startingTimestamps = new Map<string, number>();
   private kickoffTimer: ReturnType<typeof setTimeout> | null = null;
 
   start(hooks: WorkspaceLifecycleHooks): void {
     this.hooks = hooks;
+    const generation = ++this.generation;
+    this.unlistenSetupErrors?.();
+    // The backend reports every failed setup run, whoever asked for it (its
+    // startup pass, poll-triggered runs and automatic retries included). The
+    // snapshot covers failures from before this listener went live, and is
+    // retaken on each web-socket reconnect.
+    this.unlistenSetupErrors = listenToEvent<WorkspaceSetupErrorEvent>(
+      'workspace-setup-error',
+      (payload) => {
+        if (this.generation !== generation) return;
+        this.applySetupErrorEvent(payload);
+      },
+      { onEstablished: () => void this.seedSetupErrors(generation) }
+    );
     this.ensurePolling();
   }
 
   stop(): void {
+    this.generation++;
+    this.unlistenSetupErrors?.();
+    this.unlistenSetupErrors = null;
+    this.setupErrorEventSeqByBranch.clear();
     this.stopPolling();
     if (this.kickoffTimer) {
       clearTimeout(this.kickoffTimer);
@@ -82,12 +129,8 @@ class WorkspaceLifecycleController {
     this.queuedSetupBranches.clear();
     this.awaitingTransferRefresh.clear();
     this.prerunOnSetup.clear();
-    this.activeRemoteWorkspaceStarts.clear();
-    this.startingTimestamps.clear();
     this.localSetupTaskQueue = [];
-    this.remoteSetupTaskQueue = [];
     this.activeLocalSetupCount = 0;
-    this.activeRemoteSetupCount = 0;
     this.hooks = null;
   }
 
@@ -144,8 +187,10 @@ class WorkspaceLifecycleController {
     if (!branches) return;
 
     let changed = false;
+    let wasError = false;
     const nextBranches = branches.map((branch) => {
       if (branch.id !== branchId) return branch;
+      wasError = branch.workspaceStatus === 'error';
       const statusChanged = branch.workspaceStatus !== workspaceStatus;
       const idChanged = workstationId != null && branch.workstationId !== workstationId;
       if (!statusChanged && !idChanged) return branch;
@@ -161,20 +206,11 @@ class WorkspaceLifecycleController {
       hooks.setBranchesByProject(new Map(current).set(projectId, nextBranches));
     }
 
-    if (workspaceStatus !== 'error' && this.workspaceErrors.has(branchId)) {
-      const nextWorkspaceErrors = new Map(this.workspaceErrors);
-      nextWorkspaceErrors.delete(branchId);
-      this.workspaceErrors = nextWorkspaceErrors;
-      this.version++;
-    }
-
-    // Track starting timestamps for timeout logic.
-    if (workspaceStatus === 'starting') {
-      if (!this.startingTimestamps.has(branchId)) {
-        this.startingTimestamps.set(branchId, Date.now());
-      }
-    } else {
-      this.startingTimestamps.delete(branchId);
+    // The reason goes once the branch is out of `error` or set up. Not on any
+    // non-error status: a reason the error event delivered can precede the
+    // poll that reports the branch's `error`, behind a stale `starting`.
+    if (workspaceStatus === 'running' || (wasError && workspaceStatus !== 'error')) {
+      this.clearWorkspaceError(branchId);
     }
 
     // Kick the poller when a workspace enters an active state. Queued
@@ -187,6 +223,30 @@ class WorkspaceLifecycleController {
 
   async retryWorktree(branchId: string, projectId: string): Promise<void> {
     await this.setupBranchWorktree(branchId, projectId, { runPrerun: true });
+  }
+
+  /**
+   * Set a remote branch up again, typically one in `error`: the backend puts
+   * it back to `starting` and reruns setup. A no-op while a request for the
+   * branch is already out.
+   */
+  retryWorkspace(projectId: string, branchId: string): void {
+    const hooks = this.hooks;
+    if (!hooks || this.isProjectHeld(projectId)) return;
+    if (this.pendingSetupBranches.has(branchId)) return;
+    const branch = hooks
+      .getBranchesByProject()
+      .get(projectId)
+      ?.find((b) => b.id === branchId);
+    if (!branch || branch.branchType !== 'remote') return;
+    // As in enqueueBranchSetup: a list read before a transfer switched the
+    // project over would set up the old location again.
+    const location = hooks.getProjectLocation(projectId);
+    if (location && location !== 'remote') return;
+
+    this.clearWorkspaceError(branchId);
+    this.handleWorkspaceStatusChange(projectId, branchId, 'starting');
+    this.requestRemoteSetup(branchId);
   }
 
   async resumeWorkspace(projectId: string, workspaceName: string): Promise<void> {
@@ -253,13 +313,10 @@ class WorkspaceLifecycleController {
   clearBranchState(branchId: string): void {
     this.pendingSetupBranches.delete(branchId);
     this.queuedSetupBranches.delete(branchId);
-    this.startingTimestamps.delete(branchId);
     this.prerunOnSetup.delete(branchId);
+    toast.dismiss(queueHeldToastId(branchId));
 
     this.localSetupTaskQueue = this.localSetupTaskQueue.filter(
-      (task) => task.branchId !== branchId
-    );
-    this.remoteSetupTaskQueue = this.remoteSetupTaskQueue.filter(
       (task) => task.branchId !== branchId
     );
 
@@ -288,6 +345,68 @@ class WorkspaceLifecycleController {
       !!hooks?.isProjectDeleting(projectId) ||
       !!hooks?.isProjectTransferring(projectId)
     );
+  }
+
+  private setWorkspaceError(branchId: string, message: string): void {
+    if (this.workspaceErrors.get(branchId) === message) return;
+    this.workspaceErrors = new Map(this.workspaceErrors).set(branchId, message);
+    this.version++;
+  }
+
+  private clearWorkspaceError(branchId: string): void {
+    if (!this.workspaceErrors.has(branchId)) return;
+    const next = new Map(this.workspaceErrors);
+    next.delete(branchId);
+    this.workspaceErrors = next;
+    this.version++;
+  }
+
+  /** Every failure lands on the card. Only one the backend marks as the
+   *  user's own ask is toasted: its automatic retries, startup pass and
+   *  poll-triggered runs fail without interrupting anyone. */
+  private applySetupErrorEvent(event: WorkspaceSetupErrorEvent): void {
+    const { branchId, error } = event;
+    this.setupErrorEventSeqByBranch.set(branchId, ++this.setupErrorEventSeq);
+    if (error == null) {
+      this.clearWorkspaceError(branchId);
+      if (event.noticeTitle === QUEUE_HELD_TITLE) {
+        // Why the branch's queued session waits: up for as long as it does.
+        const id = queueHeldToastId(branchId);
+        if (event.notice) {
+          toast.warning(event.noticeTitle, { id, description: event.notice, duration: Infinity });
+        } else {
+          toast.dismiss(id);
+        }
+      } else if (event.notice) {
+        // Any other heading is a notice of its own, not the hold's.
+        toast.warning(event.noticeTitle ?? 'Workspace branch was given existing commits', {
+          description: event.notice,
+          duration: Infinity,
+        });
+      }
+      return;
+    }
+    this.setWorkspaceError(branchId, error);
+    if (event.userRequested) {
+      toast.error('Unable to start workspace', { description: error, duration: Infinity });
+    }
+  }
+
+  private async seedSetupErrors(generation: number): Promise<void> {
+    const seqAtRequest = this.setupErrorEventSeq;
+    let errors: Record<string, string>;
+    try {
+      errors = await commands.getWorkspaceSetupErrors();
+    } catch (e) {
+      console.error('[workspaceLifecycle] Failed to load workspace setup errors:', e);
+      return;
+    }
+    if (this.generation !== generation) return;
+    for (const [branchId, message] of Object.entries(errors ?? {})) {
+      // An event since the request is newer than the snapshot.
+      if ((this.setupErrorEventSeqByBranch.get(branchId) ?? 0) > seqAtRequest) continue;
+      this.setWorkspaceError(branchId, message);
+    }
   }
 
   private errorMessage(err: unknown): string {
@@ -339,25 +458,7 @@ class WorkspaceLifecycleController {
       return;
     }
 
-    // Apply 5-minute timeout to starting workspaces before polling.
-    const now = Date.now();
-    const activeBranchIds: string[] = [];
-    for (const target of targets) {
-      if (target.status === 'starting') {
-        const startedAt = this.startingTimestamps.get(target.branchId);
-        if (startedAt && now - startedAt > this.STARTING_TIMEOUT_MS) {
-          this.startingTimestamps.delete(target.branchId);
-          this.handleWorkspaceStatusChange(target.projectId, target.branchId, 'error');
-          continue;
-        }
-      }
-      activeBranchIds.push(target.branchId);
-    }
-
-    if (activeBranchIds.length === 0) {
-      this.scheduleNextPoll();
-      return;
-    }
+    const activeBranchIds = targets.map((target) => target.branchId);
 
     this.pollInFlight = true;
     try {
@@ -455,38 +556,33 @@ class WorkspaceLifecycleController {
     }
 
     if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
-      this.queuedSetupBranches.add(branchId);
-      this.remoteSetupTaskQueue.push({
-        branchId,
-        workspaceName: branch.workspaceName,
-        run: async () => {
-          this.pendingSetupBranches.add(branchId);
-          if (this.workspaceErrors.has(branchId)) {
-            const nextWorkspaceErrors = new Map(this.workspaceErrors);
-            nextWorkspaceErrors.delete(branchId);
-            this.workspaceErrors = nextWorkspaceErrors;
-            this.version++;
-          }
-
-          try {
-            await commands.startWorkspace(branchId);
-          } catch (e) {
-            console.error('[workspaceLifecycle] Failed to start workspace:', e);
-            const message = this.errorMessage(e);
-            this.workspaceErrors = new Map(this.workspaceErrors).set(branchId, message);
-            this.version++;
-            this.handleWorkspaceStatusChange(projectId, branchId, 'error');
-            toast.error('Unable to start workspace', {
-              description: message,
-              duration: Infinity,
-            });
-          } finally {
-            this.pendingSetupBranches.delete(branchId);
-          }
-        },
-      });
-      this.pumpRemoteSetupQueue();
+      this.requestRemoteSetup(branchId);
     }
+  }
+
+  /**
+   * Ask the backend to set a remote branch up. Only asks: the call resolves
+   * as soon as the backend's run is under way (or joined), the status poll
+   * reports how it ends, and a failure's reason arrives as a
+   * `workspace-setup-error` event. A rejection means the request itself
+   * could not be made, and says nothing about the branch. Asking again for a
+   * branch that is still `starting` is harmless: it joins the same run.
+   */
+  private requestRemoteSetup(branchId: string): void {
+    this.pendingSetupBranches.add(branchId);
+    // A branch can turn `starting` in a refetched list with the poller
+    // stopped; its outcome comes from polls.
+    this.ensurePolling();
+    commands
+      .startWorkspace(branchId)
+      .catch((e) => {
+        console.error('[workspaceLifecycle] Failed to request workspace setup:', e);
+        // A reason a Retry cleared here may still stand in the backend.
+        void this.seedSetupErrors(this.generation);
+      })
+      .finally(() => {
+        this.pendingSetupBranches.delete(branchId);
+      });
   }
 
   private pumpLocalSetupQueue(): void {
@@ -507,37 +603,6 @@ class WorkspaceLifecycleController {
           this.activeLocalSetupCount = Math.max(0, this.activeLocalSetupCount - 1);
           this.queuedSetupBranches.delete(task.branchId);
           this.pumpLocalSetupQueue();
-        });
-    }
-  }
-
-  private pumpRemoteSetupQueue(): void {
-    while (
-      this.activeRemoteSetupCount < this.MAX_REMOTE_SETUP_CONCURRENCY &&
-      this.remoteSetupTaskQueue.length > 0
-    ) {
-      const taskIndex = this.remoteSetupTaskQueue.findIndex(
-        (task) => !task.workspaceName || !this.activeRemoteWorkspaceStarts.has(task.workspaceName)
-      );
-      if (taskIndex === -1) break;
-      const task = this.remoteSetupTaskQueue.splice(taskIndex, 1)[0];
-
-      this.activeRemoteSetupCount += 1;
-      if (task.workspaceName) {
-        this.activeRemoteWorkspaceStarts.add(task.workspaceName);
-      }
-      task
-        .run()
-        .catch((e) => {
-          console.error('[workspaceLifecycle] Remote workspace setup task failed:', e);
-        })
-        .finally(() => {
-          this.activeRemoteSetupCount = Math.max(0, this.activeRemoteSetupCount - 1);
-          if (task.workspaceName) {
-            this.activeRemoteWorkspaceStarts.delete(task.workspaceName);
-          }
-          this.queuedSetupBranches.delete(task.branchId);
-          this.pumpRemoteSetupQueue();
         });
     }
   }

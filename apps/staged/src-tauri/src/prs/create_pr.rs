@@ -1,5 +1,17 @@
 //! Creating a pull request: fetch the base, gather context, push, and hand
 //! off to an agent that writes the title and body and runs `gh pr create`.
+//!
+//! Nothing here depends on what the checkout has checked out. Two branches
+//! of one repository share a workstation's clone, so it can be on a sibling
+//! branch, with a session working there, or on the base branch. Every step
+//! and every prompt names the local branch, as the push's refspec does, and
+//! the pipeline makes no check of HEAD and asks for no checkout.
+//!
+//! What it does need is the local branch itself. A clone without it is one
+//! branch setup has not put on the branch, possibly because it refused to
+//! (`workspace_setup::checkout`): the first step stops the pipeline there,
+//! with the reason as the session's error. No agent is started, so none is
+//! handed a failed push to "fix" by creating the branch setup would not.
 
 use std::sync::Arc;
 
@@ -11,10 +23,25 @@ use super::context::{base_branch_name, resolve_branch_pipeline_context};
 use super::git_commands::{git_fetch_with_fallback, git_push_with_fallback, push_refspec};
 use super::pipeline::start_pipeline_for_branch;
 
+/// The label of the step that stops the pipeline when the checkout has no
+/// local branch to push.
+pub(super) const CHECK_LOCAL_BRANCH_LABEL: &str = "Check local branch";
+
+/// Exits 0 when the checkout has `local_branch`. When it does not, says so
+/// for the user and exits 1. Anything else (no repository, a command that
+/// never ran) keeps git's own exit status and words, so it is not reported
+/// as a missing branch.
+fn check_local_branch_command(local_branch: &str) -> String {
+    format!(
+        r#"if git show-ref --verify --quiet refs/heads/{local_branch}; then :; else rc=$?; if [ "$rc" -eq 1 ]; then echo "Local branch '{local_branch}' does not exist in this clone, so there is nothing to push and no pull request was created. Branch setup creates the branch: if the branch shows a setup error, deal with what it reports and retry setup, then create the pull request again." >&2; fi; exit "$rc"; fi"#
+    )
+}
+
 fn create_pr_handoff_prompt(
     pr_type: &str,
     base_branch: &str,
     base_ref: &str,
+    local_branch: &str,
     head_branch: &str,
     draft_flag: &str,
     opening: &str,
@@ -28,13 +55,14 @@ fn create_pr_handoff_prompt(
 Use the context below as a starting point, and inspect the branch changes as needed.
 
 Requirements:
+- The {pr_type} is for the local branch `{local_branch}`. The checkout may have another branch checked out, with another session working on it: name `{local_branch}` explicitly instead of relying on HEAD, and do not check out, switch, create or reset branches. If `{local_branch}` does not exist locally, stop and say so instead of creating it.
 - Treat `{base_ref}` as the comparison base. The local `{base_branch}` branch may be stale; do not use it for diff or log comparisons.
-- If you inspect branch changes, compare `$(git merge-base {base_ref} HEAD)..HEAD`.
+- If you inspect branch changes, compare `$(git merge-base {base_ref} {local_branch})..{local_branch}`.
 - Choose a conventional-commit-style PR title, using the most appropriate type (feat, fix, refactor, docs, style, test, chore, perf, ci, or build) based on the actual changes.
 - Write a concise PR body that summarizes the changes.
 - Run `gh pr create --base {base_branch} --head {head_branch} --title <title> --body <body>{draft_flag}` to create the {pr_type}. `{head_branch}` is the branch on origin the previous step pushed to; it may differ from the local branch name.
 - Do not use `--fill-first`.
-- If `gh pr create` reports that a PR already exists, run `gh pr view --json url --jq .url`, update the title/body with `gh pr edit` if needed, and continue.
+- If `gh pr create` reports that a PR already exists, run `gh pr view {head_branch} --json url --jq .url`, update the title/body with `gh pr edit {head_branch}` if needed, and continue.
 - When done, output exactly `PR_URL: <url>`.
 
 Context from prior steps:
@@ -55,6 +83,13 @@ pub(super) fn build_create_pr_pipeline_steps(
     let refspec = push_refspec(local_branch, remote_branch);
 
     vec![
+        // First, before any step that can hand off to an agent: with no
+        // local branch the pipeline ends here (see the module docs).
+        PipelineStep::Command {
+            label: CHECK_LOCAL_BRANCH_LABEL.to_string(),
+            command: check_local_branch_command(local_branch),
+            on_failure: FailureStrategy::Abort { marker: None },
+        },
         PipelineStep::Command {
             label: "Fetch latest base".to_string(),
             command: git_fetch_with_fallback(base_branch),
@@ -63,10 +98,11 @@ pub(super) fn build_create_pr_pipeline_steps(
                     pr_type,
                     base_branch,
                     &base_ref,
+                    local_branch,
                     remote_branch,
                     draft_flag,
                     &format!(
-                        "The fetch failed while creating a {pr_type}. Diagnose and fix the issue if needed, then inspect this branch against `{base_ref}`, push the branch, and create or recover the {pr_type}."
+                        "The fetch failed while creating a {pr_type}. Diagnose and fix the issue if needed, then inspect `{local_branch}` against `{base_ref}`, push it with exactly `git push -u origin {refspec}`, and create or recover the {pr_type}."
                     ),
                 ),
             },
@@ -74,14 +110,14 @@ pub(super) fn build_create_pr_pipeline_steps(
         PipelineStep::Command {
             label: "View commit history".to_string(),
             command: format!(
-                r#"base_commit=$(git merge-base {base_ref} HEAD) && git log --oneline "$base_commit"..HEAD"#
+                r#"base_commit=$(git merge-base {base_ref} {local_branch}) && git log --oneline "$base_commit"..{local_branch}"#
             ),
             on_failure: FailureStrategy::Continue,
         },
         PipelineStep::Command {
             label: "View changed files".to_string(),
             command: format!(
-                r#"base_commit=$(git merge-base {base_ref} HEAD) && git diff "$base_commit"..HEAD --stat"#
+                r#"base_commit=$(git merge-base {base_ref} {local_branch}) && git diff "$base_commit"..{local_branch} --stat"#
             ),
             on_failure: FailureStrategy::Continue,
         },
@@ -93,6 +129,7 @@ pub(super) fn build_create_pr_pipeline_steps(
                     pr_type,
                     base_branch,
                     &base_ref,
+                    local_branch,
                     remote_branch,
                     draft_flag,
                     &format!(
@@ -107,9 +144,10 @@ pub(super) fn build_create_pr_pipeline_steps(
                 pr_type,
                 base_branch,
                 &base_ref,
+                local_branch,
                 remote_branch,
                 draft_flag,
-                &format!("Create a {pr_type} for the current branch."),
+                &format!("Create a {pr_type} for the local branch `{local_branch}`."),
             ),
         },
     ]
@@ -126,6 +164,9 @@ pub(crate) async fn start_create_pr_pipeline_for_branch(
 ) -> Result<String, String> {
     crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    // No read of what the clone has checked out and no repair: every step
+    // names the local branch, so the pipeline runs the same from any HEAD
+    // (see the module docs).
     let base_branch = base_branch_name(&ctx.branch);
 
     let is_draft = draft.unwrap_or(false);
@@ -136,7 +177,10 @@ pub(crate) async fn start_create_pr_pipeline_for_branch(
         "pull request"
     };
 
-    // Build the pipeline steps for PR creation.
+    // Build the pipeline steps for PR creation. The session's own prompt
+    // below is its label and what a resume reads its type from
+    // (`infer_branch_resume_session_type`); the prompts an agent is handed
+    // are in the steps and name the branch.
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
     let steps = build_create_pr_pipeline_steps(
         pr_type,

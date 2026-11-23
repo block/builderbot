@@ -452,8 +452,11 @@
       min-height: 40px;
     }
 
+    /* A swipe past either end of the list stops there instead of
+       scrolling what is behind the picker. */
     .tag-picker-list {
       max-height: none;
+      overscroll-behavior: contain;
     }
 
     .tag-picker-search input {

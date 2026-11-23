@@ -81,7 +81,7 @@
     )}
   >
     <div
-      class="menu-sheet-group bg-popover ring-foreground/10 min-h-0 overflow-y-auto overflow-x-hidden rounded-2xl ring-1"
+      class="menu-sheet-group bg-popover ring-foreground/10 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain rounded-2xl ring-1"
     >
       {@render children?.()}
     </div>

@@ -473,6 +473,14 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   }
 
+  /* On a touch screen a swipe past either end of the list stops there
+     instead of scrolling the form behind the dropdown. */
+  @media (pointer: coarse) {
+    .suggestions-dropdown {
+      overscroll-behavior: contain;
+    }
+  }
+
   .suggestion-item {
     display: flex;
     align-items: center;

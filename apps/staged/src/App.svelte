@@ -1028,6 +1028,14 @@
     gap: 16px;
   }
 
+  /* A phone is narrower than the card: keep it on screen, 16px clear of
+     each edge. */
+  @media (pointer: coarse) {
+    .update-card {
+      width: min(460px, 100vw - 32px);
+    }
+  }
+
   .update-header {
     display: flex;
     align-items: baseline;

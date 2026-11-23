@@ -71,7 +71,7 @@
     <Button
       variant="ghost"
       size="icon-xs"
-      class="-my-1 -mr-1 size-6 [&_svg]:size-3.5"
+      class="touch-hit -my-1 -mr-1 size-6 [&_svg]:size-3.5"
       aria-label="Clear search"
       title="Clear search"
       onclick={clear}

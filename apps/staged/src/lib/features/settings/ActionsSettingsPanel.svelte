@@ -892,9 +892,11 @@
     border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
     background: var(--bg-app-bar);
     /* A full-height column here, so it ends at the home indicator; stacked
-       on top on narrow screens (below) it does not. */
-    padding: 0 var(--repo-row-bleed)
-      calc(10px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
+       on top on narrow screens (below) it does not. The inset is the one
+       SettingsPage's `.panel-pad` hands down: 0 while the page pads the
+       inset around the panel's card (above 920px), so it is not added
+       twice. */
+    padding: 0 var(--repo-row-bleed) calc(10px + var(--settings-panel-inset-bottom, 0px));
     overflow-y: auto;
     min-height: 0;
   }
@@ -1005,14 +1007,14 @@
     gap: 8px;
   }
 
-  /* The bottom inset keeps the content clear of the home indicator
-     (App.svelte's main leaves it to the panes). */
+  /* The bottom inset keeps the content clear of the home indicator where
+     the panel runs to the screen's edge (SettingsPage's `.panel-pad`). */
   .main-panel {
     flex: 1;
     min-width: 0;
     background: var(--bg-chrome);
     padding: 14px;
-    padding-bottom: calc(14px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px)));
+    padding-bottom: calc(14px + var(--settings-panel-inset-bottom, 0px));
     overflow: hidden;
     min-height: 0;
     display: flex;
@@ -1300,9 +1302,7 @@
       max-height: none;
       border-right: none;
       border-bottom: none;
-      padding-bottom: calc(
-        10px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))
-      );
+      padding-bottom: calc(10px + var(--settings-panel-inset-bottom, 0px));
     }
 
     .panel-body.detail-open .sidebar,
@@ -1317,9 +1317,7 @@
     }
 
     .main-panel-scroll {
-      padding-bottom: calc(
-        14px + max(env(safe-area-inset-bottom), var(--safe-bottom-fallback, 0px))
-      );
+      padding-bottom: calc(14px + var(--settings-panel-inset-bottom, 0px));
     }
 
     .panel-body:not(.detail-open) .context-item.selected {

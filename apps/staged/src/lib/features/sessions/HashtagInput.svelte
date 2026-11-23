@@ -782,6 +782,14 @@
     pointer-events: auto;
   }
 
+  /* On a touch screen a swipe past either end of the list stops there
+     instead of scrolling the pane or dialog behind the dropdown. */
+  @media (pointer: coarse) {
+    .hashtag-dropdown {
+      overscroll-behavior: contain;
+    }
+  }
+
   .hashtag-dropdown-section + .hashtag-dropdown-section {
     margin-top: 4px;
   }

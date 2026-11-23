@@ -3,6 +3,7 @@ import {
   CLICK_SWALLOW_WINDOW_MS,
   LONG_PRESS_DELAY_MS,
   LONG_PRESS_MOVE_THRESHOLD_PX,
+  SCROLL_CATCH_WINDOW_MS,
   createLongPress,
   type LongPressPoint,
 } from './longPress';
@@ -317,6 +318,143 @@ describe('createLongPress', () => {
     vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
     expect(onLongPress).not.toHaveBeenCalled();
     expect(gesture('touchend').defaultPrevented).toBe(false);
+  });
+
+  // A `scroll` as the document's capture listener sees it: `target` is the
+  // container that scrolled. `list` holds `row`; `elsewhere` does not.
+  function scroll(scroller: EventTarget = doc) {
+    const event = new Event('scroll');
+    Object.defineProperty(event, 'target', { value: scroller });
+    doc.dispatchEvent(event);
+  }
+
+  function scroller(holds: EventTarget[]) {
+    return Object.assign(new EventTarget(), {
+      contains: (node: EventTarget) => holds.includes(node),
+    });
+  }
+
+  function pointerCancel(pointerType = 'touch', on: EventTarget = doc) {
+    on.dispatchEvent(Object.assign(new Event('pointercancel'), { pointerType }));
+  }
+
+  it('cancels a pending press on pointercancel, the way iOS announces a scroll', () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    // A slow drag: exactly the threshold, so the move test alone keeps the press.
+    gesture('touchmove', [{ clientX: 0, clientY: LONG_PRESS_MOVE_THRESHOLD_PX, target: row }]);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS - 50);
+    pointerCancel();
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    // No touchcancel follows on iOS; the release is an ordinary one.
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+    expect(clickPassesThrough()).toBe(true);
+  });
+
+  it("ignores another input's pointercancel", () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    pointerCancel('mouse');
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('sees the pointercancel of a pressed element that left the DOM', () => {
+    const lp = press();
+    const detached = Object.assign(new EventTarget(), { isConnected: false });
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: detached }]));
+    pointerCancel('touch', detached);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('keeps suppressing the release when pointercancel or a scroll follows a fired press', () => {
+    const lp = press();
+    holdUntilFired(lp);
+    pointerCancel();
+    scroll();
+    const end = gesture('touchend');
+    expect(end.defaultPrevented).toBe(true);
+    expect(clickPassesThrough()).toBe(false);
+  });
+
+  it('cancels a pending press when the list under the finger scrolls', () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS - 50);
+    scroll(scroller([row]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+
+    // The document scrolling moves every row.
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+    scroll();
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it('keeps a pending press when an unrelated pane scrolls', () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    scroll(scroller([]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts no press for a touch that catches a moving list', () => {
+    const lp = press();
+    const list = scroller([row]);
+    scroll(list);
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS);
+    // The finger lands while the list is still coasting and stays down.
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS * 2);
+    expect(onLongPress).not.toHaveBeenCalled();
+    const end = gesture('touchend');
+    expect(end.defaultPrevented).toBe(false);
+    expect(clickPassesThrough()).toBe(true);
+    // A browser contextmenu for that hold is not ours to act on either.
+    const native = contextMenuEvent({ trusted: true });
+    expect(lp.oncontextmenu(native)).toBe(false);
+    expect(native.defaultPrevented).toBe(false);
+  });
+
+  it('presses normally once the list has come to rest, or when another pane is moving', () => {
+    const lp = press();
+    scroll(scroller([row]));
+    vi.advanceTimersByTime(SCROLL_CATCH_WINDOW_MS + 1);
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    gesture('touchend');
+    vi.advanceTimersByTime(CLICK_SWALLOW_WINDOW_MS);
+
+    scroll(scroller([]));
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one scroll listener per document and drops it with the last controller', () => {
+    const add = vi.spyOn(doc, 'addEventListener');
+    const remove = vi.spyOn(doc, 'removeEventListener');
+    const scrollCalls = (spy: typeof add) => spy.mock.calls.filter(([type]) => type === 'scroll');
+    const first = press();
+    const second = press();
+    expect(scrollCalls(add)).toHaveLength(1);
+    first.destroy();
+    // A repeated destroy must not release the other controller's share.
+    first.destroy();
+    expect(scrollCalls(remove)).toHaveLength(0);
+    scroll(scroller([row]));
+    second.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    second.destroy();
+    expect(scrollCalls(remove)).toHaveLength(1);
   });
 
   it('does nothing while disabled', () => {

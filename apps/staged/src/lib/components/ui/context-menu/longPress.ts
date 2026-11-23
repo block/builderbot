@@ -35,10 +35,20 @@
  * - a browser that raises its own trusted `contextmenu` for the hold a few
  *   milliseconds after ours already opened the menu (Android Chrome) has that
  *   duplicate eaten, so consumer handlers and bits-ui's opener run once;
- * - moving past the threshold, a second finger, or `touchcancel` (the page
- *   started scrolling) cancels a pending press and leaves the tap alone. A
- *   second finger after the press fired keeps the suppression, so the first
- *   finger's release still cannot activate anything.
+ * - moving past the threshold, a second finger, or `touchcancel` cancels a
+ *   pending press and leaves the tap alone. A second finger after the press
+ *   fired keeps the suppression, so the first finger's release still cannot
+ *   activate anything;
+ * - a scroll cancels a pending press too. iOS Safari sends no `touchcancel`
+ *   when it turns a touch into a scroll: it sends `pointercancel`, and the
+ *   touch events carry on. A slow drag can stay inside `moveThreshold` until
+ *   after the scroll has begun, so the pending press is also dropped on
+ *   `pointercancel` and on any `scroll` of a container holding the touched
+ *   element. A press that already fired keeps its suppression;
+ * - a touch that lands on a list that is still moving is the user catching
+ *   the scroll, not pressing a row: a `touchstart` within
+ *   `SCROLL_CATCH_WINDOW_MS` of the last scroll of a container holding the
+ *   touched element starts no press at all.
  */
 
 export const LONG_PRESS_DELAY_MS = 500;
@@ -49,6 +59,12 @@ export const LONG_PRESS_MOVE_THRESHOLD_PX = 10;
  * margin.
  */
 export const CLICK_SWALLOW_WINDOW_MS = 100;
+/**
+ * How recently a container must have scrolled for a touch landing in it to
+ * count as catching the scroll. Momentum scrolling reports a `scroll` every
+ * frame, so anything still moving is well inside this.
+ */
+export const SCROLL_CATCH_WINDOW_MS = 150;
 
 export interface LongPressPoint {
   target: EventTarget;
@@ -89,6 +105,76 @@ function isDetached(target: EventTarget): boolean {
   return 'isConnected' in target && !(target as Node).isConnected;
 }
 
+/**
+ * Whether scrolling `scroller` moves `target` on screen: the document does
+ * for everything, an element for what it contains. Scrolls of an unrelated
+ * pane (a transcript following its stream, say) leave the press alone.
+ */
+function scrollMoves(scroller: EventTarget | null, target: EventTarget): boolean {
+  if (!scroller || scroller === target) return true;
+  const contains = (scroller as Partial<Node>).contains;
+  if (typeof contains !== 'function') return true;
+  return contains.call(scroller, target as Node);
+}
+
+/** Recent scrolls seen on one document, shared by every controller on it. */
+interface ScrollWatch {
+  users: number;
+  /** When each container last scrolled; emptied once a burst of scrolling ends. */
+  recent: Map<EventTarget | null, number>;
+  latest: number;
+  stop(): void;
+}
+
+const scrollWatches = new WeakMap<EventTarget, ScrollWatch>();
+
+// One passive capture listener per document, however many triggers are
+// mounted. `scroll` does not bubble, so capture is what sees a nested
+// scroller from the document.
+function watchScrolls(scope: EventTarget): ScrollWatch {
+  let watch = scrollWatches.get(scope);
+  if (!watch) {
+    const recent: ScrollWatch['recent'] = new Map();
+    const opts = { capture: true, passive: true };
+    const onScroll = (event: Event) => {
+      const now = Date.now();
+      if (now - created.latest > SCROLL_CATCH_WINDOW_MS) recent.clear();
+      recent.set(event.target, now);
+      created.latest = now;
+    };
+    const created: ScrollWatch = {
+      users: 0,
+      recent,
+      latest: 0,
+      stop() {
+        scope.removeEventListener('scroll', onScroll, opts);
+        scrollWatches.delete(scope);
+        recent.clear();
+      },
+    };
+    scope.addEventListener('scroll', onScroll, opts);
+    scrollWatches.set(scope, created);
+    watch = created;
+  }
+  watch.users += 1;
+  return watch;
+}
+
+function unwatchScrolls(watch: ScrollWatch) {
+  watch.users -= 1;
+  if (watch.users === 0) watch.stop();
+}
+
+/** Whether a container holding `target` scrolled within the catch window. */
+function landedOnMovingList(watch: ScrollWatch, target: EventTarget): boolean {
+  const now = Date.now();
+  if (now - watch.latest > SCROLL_CATCH_WINDOW_MS) return false;
+  for (const [scroller, at] of watch.recent) {
+    if (now - at <= SCROLL_CATCH_WINDOW_MS && scrollMoves(scroller, target)) return true;
+  }
+  return false;
+}
+
 export function createLongPress(options: LongPressOptions): LongPressController {
   const delay = options.delay ?? LONG_PRESS_DELAY_MS;
   const moveThreshold = options.moveThreshold ?? LONG_PRESS_MOVE_THRESHOLD_PX;
@@ -98,6 +184,9 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   let fired = false;
   let unlistenGesture: (() => void) | null = null;
   let unarmClickSwallow: (() => void) | null = null;
+
+  const watchScope = options.scope?.() ?? (typeof document === 'undefined' ? null : document);
+  let scrollWatch = watchScope ? watchScrolls(watchScope) : null;
 
   function scopeFor(target: EventTarget): EventTarget | null {
     return (
@@ -192,6 +281,18 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     reset();
   }
 
+  // The browser took the touch for itself, which on iOS means a scroll began.
+  // Unlike `touchcancel` the touch events keep coming, so only the pending
+  // press goes: the release of one that already fired is still suppressed.
+  function onpointercancel(event: Event) {
+    const type = (event as PointerEvent).pointerType;
+    if (type === undefined || type === 'touch') clearTimer();
+  }
+
+  function onscroll(event: Event) {
+    if (start && timer !== null && scrollMoves(event.target, start.target)) clearTimer();
+  }
+
   // The listeners live only for the duration of a press, on the document and
   // on the touched node (the only place a release for a since-detached node
   // is delivered). For a node still in the DOM both see the same event, the
@@ -201,19 +302,24 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   function listenGesture(scope: EventTarget, target: EventTarget) {
     unlistenGesture?.();
     const opts = { capture: true, passive: false };
+    const passive = { capture: true, passive: true };
     const nodes = target === scope ? [scope] : [scope, target];
     for (const node of nodes) {
       node.addEventListener('touchmove', ontouchmove as EventListener, opts);
       node.addEventListener('touchend', ontouchend as EventListener, opts);
       node.addEventListener('touchcancel', ontouchcancel, opts);
+      node.addEventListener('pointercancel', onpointercancel, passive);
     }
+    scope.addEventListener('scroll', onscroll, passive);
     scope.addEventListener('touchstart', ontouchstartAnywhere as EventListener, opts);
     unlistenGesture = () => {
       for (const node of nodes) {
         node.removeEventListener('touchmove', ontouchmove as EventListener, opts);
         node.removeEventListener('touchend', ontouchend as EventListener, opts);
         node.removeEventListener('touchcancel', ontouchcancel, opts);
+        node.removeEventListener('pointercancel', onpointercancel, passive);
       }
+      scope.removeEventListener('scroll', onscroll, passive);
       scope.removeEventListener('touchstart', ontouchstartAnywhere as EventListener, opts);
       unlistenGesture = null;
     };
@@ -231,21 +337,20 @@ export function createLongPress(options: LongPressOptions): LongPressController 
       reset();
       if (options.isDisabled?.()) return;
       const touch = event.touches[0];
-      start = {
-        target: event.target ?? touch.target,
-        clientX: touch.clientX,
-        clientY: touch.clientY,
-      };
+      const target = event.target ?? touch.target;
+      // Catching a list that is still moving stops it; it presses nothing.
+      if (scrollWatch && landedOnMovingList(scrollWatch, target)) return;
+      start = { target, clientX: touch.clientX, clientY: touch.clientY };
       const point = start;
       const scope = scopeFor(point.target);
       if (scope) listenGesture(scope, point.target);
       timer = setTimeout(() => {
         timer = null;
         fired = true;
-        const target = isDetached(point.target)
+        const fireAt = isDetached(point.target)
           ? (options.trigger?.() ?? point.target)
           : point.target;
-        options.onLongPress({ ...point, target });
+        options.onLongPress({ ...point, target: fireAt });
       }, delay);
     },
     oncontextmenu(event) {
@@ -267,6 +372,8 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     destroy() {
       reset();
       unarmClickSwallow?.();
+      if (scrollWatch) unwatchScrolls(scrollWatch);
+      scrollWatch = null;
     },
   };
 }

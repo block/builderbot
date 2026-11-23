@@ -36,6 +36,7 @@
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
   import SearchField from '../../shared/SearchField.svelte';
+  import KeyboardSpacer from '../../shared/KeyboardSpacer.svelte';
   import { Button } from '$lib/components/ui/button';
   import { tagsStore } from '../../stores/tags.svelte';
   import ProjectsBoard from '../board/ProjectsBoard.svelte';
@@ -684,6 +685,7 @@
           </div>
         {/if}
       {/if}
+      <KeyboardSpacer />
     </div>
   </div>
 </div>

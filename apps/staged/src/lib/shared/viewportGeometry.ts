@@ -91,3 +91,20 @@ export function computeViewportGeometry(sample: ViewportSample): ViewportGeometr
     zoomed: false,
   };
 }
+
+/**
+ * How much of the layout viewport's bottom the on-screen keyboard covers, in
+ * px; 0 with no keyboard. For panes that keep their place and scroll under
+ * the keyboard (a list with a search field), which pad their end by this so
+ * the last rows can be scrolled clear of it.
+ *
+ * Measured to the visual viewport's bottom edge, so a page Safari has
+ * scrolled to reveal an input, which brings the layout's bottom on screen,
+ * reads as uncovered. The same stale-viewport and pinch-zoom rules as
+ * computeViewportGeometry apply.
+ */
+export function computeKeyboardInset(sample: ViewportSample): number {
+  if (isPinchZoomed(sample.scale) || !sample.textInputFocused) return 0;
+  const covered = sample.layoutHeight - (Math.max(0, sample.offsetTop) + sample.height);
+  return covered >= KEYBOARD_MIN_INSET_PX ? Math.round(covered) : 0;
+}

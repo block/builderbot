@@ -26,6 +26,7 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import SearchField from '../../shared/SearchField.svelte';
+  import KeyboardSpacer from '../../shared/KeyboardSpacer.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
@@ -182,6 +183,7 @@
           groupPicker={false}
         />
       {/if}
+      <KeyboardSpacer />
     </div>
   </div>
 </div>

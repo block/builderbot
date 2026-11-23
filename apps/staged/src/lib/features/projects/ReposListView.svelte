@@ -14,6 +14,7 @@
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import SearchField from '../../shared/SearchField.svelte';
+  import KeyboardSpacer from '../../shared/KeyboardSpacer.svelte';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
@@ -118,6 +119,7 @@
           </div>
         {/if}
       {/if}
+      <KeyboardSpacer />
     </div>
   </div>
 </div>

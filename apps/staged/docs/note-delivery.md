@@ -3,18 +3,30 @@
 A note session (a branch note, a project note, or a repo-note child of a
 project session) writes its note into a per-session draft file and delivers
 it by calling the `write_note` MCP tool. The file is the note; the call
-publishes it. Staged stores the file's contents at the moment of the call,
-under the title the call passes, and does not read the agent's assistant
-text. This replaced two earlier contracts: the note as the text after a `---`
-separator in the final assistant message, and then the note as a `body`
-argument of the call.
+publishes it. The file's first line is the note's title as a `# Title`
+heading, and the body is everything below that line. Staged stores the
+file's contents at the moment of the call, the title and the body apart, and
+does not read the agent's assistant text. This replaced three earlier
+contracts: the note as the text after a `---` separator in the final
+assistant message, then the note as a `body` argument of the call, and then
+the body in the draft file with the title as a `title` argument of the call.
 
 The body moved out of the call because an argument cannot be edited. With an
 inline body every refinement re-emitted the whole note: an amendment, a
 Pikchr repair and a rewrite each cost the full note in output tokens, and
 agents that drafted in a scratch file first paid for it twice. With the
-draft file a refinement is an edit of the same note, and the call carries a
-title and two short strings.
+draft file a refinement is an edit of the same note, and the call carries
+two short strings.
+
+The title moved out of the call for a related reason. While it was an
+argument, the seeded draft of an amendment held the body only, so an
+amending agent retyped the title from memory in the call. That could drift
+from the stored title, and it overwrote the ` (2)` suffix that a move to
+another branch can add. With the title in the file, the agent reads the
+stored title and keeps it unless it edits that line, and the draft is the
+text the note viewer renders and Copy produces. What is stored did not
+change: the title and the body are still separate columns, `meta.json` has
+no new key and there is no migration (see _Design decisions_).
 
 ## Tool contract
 
@@ -22,21 +34,20 @@ Staged offers a required MCP server named `staged` to every note session. It
 exposes one tool:
 
 ```text
-write_note(title: string, suggested_next_steps?: object | null)
+write_note(suggested_next_steps?: object | null)
 ```
 
-- `title` — required, plain text, shown as the note heading. A leading `#` is
-  stripped. The title is not read from the draft: an H1 in the file is body
-  text.
 - `suggested_next_steps` — `{ "suggestedNextCommitStep": string | null,
 "suggestedNextNoteStep": string | null }`, the same shape the old
   `suggested-next-steps` JSON block carried. Omitting the argument keeps the
   steps already stored on the note (a rewriting turn without the block used to
   behave the same way).
 
-There is no `body` argument, optional or otherwise. The handler always reads
-the session's draft file (`note_draft::read_draft` locally, `readDraft` in
-the Staged MCP on Blox) and publishes its trimmed contents as the body. The
+That is the whole schema, and it requires nothing. There is no `body` and no
+`title` argument, optional or otherwise: both come from the session's draft
+file. The handler always reads the draft (`note_draft::read_draft` locally,
+`readDraft` in the Staged MCP on Blox), takes the title from its first line
+and publishes the rest as the body (_The title line_ below). The
 draft must be a regular file, valid UTF-8, non-empty after trimming, and at
 most 1 MiB (`DRAFT_MAX_BYTES`; the largest stored note is 145 kB). A draft
 that is missing, empty, oversized, not UTF-8, not a regular file or
@@ -44,10 +55,11 @@ unreadable is a tool
 error (`isError: true`) that names the file by absolute path and says what
 to fix, for example ``write_note rejected: the draft file
 `/…/draft.md` does not exist. This file is your note: write the full note
-body (markdown, without the title) into it, then call write_note again.``
+into it as markdown, starting with the title as a `# ` heading on the first
+line, then call write_note again.``
 A rejected call leaves the submission slot and the outbox untouched, so an
-earlier publish in the same turn stands. An empty or multi-line title is
-rejected the same way.
+earlier publish in the same turn stands. A draft that does not open with its
+title, or holds nothing below it, is rejected the same way.
 
 Both handlers read the draft the same way, step for step:
 
@@ -69,7 +81,8 @@ Both handlers read the draft the same way, step for step:
   one anywhere else, is text and is kept.
 - The trim is Rust's `str::trim` (Unicode `White_Space`) on both sides. The
   script does not use JavaScript's `trim()`, which also strips U+FEFF and
-  leaves U+0085, so the same file yields the same body on both transports.
+  leaves U+0085, so the same file yields the same title and body on both
+  transports.
 - A file the handler may not read (mode 000, for instance) is rejected with
   ``write_note rejected: the draft file `…` could not be read: <cause>,
 then call write_note again.`` on both; the cause is the platform's own
@@ -79,9 +92,11 @@ Each call republishes the file; the last call of the turn wins. The result
 text is `Saved note "<title>" (<n> bytes from the draft file). If the user
 asked you a question this turn and you have not answered it in chat yet,
 answer it now, briefly. Otherwise send a simple "Done" message with no other
-text to end your turn, rather than summarising the work done.` (`<n>` is
-the body's UTF-8 length on both transports, which is why the text says
-bytes and not characters.) The text is word for word the same on both
+text to end your turn, rather than summarising the work done.` (`<title>`
+is the title read from the draft's first line, which tells the agent what
+was parsed. `<n>` is the UTF-8 length of the body, without the title line,
+on both transports, which is why the text says bytes and not characters.)
+The text is word for word the same on both
 transports (`note_tool::saved_message`, `savedMessage` in
 `staged-mcp.cjs`). The tool description ends with the same request: send
 "Done" after the saved result, and answer a question before making the
@@ -97,7 +112,89 @@ of holding for background work. That response is now the "Done" message.
 
 No call, no note. A draft that changed without a `write_note` call is never
 stored, whatever it holds: the call is the one signal that the note is
-ready, and the one place the title and next steps come from.
+ready, and the one place the next steps come from.
+
+### The title line
+
+The title is the draft's first line. Both handlers split the draft by the
+same rule (`note_draft::split_title` on the laptop, `splitDraftTitle` in
+`staged-mcp.cjs`), applied to the text the read above returns, so a leading
+byte order mark and the surrounding whitespace are already gone:
+
+1. The first line is the text up to the first `\n`.
+2. It must be one `#` followed by a space or a tab. The title is the rest of
+   that line, trimmed, and must not be empty.
+3. The body is everything below that line, trimmed, and must not be empty.
+
+Only that one line is consumed, and it is not part of the stored body. The
+note viewer, Copy and the context given to later sessions all put the title
+above the body themselves, so a body that kept the line would show the title
+twice.
+
+| Draft opens with                                 | Result                                                                           |
+| ------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Blank lines or a byte order mark, then `# Title` | Accepted. The read has already removed them.                                     |
+| `## Title`, or any deeper heading                | Rejected. A `##` heading is a section and never a title.                         |
+| `#` alone, or `#` and spaces                     | Rejected.                                                                        |
+| `#Title`, `#note:<id>`                           | Rejected. Neither is a heading, and a hashtag reference must not become a title. |
+| `Title` over a line of `===`                     | Rejected.                                                                        |
+| Front matter (`---`), or plain text              | Rejected.                                                                        |
+| ``# Use `foo` for [bar](x)``                     | Accepted. The title text is kept as written, inline markdown included.           |
+| `# Title #`                                      | Accepted as `Title #`. A closing `#` is not stripped.                            |
+| `# #12 follow-up`                                | Accepted as `#12 follow-up`. A `#` the title text starts with is kept.           |
+| `# Title` and nothing below it                   | Rejected as a note with no body.                                                 |
+| A second `# Heading` further down                | Body text, untouched.                                                            |
+
+A draft with CRLF line endings splits the same way: the `\r` that ends the
+title line is trimmed off.
+
+The two rejections use the frame of the other draft errors and name the
+file by absolute path, word for word the same on both transports:
+
+- No title line (`DraftError::MissingTitle`): ``write_note rejected: the
+draft file `<path>` does not start with the note's title. Its first
+non-blank line must be a level-1 markdown heading: `# ` followed by the
+title on one line (not `##`, not a line underlined with `===`, and nothing
+above it). Add that line at the top and leave the rest of the note below
+it, then call write_note again.``
+- Title only (`DraftError::TitleOnly`): ``write_note rejected: the draft
+file `<path>` holds only the title line. Write the note body in markdown
+below the `# ` title line, then call write_note again.``
+
+**A stale `title` argument.** `title` was an argument until the title moved
+into the draft. No schema and no prompt names it now, but a session resumed
+with the earlier instructions in its context may still pass it. Both
+handlers therefore still read it (`WriteNoteParams.title`, hidden from the
+schema with `#[schemars(skip)]`, and a plain `args.title` read in the
+script) and apply one rule (`note_tool::stale_title_agrees`,
+`staleTitleAgrees`):
+
+- Absent or null: the normal call.
+- A string that, trimmed as Rust trims, is the draft's title as written, or
+  is that title behind exactly one leading `#`: accepted, and the draft's
+  title is what is stored. The second form is there because the earlier
+  contract stripped one leading `#` from the argument, so a call that
+  passed `# Plan` meant the title `Plan`. Nothing more is stripped:
+  `## Plan` agrees with a draft that opens `# # Plan` or `# ## Plan` and
+  not with one that opens `# Plan`.
+- Anything else, an empty string and a value that is not a string included:
+  rejected, and nothing is written. The text is ``write_note rejected:
+`title` is no longer an argument. The note's title is the first line of
+the draft file `<path>`, currently "<heading title>", which differs from
+the `title` you passed. Edit that line if the title should change, then
+call write_note again without `title`.``
+
+The draft is checked before the argument is compared, on both transports,
+so a call that passes `title` on a draft that is missing, empty or has no
+title line gets that draft's error. A `title` that disagrees is rejected and
+not ignored, because ignoring it would silently drop a rename asked for by
+an agent whose context still holds the earlier instructions. The Rust field
+is a JSON value and not a string, so a number or an array gets this
+rejection, as in the script, and not a deserialization error.
+
+This tolerance is temporary. It is to be removed from both handlers once
+sessions started under the earlier contract are unlikely to be resumed, and
+that removal has not been done.
 
 ### The draft file
 
@@ -121,13 +218,25 @@ What the file holds at run start depends on the stored note
   empty file would trip Claude Code's read-before-write gate, and Write on a
   missing path needs no Read. A stale draft from an earlier run is removed.
 - **Amendment or Pikchr repair** (the stored note has a body): the file is
-  seeded with the stored body before the agent starts, verbatim, so the
-  agent reads it and edits only what changes. Verbatim includes a heading
-  the body opens with and every `staged-media://` reference. The store
-  keeps the body without the title, and `write_note` treats an H1 at the
-  top of the draft as body text, so the seed must not strip one either: a
-  body that opens with `# Section` comes back from a seed, an untouched
-  republish and the store with that heading in place.
+  seeded with the stored note before the agent starts, so the agent reads
+  it and edits only what changes. The seed is the stored title as the title
+  line, a blank line, then the stored body verbatim
+  (`note_draft::title_heading`). Verbatim includes a heading the body opens
+  with and every `staged-media://` reference. The seed and the publish
+  mirror each other: the store keeps the body without the title, the seed
+  adds exactly one line above it, and `write_note` takes exactly one line
+  off. A seeded draft published untouched therefore gives the stored title
+  and body back, so the store sees an identical republish and keeps
+  `updated_at`. A body that opens with `# Section` keeps that heading: it
+  is the draft's third line and never its first.
+
+  The title is made to fit on one line before it is written
+  (`heading_safe_title`): every run of whitespace, line breaks included,
+  becomes one space, and a title with nothing left becomes `Untitled Note`.
+  A stored title that is already one trimmed line with single spaces comes
+  through unchanged. Whether there is a seed still depends on the body
+  alone: a note whose stub row has a title and no body is a fresh note.
+
 - **Repair of a waiting note** (remote only): when the start-of-run
   recovery finds a published note with a Pikchr block that does not parse,
   the draft that note was published from is neither removed nor seeded
@@ -142,10 +251,17 @@ instructions and the note follow-up prompt) all use
 `session_commands::note_delivery_guidance(draft_path)`. It names the file
 once and states the contract in one sentence: "Your note draft file is
 `<path>`. This file is your note. Write it, edit it, and when it is ready
-call `write_note`." It adds the amendment rule ("If the file already exists,
-it holds the note as last saved: Read it and edit only what changes instead
-of rewriting it"), and says that assistant text is not saved and that the
-call takes no body. Its last paragraph asks for the ending: once the tool
+call `write_note`." It says how the file is laid out ("The file's first line
+must be the note's title as a level-1 heading: `# ` followed by the title on
+one line. The note body goes below that line; use `##` and deeper headings
+for its sections"; the advice about sections is guidance, which the handlers
+do not enforce). It adds the amendment rule ("If the file already exists, it
+holds the note as last saved, title line included: Read it and edit only
+what changes instead of rewriting it"). It says that assistant text is not
+saved, that neither the title nor the body is passed to the call ("both come
+from the file"), that a published note or its title is changed by editing
+the file and calling again, and that the call takes one argument. Its last
+paragraph asks for the ending: once the tool
 reports the note is saved, send a simple "Done" message with no other text,
 which Staged hides, and answer a user's question in the reply before the
 call. One wording serves a fresh note and an amendment because
@@ -160,12 +276,12 @@ The Pikchr correction prompt (`build_pikchr_correction_prompt`) carries
 where the error was found (`PikchrErrorOrigin`), because the two checks
 read different text and the line number counts that text's lines:
 
-| Error found in                  | `write_note` attached | The prompt asks for                                                                                                                                                                                       |
-| ------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The note the call published     | yes                   | An edit of the block at line N of the draft file, then another `write_note` call with the title and next steps only. The line counts the published body, which starts at the file's first non-blank line. |
-| The final assistant message     | yes                   | The diagram corrected in the draft file (written if it does not exist yet), then a `write_note` call. It says the line number is the reply's and makes no claim about what the draft holds.               |
-| The final assistant message     | no                    | A corrected reply in the `---` format. It says the tool is not available in this run and does not ask for a call.                                                                                         |
-| A plain session's final message | n/a                   | A complete corrected final response.                                                                                                                                                                      |
+| Error found in                  | `write_note` attached | The prompt asks for                                                                                                                                                                                                                                               |
+| ------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The note the call published     | yes                   | An edit of the block at line N of the note body in the draft file, then another `write_note` call with the suggested next steps. The line counts the published body, from the first non-blank line after the `# ` title line, so it is not the file's own line N. |
+| The final assistant message     | yes                   | The diagram corrected in the draft file (written if it does not exist yet, the title line first and the body below it), then a `write_note` call. It says the line number is the reply's and makes no claim about what the draft holds.                           |
+| The final assistant message     | no                    | A corrected reply in the `---` format. It says the tool is not available in this run and does not ask for a call.                                                                                                                                                 |
+| A plain session's final message | n/a                   | A complete corrected final response.                                                                                                                                                                                                                              |
 
 Which text is checked depends on what the turn will store
 (`turn_pikchr_error`):
@@ -213,14 +329,21 @@ In the chat pane a `write_note` call (`mcp__staged__write_note` from Claude,
 `staged: write note` from Goose, `mcp.staged.write_note` from Codex) is not
 shown as a generic "Ran" row. A call that saved the note is shown as the
 note card, "Note created" or "Note updated", in the row's place (_The note
-card_ below). Every other call gets its own row named after the title, with
-the title and the suggested next steps in its details (`noteToolCall.ts`,
+card_ below). Every other call gets its own row (`noteToolCall.ts`,
 `NoteToolDetails.svelte`): "Saving note" while the call runs, "Note
-rejected" when the tool refused it, and "Saved note" for the one saved call
-that stays a row, a final-turn call that did not change the stored note.
-The row has no body preview: the call carries no body, and the stored note
-is where the body is read. A `body` on a row recorded before this change is
-ignored.
+rejected" when the tool refused it, "Note not saved" for a cancelled call,
+and "Saved note" for the one saved call that stays a row, a final-turn call
+that did not change the stored note. The row is its verb alone, because the
+call carries no title, and its details list the suggested next steps and
+the tool result. A call with no arguments at all, which the schema allows,
+has no note section, so its row expands only when there is a result to show
+(`writeNoteCallHasDetails`). The row has no title and no body preview: the
+stored note is where both are read.
+
+A transcript recorded while `title` was an argument renders as it did. The
+row is named after the title (`writeNoteRowDetail`), its details show the
+title above the steps, and the raw input JSON stays hidden. A `body` on a
+row recorded before the draft file is ignored.
 
 Tool calls still `pending` or `in_progress` when the session has settled
 render by the session's outcome (`AcpTranscriptOptions`): in a session that
@@ -320,8 +443,8 @@ it:
   read "Done" for the moment between the message and the end of the turn.
 
 Remote sessions follow the same rule over the same rows. The script's
-result text is compared with the laptop's by test, and `SERVER_VERSION` is
-7 for this wording (see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)).
+result text is compared with the laptop's by test, and `SERVER_VERSION` went
+to 7 for this wording (see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)).
 The upload is gated on a checksum, so a workstation gets the new text on
 its next session, together with the app that hides the word.
 
@@ -348,7 +471,7 @@ The first delivery is "Note created" across both shapes, so a session that
 began on the separator and continued on the tool has one "Note created".
 
 A call that was rejected, interrupted or is still running is not a
-delivery. It keeps its tool row, with its title and details. A rejected
+delivery. It keeps its tool row, with its details. A rejected
 call followed by a retry shows a "Note rejected" row and then the card. Two
 saved calls in a row are two cards: `groupRichToolsByVerb` takes a
 predicate for the items the pane renders on its own, so they do not fold
@@ -459,8 +582,9 @@ draft path when the server starts, and names it in the server's `initialize`
 instructions (`note_tool::draft_instructions`) with the sentence the Staged
 MCP on Blox uses. The tool description says the path "is in your
 instructions", and this is what makes that true on both transports, even
-for a session whose prompt predates the draft file. On each call it reads the draft and
-writes the title, body and next steps into a per-run `NoteSubmissionSlot`
+for a session whose prompt predates the draft file. On each call it reads the draft,
+splits it into the title and the body (`NoteSubmission::from_draft`), and
+writes them with the next steps into a per-run `NoteSubmissionSlot`
 shared with the message writer, the post-turn Pikchr validation (which
 checks the published body, since the transcript does not carry the note,
 and skips the unsaved reply once a note is published),
@@ -509,7 +633,7 @@ At remote note session start, the session runner:
    (`CollectError::Transport` vs `CollectError::Content`): an unreachable
    workstation leaves the outbox alone and is logged, while unusable content
    (`meta.json` that does not parse, a body that is not valid base64, a title
-   the tool would reject) is logged, cleared and skipped, because nothing
+   that is empty or more than one line) is logged, cleared and skipped, because nothing
    will ever make it ingestible. A waiting note is checked before it is
    handed to the hooks: one with a Pikchr block that does not parse is not
    stored. It is reported as `OutboxRecovery::Rejected` with the parse
@@ -523,7 +647,7 @@ At remote note session start, the session runner:
    the run starts: a recovery failure must not cost the session its tool.
    The command that empties the outbox also puts `draft.md` in its
    run-start state (`clear_outbox_and_seed`): removed for a fresh note,
-   written from the stored body for an amendment. It leaves the session
+   written from the stored note, title line first, for an amendment. It leaves the session
    directory in place (mode 700) either way, so the agent's first write of
    the draft needs no `mkdir`. The seed is asked for after any ingest, so a
    note recovered a moment ago is what gets seeded. The recovery reports
@@ -567,8 +691,15 @@ again from memory. Now:
   normally the text the note was published from. It can also be later text,
   when a repair turn fixed the block and lost its connection before it
   called `write_note`. When the earlier run left no draft at all, the same
-  command moves the rejected body into `draft.md`, so the file the prompt
-  names exists;
+  command builds `draft.md` from the rejected note, so the file the prompt
+  names exists and is one the tool accepts. `note.md` holds the body only,
+  so the command puts the title line for the rejected title
+  (`RejectedNote.title`, through `note_draft::title_heading`) and a blank
+  line above it, in the seed's temp file, and renames that into place. A
+  `write_note` call on that draft publishes the rejected title and body
+  again. A draft kept from a run that started before the title moved into
+  the file has no title line: the repair run's first call is rejected for
+  the missing line, and the agent adds it;
 - the rejected note (`RejectedNote`: its title and the first block that
   does not parse) is carried to the run's first prompt. `first_turn_prompt`
   appends a short notice of what Staged found and then the correction a
@@ -636,8 +767,8 @@ directory and writes atomically (temp file + rename) into the outbox, the
 note's three files beside it:
 
 ```text
-~/.staged/sessions/<session-id>/draft.md   the agent's draft: the note body (markdown, no title)
-~/.staged/sessions/<session-id>/note.md    published body, a copy of the draft at the call
+~/.staged/sessions/<session-id>/draft.md   the agent's draft: the whole note in markdown, the `# Title` line first
+~/.staged/sessions/<session-id>/note.md    published body: the draft at the call, without the title line
 ~/.staged/sessions/<session-id>/meta.json  {"title","suggestedNextSteps","turn","writtenAt","helperVersion"}
 ~/.staged/sessions/<session-id>/done       marker holding the call's token, removed first and written last
 ```
@@ -645,6 +776,14 @@ note's three files beside it:
 `note.md` is a snapshot, not a link: the collector reads the note the call
 published even if the agent goes on editing the draft, and the draft is
 left in place after the call so a second call republishes it.
+
+The script splits the draft on the workstation. `meta.json` gets the title
+read from the draft's first line, and `note.md` gets the body below that
+line. The split has to happen there: the laptop never reads the draft and
+may be disconnected when the call is made, and a draft with no title line
+has to be answered with a tool error in that call. The outbox format did not
+change when the title moved into the draft. It is the same three files, and
+`meta.json` has the same keys.
 
 A rewrite (a second `write_note` call in the same turn) unlinks `done` before
 it touches `note.md`, and recreates it only after both files are renamed into
@@ -662,7 +801,9 @@ note only when the token is the same (see _Collector_ below).
 
 The `turn` value is the per-run id the server was started with, so the
 collector can tell this run's note from an earlier one. `helperVersion` is
-the script's `SERVER_VERSION`, under the key earlier builds wrote.
+the script's `SERVER_VERSION`, under the key earlier builds wrote. The
+collector reads it to decide how to take the title (_The title depends on
+the script's version_ below).
 
 ### Collector
 
@@ -690,6 +831,32 @@ script from before version 6, which is collected as it always was, without
 the second protection. One empty token and one that is not are different
 markers. The clear scripts only test that the marker exists, so they are
 unchanged and work with either script.
+
+**The title depends on the script's version.** `outbox_state` reads
+`helperVersion` from `meta.json` before it builds the submission:
+
+- **Version 8 or later** (`TITLE_AS_WRITTEN_SERVER_VERSION`): the title in
+  `meta.json` is the one to store. It is trimmed and checked, and nothing is
+  stripped from it (`NoteSubmission::from_parts_as_written`). From version
+  9 it is always the text of the draft's title line, which the local handler
+  keeps as written, so a draft that opens `# #12 follow-up` is titled
+  `#12 follow-up` on both transports.
+- **Version 7 or earlier, or no version**: the title is the `title`
+  argument of the earlier contract, and `note.md` is the whole draft. The
+  title is normalized the way the tool normalized that argument
+  (`NoteSubmission::from_parts`: trimmed, one leading `#` stripped), so such
+  an outbox is collected as it always was.
+
+Both paths reject an empty or multi-line title and an empty body, with the
+same reasons (`outbox note is invalid: …`). The gate is needed because
+outboxes of the earlier shape are still written after an update. A running
+`node` process keeps the script it was started from, so a turn that
+outlives its connection, or is taken over, finishes on the script and the
+prompt it started with. Stripping a `#` from every title would instead have
+titled `# #12 follow-up` as `12 follow-up` for a remote session only.
+`outbox_state` is the one place a snapshot becomes a submission, so the
+per-turn collection, the sweep and the run-start recovery needed no change
+of their own.
 
 A `Delivered` result for this run's turn id becomes a `NoteSubmission` with
 source `Outbox` and is stored in the same `NoteSubmissionSlot` the local tool
@@ -1046,9 +1213,9 @@ never routes file or terminal access through the laptop.
 If a note session's turn ends with no `write_note` call (and no `---`
 separator text, see below) and the note has no stored body yet, the session
 runner sends one follow-up prompt (`note_write_followup_prompt`): "Write or
-finish the draft at `<path>` (the full note body in markdown, without the
-title), then call the `write_note` tool with `title` and
-`suggested_next_steps`". A draft the agent wrote but never published is
+finish the draft at `<path>` (the full note in markdown: the title as a `# `
+heading on the first line, then the body), then call the `write_note` tool
+with `suggested_next_steps`". A draft the agent wrote but never published is
 covered by the same prompt: it only has to call the tool. It does this once;
 a second silent turn stores the empty note as before, so a session cannot
 loop.
@@ -1075,6 +1242,9 @@ follow-up, because the call it would ask for cannot be made: "The
 note from your reply instead. Reply with a line containing only `---`, then
 the note: a markdown H1 title (`# <Title>`) on the next line, followed by
 the full note body". That is the format the fallback parser below accepts.
+It is also the layout of the draft file, so the follow-up adds that an agent
+which already wrote the note into its draft can use the file's contents as
+the note.
 The sentence says "in this run" on purpose: it stays in the agent's context,
 and a later Resume of the same session may attach the tool.
 
@@ -1554,16 +1724,69 @@ them by accident:
   no body, not even an optional one. An optional body would keep the
   re-emission cost for every agent that chose it and leave two ways for the
   body to arrive, and mirroring an inline body into the file would make the
-  file a copy rather than the note. The title stays an argument (required in
-  both schemas) rather than the draft's H1, so the body never needs parsing
-  for it and an H1 in the draft stays body text. The seed follows the same
-  rule and writes the stored body verbatim; stripping a leading H1 from the
-  seed, as the first version did for older notes that might carry a title
-  line, silently dropped a real `# Section` heading on the next amendment
-  (and no stored note was found to start with a title line). Publishing stays an
+  file a copy rather than the note. Publishing stays an
   explicit call rather than "whatever the file holds when the turn ends":
   a half-written draft must not become the note because a turn ended.
-- **A fresh note gets no file; an amendment gets the stored body.** An empty
+- **The title is the draft's first line, not an argument.** This reverses
+  an earlier decision recorded here. The title used to stay an argument,
+  required in both schemas, so that the body never needed parsing for it
+  and an H1 in the draft stayed body text. The seed followed the same rule
+  and wrote the stored body verbatim, with no title in the file.
+
+  It was reversed for amendments and for one shape. An amending agent could
+  not see the stored title in its draft and retyped it in the call, which
+  could drift and overwrote the ` (2)` suffix a move adds. With the title
+  line, the draft is the text the note viewer renders, Copy produces, the
+  `---` fallback accepts and the written-note editor already uses. The call
+  shrinks to one optional argument.
+
+  The earlier entry also recorded a bug: the first version of the seed
+  stripped a leading H1 from the stored body, for older notes that might
+  carry a title line, and silently dropped a real `# Section` heading on
+  the next amendment. That pair was not symmetric. The seed removed a line
+  that the save had never added, so a heading that belonged to the body was
+  taken for a title. The new pair is symmetric. The store holds the body
+  without the title, the seed always adds exactly one line (`# {title}`,
+  above a blank line) and the save always removes exactly one, the first.
+  Neither looks at what the body opens with, so a body that opens with
+  `# Section` has that heading on the draft's third line and gets it back
+  (`a_body_that_opens_with_a_heading_survives_seed_republish_and_store`).
+
+  What is stored did not change, so this is a change at the two handlers
+  and nowhere downstream: the title and the body stay separate columns, the
+  outbox keeps its files and keys, and there is no migration. Existing notes
+  need none either, since a stored body never held the title.
+
+  The rule is strict and one line long. Only `# ` plus text on the first
+  line is a title: a `##` heading is not read as one, because stored bodies
+  do open with `##` sections, and a closing `#` is kept as text so that the
+  two parsers stay trivial. The cost is that an invariant the schema used to
+  enforce is now enforced by the prompt and a rejection. A missing `title`
+  argument was rare because the schema required it; a missing title line
+  costs one rejected call and a one-line edit. How often a first call is
+  rejected for it has not been measured in live runs, the way the earlier
+  wording changes in this document were. The rule also exists twice, in
+  `note_draft.rs` and in `staged-mcp.cjs`, and a change to it must land in
+  both; `write_note_reads_the_same_drafts_on_both_transports` is the guard.
+
+- **A stale `title` argument is compared, not ignored, and only for now.**
+  A session resumed with the earlier instructions in its context may still
+  pass `title`. Ignoring it would silently drop a rename; rejecting every
+  such call would cost an extra call even when the argument says what the
+  draft says. So it is accepted when it agrees with the title line and
+  rejected with a text that names the line when it does not (_The title
+  line_). This is temporary. The tolerance is to be removed from both
+  handlers once sessions started under the earlier contract are unlikely to
+  be resumed, and that removal has not been done.
+- **The collector reads the script's version to take the title.** A title
+  the script parsed from the draft must be stored as written, and a title
+  that was an argument of an earlier script must still lose one leading `#`
+  (_The title depends on the script's version_). The version was already
+  in `meta.json`, so no key was added and the outbox format did not change.
+  Two app builds that share a workstation can still pair one build's prompt
+  with the other's script. That is limited to development and is not
+  handled.
+- **A fresh note gets no file; an amendment gets the stored note.** An empty
   pre-created file forces a Read before the first Write in Claude Code and
   tells the agent nothing. A seeded file is what makes an amendment an edit:
   without it the agent would have to re-emit the note from chat history,
@@ -1620,12 +1843,13 @@ Local:
 
 1. Start a note session on a local branch (or a project note). The log shows
    `note draft <temp dir>/staged-note-draft-<session-id>.md absent for a
-fresh note`. The agent writes that file with its file tool, then calls
-   `write_note` with a title and next steps only. In the chat pane the call
-   shows as a "Saving note" row named after the title while it runs, with
-   the title and the suggested next steps in its details and no body
-   preview. When the call completes the row becomes the "Note created"
-   card. Nothing shows under the card: the agent's closing "Done" is
+fresh note`. The agent writes that file with its file tool, the title as a
+   `# ` heading on the first line, then calls `write_note` with the next
+   steps only. In the chat pane the call shows as a "Saving note" row while
+   it runs, the verb alone with no title beside it, with the suggested next
+   steps in its details and no body preview. When the call completes the row
+   becomes the "Note created" card. The stored note's title is the text of
+   the draft's first line, and the note viewer shows that title once. Nothing shows under the card: the agent's closing "Done" is
    hidden, and the log has no `note-done drift` line for the session. The
    note row updates when the turn ends. After the run the draft file is
    gone.
@@ -1635,9 +1859,11 @@ fresh note`. The agent writes that file with its file tool, then calls
    file) and that the `staged` server appears in the ACP `session/new`
    request.
 3. Put an invalid Pikchr block in the draft: the correction prompt must name
-   the draft file and the block's line, the agent must edit that block in the
-   file (an Edit, not a rewrite) and call `write_note` again without a body,
-   and the stored note must be the repaired one. (Applies to remote sessions
+   the draft file and the block's line (a line of the note body, counted
+   from the first non-blank line after the title line), the agent must edit
+   that block in the file (an Edit, not a rewrite) and call `write_note`
+   again with the next steps only, and the stored note must be the repaired
+   one. (Applies to remote sessions
    too: the outbox is collected after every settled turn, so the same
    correction prompt and re-collection happen there.)
 4. On a fresh note, ask the agent (in the prompt) to not call any tools:
@@ -1650,12 +1876,13 @@ fresh note`. The agent writes that file with its file tool, then calls
 5. Local Claude amendment: on a Claude note session whose note is stored and
    holds an embedded image, send "Please update the note: add a short
    Risks section". The log shows `note draft … seeded with the stored note
-for amendment`, and before the agent's first tool call the file holds the
-   stored body verbatim, with the `staged-media://` reference unchanged
+for amendment`, and before the agent's first tool call the file holds
+   `# <stored title>`, a blank line and the stored body verbatim, with the
+   `staged-media://` reference unchanged
    (`cat "$TMPDIR"/staged-note-draft-<session-id>.md`). The transcript must
    show a Read of the draft, an Edit that adds the section, and a
    `write_note` call; it must not show a Write of the whole note. The stored
-   note keeps its image, and the draft is gone after the run.
+   note keeps its title and its image, and the draft is gone after the run.
 6. Codex fresh note in `$TMPDIR`: start a note session with Codex as the
    provider on a local branch. Codex must create
    `$TMPDIR/staged-note-draft-<session-id>.md` without a sandbox or
@@ -1673,7 +1900,7 @@ for amendment`, and before the agent's first tool call the file holds the
    first one still reads "Note created", and no "Ask for the note to be
    updated" button shows. Then ask the agent to publish the note again
    without changing it ("call `write_note` again with the draft as it is,
-   and the same title and next steps"). After the turn settles that call
+   and the same next steps"). After the turn settles that call
    shows as a "Saved note" row, not a card, the note's timestamp is
    unchanged, and the button shows under the row.
 8. A question in a note turn. On a stored note, ask for a change and a
@@ -1697,6 +1924,21 @@ for amendment`, and before the agent's first tool call the file holds the
     bridges (Goose under a headless runner also needs
     `GOOSE_DISABLE_KEYRING=1`). Run it for each bridge when the drift count
     rises or a new model ships.
+11. The title line. In a new note session, ask the agent to start its draft
+    with a plain sentence and no heading, then call `write_note`. The tool
+    result must read `write_note rejected: the draft file … does not start
+with the note's title. …`, the agent must add the `# ` line and call
+    again, and the chat pane shows a "Note rejected" row and then the note
+    card. Then, on that stored note, ask for a rename only ("rename the note
+    to …"): the agent must edit the draft's first line and call `write_note`
+    with the next steps only, the timeline row shows the new title, and the
+    note body is unchanged.
+12. First calls rejected for a missing title line. Run fresh and amending
+    note sessions on Claude, Goose and Codex and count the first
+    `write_note` calls that are rejected with the text of step 11 when
+    nothing asked for it. This count has not been taken yet. If it is more
+    than a few percent, the wording of `note_delivery_guidance` needs
+    tuning.
 
 Blox:
 
@@ -1707,7 +1949,8 @@ Blox:
    (no `~`, no `$HOME`), and the log line `Staged MCP on Blox attached …
 note draft at <path>` names the same file. After the `write_note` call,
    `~/.staged/sessions/<session-id>/` on the workstation holds `draft.md`,
-   `note.md` (identical to the draft, trimmed), `meta.json` and `done`.
+   `note.md` (the draft without its title line, trimmed), `meta.json` (its
+   `title` is the text of that line and its `helperVersion` is 9) and `done`.
    `done` holds 32 hex characters, and a second `write_note` call changes
    them. The commands before the agent starts are the ones that ran before the draft
    existed (the install probe, the outbox read, the clear); none was added
@@ -1717,12 +1960,13 @@ note draft at <path>` names the same file. After the `write_note` call,
    Goose amendment on Blox: on a Goose remote note session whose note is
    stored, send a follow-up asking for one added paragraph. Before the
    agent's first tool call, `cat ~/.staged/sessions/<session-id>/draft.md`
-   on the workstation shows the stored body verbatim (`staged-media://`
-   references included); no extra `ws exec` was spent on it (the clear
+   on the workstation shows `# <stored title>`, a blank line and the stored
+   body verbatim (`staged-media://` references included); no extra `ws exec`
+   was spent on it (the clear
    command carries the base64 seed). Goose must open the file by the
    absolute path from its prompt, edit it in place, and call
-   `staged: write note` with a title and next steps only. The stored note
-   has the new paragraph and every earlier section byte-for-byte.
+   `staged: write note` with the next steps only. The stored note has the
+   same title, the new paragraph and every earlier section byte-for-byte.
 3. Disconnect tests. Use a prompt that keeps the turn open after the note
    is published, and wait for the note card ("Note created") before each
    kill. A bare
@@ -1862,27 +2106,48 @@ workstation outbox; storing it`, the note fills in on the timeline, the
    `appeared in the workstation outbox`); the other logs nothing for the
    session.
 5. Write a note by hand on the workstation through the Staged MCP on Blox:
-   `mkdir -p ~/.staged/sessions/<session-id> && printf 'Written by hand\n' >
+   `mkdir -p ~/.staged/sessions/<session-id> && printf '# Hand\n\nWritten by hand\n' >
 ~/.staged/sessions/<session-id>/draft.md`, then
-   `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Hand"}}}' | node
-~/.staged/bin/staged-mcp.cjs <session-id> <turn-id>`. Without the draft the
-   same call answers `isError: true` naming the missing file and writes
-   nothing into the outbox.
+   `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{}}}' | node
+~/.staged/bin/staged-mcp.cjs <session-id> <turn-id>`. The result reads
+   `Saved note "Hand" (15 bytes from the draft file). …`, `meta.json` holds
+   `"title":"Hand"` and `"helperVersion":9`, and `note.md` holds
+   `Written by hand` with no heading. Without the draft the same call
+   answers `isError: true` naming the missing file and writes nothing into
+   the outbox. So does a draft with no title line
+   (`printf 'Written by hand\n'`), with the "does not start with the note's
+   title" text. For the stale argument, repeat the call on the `# Hand`
+   draft with `"arguments":{"title":"Hand"}` and then
+   `"arguments":{"title":"# Hand"}`: both save the note as "Hand". With
+   `"arguments":{"title":"Other"}` the call answers `isError: true` with
+   the "`title` is no longer an argument" text, which quotes "Hand", and
+   the outbox keeps the earlier call's files.
 
 Automated coverage: `note_draft::tests` (paths, each bad-draft case and its
 error text, one leading byte order mark dropped before the trim, a symlink
-followed, a FIFO rejected without blocking, an unreadable file, the seed
-verbatim with a leading heading and media references kept, a seeded draft
-republishing the stored body, seeding and removal, the prompt path, the
+followed, a FIFO rejected without blocking, an unreadable file,
+`split_title` over every row of the table in _The title line_, CRLF line
+endings and the two title error texts, the seed with the title line above
+the stored body and a leading heading and media references kept, the
+heading-safe seed title, a seeded draft published untouched giving the
+stored title and body back, seeding and removal, the prompt path, the
 unresolved-home placeholder and the home epilogue), `note_tool::tests`
-(schema with a required `title` and no `body`, the `initialize`
-instructions naming the draft, the handler publishing and
-republishing the draft, each bad draft rejected by path without touching the
-slot),
+(schema with `suggested_next_steps` only, no `title`, no `body` and nothing
+required, the tool texts putting the title in the draft and not in the
+call, the `initialize` instructions naming the draft, the handler
+publishing and republishing the draft with the title from its first line,
+each bad draft rejected by path without touching the slot, a draft with no
+title line or only a title line rejected the same way, a stale `title`
+accepted when it agrees with the title line and rejected when it does not,
+and `from_parts` beside `from_parts_as_written` for the two outbox title
+rules),
 `session_runner::tests::note_draft` (a fresh local run removes a stale draft
-and creates none, an amending run seeds it for branch and project notes, a
+and creates none, an amending run seeds it with the title line and the body
+for branch and project notes and with the same text on both transports, a
 body that opens with `# Section` survives seed, untouched republish and
-store twice over, the
+store twice over with its timestamp unchanged, an edit of the title line or
+of the body changes what is stored, a stored title that is not one line
+seeds a draft that publishes, the
 draft is removed at run end, a remote run start costs the same two commands
 with or without a seed, a failed seed leaves the recovery settled and so
 does a rejected waiting note, only a rejected recovery carries a note to
@@ -1906,7 +2171,9 @@ appears with an unresolved home and only then),
 injection, protocol; see [`staged-mcp-on-blox.md`](./staged-mcp-on-blox.md)),
 `remote_staged_mcp::note_outbox::tests` (outbox parsing including a
 marker that changed between the reads and a marker whose token changed
-between them, with equal, differing, empty and half-empty tokens, the
+between them, with equal, differing, empty and half-empty tokens,
+`outbox_state` keeping a version 8 title as written and normalizing the
+title of an earlier or unversioned outbox, the
 collect script printing the token on both marker lines under a local `sh`,
 a whole rewrite made to land between the script's two file reads never
 collected as one note, two `write_note` calls writing different tokens,
@@ -1915,9 +2182,15 @@ per-turn collection into the slot, start-of-run recovery that discards
 unusable content, and that rejects a note with a broken Pikchr block
 without storing it, removing only its publication and keeping the draft
 (recorded commands, a removal that cannot be confirmed, and a local `sh`
-run with the draft as published, edited since, and missing), `write_note` run as a subprocess with fake JSON-RPC
+run with the draft as published, edited since, and missing), the reject
+script writing a draft that the handler and the script then accept,
+`write_note` run as a subprocess with fake JSON-RPC
 including a rewrite blocked between its renames and a call with no
-`draft.md`, the clear removing `draft.md`, the seed riding the recovery's
+`draft.md`, the draft's heading published as the `meta.json` title with no
+heading in `note.md`, a draft with no heading or only a title line rejected
+with the outbox untouched, a stale `title` argument that must agree with
+the heading, an outbox written by a version 7 script still collected by
+turn, by the sweep and by the run-start recovery, the clear removing `draft.md`, the seed riding the recovery's
 clear command and a seed too large for one command, a failed seed reported
 apart from the settled recovery, every clear removing `.draft.md.seed`, a
 draft left by a lost run never collected or ingested without a call, local
@@ -1927,7 +2200,9 @@ Rust tool, and `write_note_reads_the_same_drafts_on_both_transports`, which
 runs the laptop's handler and the script over the same draft
 files — missing, blank, byte order mark cases, Unicode whitespace, not
 UTF-8, over and at the cap, a directory, a FIFO, a symlink, an unreadable
-file — and requires the same result text and published body), `session_runner::tests::detached_recovery` (claim-first
+file, drafts with a title line, with none and with only a title line, and a
+table of stale `title` calls — and requires the same result text, title and
+published body), `session_runner::tests::detached_recovery` (claim-first
 sweep: one winner, resume during collection; the poll window and its marker;
 a poll that finds the note claims with the storing marker, then ingests once,
 then completes; two instances that read the row before either claimed settle
@@ -1992,13 +2267,20 @@ grace when the wrapper ignores SIGINT, and right after the wrapper is reaped
 when it honours it), `blox-cli`
 (`--env-vars`), the session runner and prompt tests for the fallback and
 follow-up paths (`session_commands::tests`: every note prompt names the
-draft once with the amendment wording and no `body`; the grammar upload
+draft once with the title-line and amendment wording and no `title` or
+`body` argument; the grammar upload
 returns the workstation home from its last command), and on the frontend
-`noteToolCall.test.ts` (title and next steps, no body, and the tool name in
+`noteToolCall.test.ts` (next steps with no title, a call with no arguments,
+a call recorded with a title, no body, the row detail and the
+has-details check, and the tool name in
 each bridge's spelling from the shared case table),
-`NoteToolDetails.component.test.ts` (no body preview or "No note body"
+`NoteToolDetails.component.test.ts` (steps with no title line, a recorded
+title above the steps, no panel for a call with neither, and no body
+preview or "No note body"
 row), `toolCallViewModel.test.ts` /
-`acpTranscript.test.ts` (the `write_note` row for all three bridges,
+`acpTranscript.test.ts` (the `write_note` row for all three bridges, the
+verb alone for a call with no title, a call with no arguments that expands
+only onto its result, rows named after a recorded title,
 interrupted pending calls, and the grouping predicate that keeps note cards
 out of a collapsed group), `sessionModalHelpers.test.ts` (the detached, storing and unread-outbox copy and which
 end-of-session notice the chat pane renders), `acpTranscript.test.ts` (only
@@ -2011,7 +2293,7 @@ For the ending of a saved turn: `note_tool::tests` and
 sentences and the last paragraph of the guidance in every note prompt.
 `saved_result_text_is_identical_for_local_and_remote_sessions`
 (`remote_staged_mcp::note_outbox::tests`) gives the local handler and the
-script the same title and draft and compares the two result texts.
+script the same draft and compares the two result texts.
 `noteDoneWording.test.ts` reads `note_tool.rs`, `staged-mcp.cjs` and
 `session_commands.rs` as text: each result text, each description and the
 session prompt must quote exactly one closing word, and it must be the

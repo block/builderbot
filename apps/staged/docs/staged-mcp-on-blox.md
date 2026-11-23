@@ -144,15 +144,18 @@ scratch area shared by every tool of that session:
 - Each tool owns its own file names in it. Keep them distinct per tool.
 - A file can be the agent's to write rather than the tool's. `draft.md` is:
   the agent writes and edits it with its own file tools, and `write_note`
-  only reads it (a regular file, UTF-8, non-empty, at most 1 MiB) and
-  answers a tool error naming the absolute path otherwise. Read such a file
+  only reads it (a regular file, UTF-8, non-empty, at most 1 MiB, whose
+  first line is the note's title as a `# Title` heading with the body below
+  it) and answers a tool error naming the absolute path otherwise. Read such a file
   the way `readDraft` does: open it once with `O_NONBLOCK`, take the type
   and size from the descriptor, and read at most one byte past the cap, all
   inside one `try` so that an unreadable or vanished file is a rejected
   call and not a thrown error. The open follows symbolic links. The steps
   mirror `note_draft::read_draft` on the laptop, including the dropped
   leading byte order mark and a trim that matches Rust's `str::trim`
-  (`rustTrim`), so one file gives one body on both transports.
+  (`rustTrim`), so one file gives one title and one body on both
+  transports. `splitDraftTitle` then takes the title line off, by the rule
+  of `note_draft::split_title`.
 - Write atomically (`writeAtomic`: temp file, `fsync`, rename, mode 600).
   When the laptop must read several files as one unit, bracket them with a
   marker the way `write_note` does with `done`: remove it before the first
@@ -174,15 +177,30 @@ scratch area shared by every tool of that session:
 `write_note` is the first tenant, with four files:
 
 ```text
-draft.md   the note body, written and edited by the agent; write_note publishes it
-note.md    the published body: a copy of draft.md taken by the call
-meta.json  title, suggested next steps, turn id, timestamp, script version
+draft.md   the whole note, written and edited by the agent: the `# Title` line, then the body; write_note publishes it
+note.md    the published body: draft.md as the call read it, without the title line
+meta.json  title (the text of the draft's title line), suggested next steps, turn id, timestamp, script version
 done       marker holding the call's token, removed first and written last
 ```
 
-`note.md`, `meta.json` and `done` are the outbox the laptop collects.
+`note.md`, `meta.json` and `done` are the outbox the laptop collects. The
+script splits the draft into the title and the body before it writes them,
+because the laptop never reads the draft. `write_note` takes no `title`
+argument; one that a session with earlier instructions still passes is
+accepted when it agrees with the title line and rejected when it does not,
+for now. The files and the `meta.json` keys are the ones earlier versions
+of the script wrote. What differs is where the title came from, and the
+laptop tells that from the script version in `meta.json`: from version 8 it
+stores the title as written, and for an earlier or missing version it
+strips one leading `#` as it always did
+(`note_outbox::TITLE_AS_WRITTEN_SERVER_VERSION`). An outbox from a version 7
+script holds the call's `title` argument and the whole draft, and is still
+collected: a turn that outlives its connection keeps the script it started
+with.
+
 `draft.md` is never collected: the laptop seeds it at run start for an
-amendment and removes it whenever it clears the outbox, together with
+amendment, with the stored title as the title line above the stored body,
+and removes it whenever it clears the outbox, together with
 `.draft.md.seed`, the temp file a seed is decoded into. Because the laptop
 creates the directory at run start, an empty directory or an unpublished
 `draft.md` can remain in the states that keep the outbox, until a Resume
@@ -224,7 +242,19 @@ does; version 5: the saved-note text calls that count bytes, not
 characters; version 6: `write_note` writes a random token into `done`, which
 was an empty file before, so the collector can tell two calls' markers
 apart; version 7: the saved-note text and the tool description ask the agent
-to close the turn with a bare "Done" message, which the chat pane hides).
+to close the turn with a bare "Done" message, which the chat pane hides;
+version 8: `write_note` accepts a call without `title` and then takes the
+title from the first line of `draft.md`, a `# Title` heading, and writes the
+body without that line; `meta.json` holds the title exactly as the laptop
+is to store it, and the laptop reads this version to tell such a title from
+an earlier script's, which it still normalizes itself; version 9: `title`
+is no longer an argument of `write_note`, the title is always the draft's
+first line, and the schema, the description and the instructions say so.
+A call without `title` writes into the outbox what it wrote in version 8).
+
+Versions 8 and 9 are the two cases of that rule. Version 8 marks output the
+laptop has to read differently. Version 9 changes the tool's contract and
+leaves the output alone, so no reader on the laptop looks for it.
 
 On the laptop:
 
@@ -260,11 +290,13 @@ Staged MCP on Blox` line and uploads nothing, because the probe's
 3. Drive the server by hand on the workstation:
    `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node
 ~/.staged/bin/staged-mcp.cjs test-session t1`. The `write_note` schema
-   lists `title` and `suggested_next_steps` and no `body`. An `initialize`
+   lists `suggested_next_steps` only, with no `title`, no `body` and no
+   required field. An `initialize`
    request answers with a `serverInfo.version` equal to `SERVER_VERSION` in
    the `staged-mcp.cjs` of the build under test (as a string) and
    instructions that name
-   `/home/<user>/.staged/sessions/test-session/draft.md`.
+   `/home/<user>/.staged/sessions/test-session/draft.md` and say its first
+   line must be the note's title as a level-1 heading.
 
 ## Automated coverage
 

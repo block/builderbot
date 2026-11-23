@@ -113,16 +113,6 @@ fn is_title_whitespace(c: char) -> bool {
 }
 
 impl Store {
-    /// Whether `title` echoes any message Staged sent in this session (see
-    /// [`title_echoes_input`] and [`Store::any_session_input`]).
-    pub fn session_title_echoes_input(
-        &self,
-        session_id: &str,
-        title: &str,
-    ) -> Result<bool, StoreError> {
-        self.any_session_input(session_id, |input| title_echoes_input(title, input))
-    }
-
     /// Whether `matches` holds for any message Staged sent in this session,
     /// oldest first: the stored user rows, each holding a message as it was
     /// built or typed (a prompt Staged built has its instructions in the
@@ -401,7 +391,7 @@ mod tests {
 
         let echoes = |title: &str| {
             store
-                .session_title_echoes_input(&session.id, title)
+                .any_session_input(&session.id, |input| title_echoes_input(title, input))
                 .unwrap()
         };
         // Nothing sent yet.

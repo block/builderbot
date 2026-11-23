@@ -621,6 +621,60 @@ describe('createLongPress', () => {
     expect(onLongPress).toHaveBeenCalledTimes(1);
   });
 
+  // A `display: contents` wrapper between the touched element and its row:
+  // still in the DOM after a re-render replaced what it holds, with no box
+  // to measure.
+  function timelineWithBoxlessWrapper(rowAt: { left: number; top: number }) {
+    const { wrapper, list, rowEl, title, code, listAt } = timeline(rowAt);
+    const inner = Object.assign(new EventTarget(), {
+      isConnected: true,
+      parentNode: title,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }),
+    });
+    Object.assign(code, { parentNode: inner });
+    const pane = Object.assign(new EventTarget(), {
+      contains: (node: EventTarget) =>
+        [wrapper, list, rowEl, title, inner, code].some((el) => el === node && el.isConnected),
+    });
+    return { wrapper, inner, code, pane, listAt };
+  }
+
+  it('passes over a boxless wrapper to follow the row through an anchoring scroll', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { wrapper, inner, code, pane, listAt } = timelineWithBoxlessWrapper(rowAt);
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    vi.advanceTimersByTime(100);
+    code.isConnected = false;
+    expect(pane.contains(inner)).toBe(true);
+    // A row slides in above: the held row is anchored, the list's top goes up.
+    for (let frame = 0; frame < 12; frame += 1) {
+      vi.advanceTimersByTime(16);
+      listAt.top -= 44 / 12;
+      rowAt.top = 300 + (frame % 2 === 0 ? 0.33 : -0.33);
+      scroll(pane);
+    }
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    expect(onLongPress).toHaveBeenCalledWith({ target: wrapper, clientX: 40, clientY: 320 });
+    expect(gesture('touchend', [], code).defaultPrevented).toBe(true);
+  });
+
+  it('cancels once a scroll has carried the row above a boxless wrapper', () => {
+    const lp = press();
+    const rowAt = { left: 16, top: 300 };
+    const { code, pane, listAt } = timelineWithBoxlessWrapper(rowAt);
+
+    lp.ontouchstart(touchEvent([{ clientX: 40, clientY: 320, target: code }]));
+    code.isConnected = false;
+    rowAt.top -= SCROLL_STILL_TOLERANCE_PX + 1;
+    listAt.top -= SCROLL_STILL_TOLERANCE_PX + 1;
+    scroll(pane);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
   it('follows a trigger with a box of its own when nothing inside it is left', () => {
     const lp = press();
     const at = { left: 16, top: 300 };

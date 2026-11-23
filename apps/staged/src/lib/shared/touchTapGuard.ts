@@ -27,11 +27,20 @@
 // lifted
 //
 // - more than `TAP_MAX_TRAVEL_PX` away, or
-// - more than `TAP_SCROLL_SLOP_PX` away, with an ancestor of the element it
-//   landed on that scrolls along the travel's dominant axis
+// - more than `TAP_SCROLL_SLOP_PX` away along an axis on which an ancestor of
+//   the element it landed on scrolls
+//
+// The second limit is held to each axis's own part of the travel, not to the
+// larger part alone. A flick 26 px across and 24 px up a vertical list has
+// gone 24 pt along the list, and is swallowed: given the samples, iOS makes no
+// click for that stroke (same Simulator, a project card). A roll 26 px across
+// the list with 8 px of drift along it has not, and passes.
 //
 // "Scrolls along an axis" is `scrollsAlong` below: content that overflows on
-// that axis in a box the finger can scroll, wherever it is scrolled to.
+// that axis in a box the finger can scroll, wherever it is scrolled to. The
+// search starts at the element the touch landed on, or, where a re-render
+// took that element out of the document during the touch, at the element now
+// at the point it landed on.
 //
 // How long the touch lasted is not asked. A quick tap is as short as a
 // flick, and a slow touch that went far and still ends in a click is no more
@@ -87,6 +96,14 @@ type ElementLike = Pick<
   | 'clientHeight'
 >;
 
+/** A touch being followed: its pointer, and where and on what it landed. */
+interface Press {
+  pointerId: number;
+  x: number;
+  y: number;
+  target: EventTarget | null;
+}
+
 /** How many screen points one layout px covers: above 1 while pinch-zoomed. */
 function pointsPerPx(): number {
   const scale = typeof visualViewport === 'undefined' ? 1 : visualViewport?.scale;
@@ -131,8 +148,23 @@ function viewportScrolls(doc: Document, axis: Axis): boolean {
 }
 
 /**
- * Whether the element a touch landed on sits in something a finger can
- * scroll along the axis:
+ * The element to look for a scroller from: the one the touch landed on, or,
+ * when that has left the document since (a live title re-rendered under the
+ * finger, say), the one now at the point it landed on. The click goes to
+ * what is there now, and so would the scroll have. `null` when there is no
+ * such element.
+ */
+function landingOf(press: Press): ElementLike | null {
+  const first = press.target as (Partial<Element> & ElementLike) | null;
+  // A text node cannot be a pointer target, but a stand-in or a document can.
+  if (!first || first.nodeType !== 1) return null;
+  if (first.isConnected !== false) return first;
+  return first.ownerDocument?.elementFromPoint?.(press.x, press.y) ?? null;
+}
+
+/**
+ * Whether `from`, the element a touch landed on, sits in something a finger
+ * can scroll along the axis:
  *
  * - an ancestor (or the element) whose `overflow` on that axis is `auto` or
  *   `scroll` and whose content is larger than its box on that axis. One
@@ -149,13 +181,10 @@ function viewportScrolls(doc: Document, axis: Axis): boolean {
  * The page a pinch-zoom or the on-screen keyboard lets the finger pan is not
  * counted.
  */
-function scrollsAlong(target: EventTarget | null, axis: Axis): boolean {
-  const first = target as (ElementLike & { nodeType?: number }) | null;
-  // A text node cannot be a pointer target, but a stand-in or a document can.
-  let element: ElementLike | null = first && first.nodeType === 1 ? first : null;
-  const doc = element?.ownerDocument;
+function scrollsAlong(from: ElementLike | null, axis: Axis): boolean {
+  const doc = from?.ownerDocument;
   if (!doc) return false;
-  for (; element; element = element.parentElement) {
+  for (let element: ElementLike | null = from; element; element = element.parentElement) {
     const style = styleOf(element);
     if (!style) return false;
     if (!allowsPan(style.touchAction, axis)) return false;
@@ -163,23 +192,23 @@ function scrollsAlong(target: EventTarget | null, axis: Axis): boolean {
     const overflow = axis === 'y' ? style.overflowY : style.overflowX;
     if ((overflow === 'auto' || overflow === 'scroll') && overflows(element, axis)) return true;
   }
-  // The touched element is no longer in the document: nothing to scroll.
+  // The walk did not reach the document: nothing to scroll.
   return false;
 }
 
 /**
  * Swallow the click that follows a primary touch lifted further from where
  * it landed than a tap goes: more than `TAP_MAX_TRAVEL_PX` anywhere, or more
- * than `TAP_SCROLL_SLOP_PX` along something that scrolls, however long it
- * lasted. Mouse and pen input, taps, rolled presses and scripted clicks pass
- * through untouched. Returns the cleanup.
+ * than `TAP_SCROLL_SLOP_PX` along an axis something there scrolls on, however
+ * long it lasted. Mouse and pen input, taps, rolled presses and scripted
+ * clicks pass through untouched. Returns the cleanup.
  */
 export function guardTouchTaps(target?: EventTarget): () => void {
   const root = target ?? (typeof document === 'undefined' ? undefined : document);
   if (!root) return () => {};
 
   /** The touch being followed, from finger down to finger up. */
-  let press: { pointerId: number; x: number; y: number; target: EventTarget | null } | null = null;
+  let press: Press | null = null;
   /** `timeStamp` of a travelled touch's `pointerup` while its click is awaited. */
   let travelledAt: number | null = null;
 
@@ -203,15 +232,22 @@ export function guardTouchTaps(target?: EventTarget): () => void {
     if (!press || pointer.pointerId !== press.pointerId) return;
     const dx = pointer.clientX - press.x;
     const dy = pointer.clientY - press.y;
-    const landedOn = press.target;
+    const landed = press;
     press = null;
-    const travel = Math.hypot(dx, dy) * pointsPerPx();
-    if (travel <= TAP_SCROLL_SLOP_PX) return;
+    const scale = pointsPerPx();
+    const travel = Math.hypot(dx, dy) * scale;
+    if (travel > TAP_MAX_TRAVEL_PX) {
+      travelledAt = pointer.timeStamp;
+      return;
+    }
+    // Each axis the finger went further along than a scroll takes to start.
+    const axes: Axis[] = [];
+    if (Math.abs(dy) * scale > TAP_SCROLL_SLOP_PX) axes.push('y');
+    if (Math.abs(dx) * scale > TAP_SCROLL_SLOP_PX) axes.push('x');
     // The DOM is read only for a touch between the two limits.
-    const flick =
-      travel > TAP_MAX_TRAVEL_PX ||
-      scrollsAlong(landedOn, Math.abs(dy) >= Math.abs(dx) ? 'y' : 'x');
-    if (flick) travelledAt = pointer.timeStamp;
+    if (axes.length === 0) return;
+    const from = landingOf(landed);
+    if (axes.some((axis) => scrollsAlong(from, axis))) travelledAt = pointer.timeStamp;
   };
 
   // The browser took the gesture (a scroll, usually) and sends no click.

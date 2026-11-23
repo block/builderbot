@@ -14,7 +14,9 @@ import {
 // A touch with no `target` landed on nothing the guard can place, so only
 // the 45 px limit applies to it. The scroller tests further down give the
 // touch a stand-in element with the fields the guard reads: its parent, its
-// document, its box and content sizes, and the three computed styles.
+// document, its box and content sizes, and the three computed styles. One
+// that a re-render took out of the document also says so (`isConnected`), and
+// its document then answers `elementFromPoint`.
 
 type Listener = (event: unknown) => void;
 
@@ -122,12 +124,14 @@ interface FakeElement {
   scrollHeight: number;
   clientHeight: number;
   styles: Styles;
+  isConnected?: boolean;
 }
 
 interface FakePage {
   documentElement: FakeElement;
   body: FakeElement;
   scrollingElement: FakeElement;
+  elementFromPoint?: (x: number, y: number) => FakeElement | null;
 }
 
 type Box = Partial<
@@ -206,6 +210,18 @@ function chipRow() {
   );
   const chip = element('chip', row);
   return { row, chip };
+}
+
+/**
+ * Take `gone` out of its document, as a re-render during the touch does, and
+ * leave `now` under every point of the page. Returns the page's
+ * `elementFromPoint`.
+ */
+function replaced(gone: FakeElement, now: FakeElement | null) {
+  Object.assign(gone, { isConnected: false, parentElement: null });
+  const elementFromPoint = vi.fn((_x: number, _y: number) => now);
+  gone.ownerDocument.elementFromPoint = elementFromPoint;
+  return elementFromPoint;
 }
 
 function stubScale(scale: number | undefined): void {
@@ -358,17 +374,52 @@ describe('guardTouchTaps', () => {
       expect(flicked(card, 0, 0)).toBe(false);
     });
 
-    it('goes by the dominant axis of the travel', () => {
+    it('swallows a diagonal flick on a card in a vertical scroller', () => {
+      const { card, title } = projectList();
+      // 26 px right and 24 px up is 35 pt, mostly sideways, and 24 pt of it
+      // is along the list.
+      expect(flicked(card, 26, -24, 50)).toBe(true);
+      expect(flicked(title, 26, -24, 50)).toBe(true);
+      expect(flicked(card, -26, 24, 50)).toBe(true);
+      expect(flicked(card, 26, -24, 400)).toBe(true);
+    });
+
+    it('passes a sideways roll on that card with under 10 pt of vertical travel', () => {
+      const { card, title } = projectList();
+      expect(flicked(card, 26, -8, 120)).toBe(false);
+      expect(flicked(card, 26, 8, 120)).toBe(false);
+      expect(flicked(title, -26, -9, 50)).toBe(false);
+      expect(flicked(card, 26, -TAP_SCROLL_SLOP_PX, 120)).toBe(false);
+      expect(flicked(card, 26, -(TAP_SCROLL_SLOP_PX + 1), 120)).toBe(true);
+      // 43 across and 10 along is 44.1 pt in all: still under the far limit.
+      expect(flicked(card, 43, -10, 140)).toBe(false);
+    });
+
+    it('holds each axis to its own part of the travel', () => {
       const { card } = projectList();
-      // 20 across and 12 down is mostly sideways, where the list does not scroll.
-      expect(flicked(card, 20, 12)).toBe(false);
+      // 20 across and 12 down: 12 pt along the list, whichever part is larger.
+      expect(flicked(card, 20, 12)).toBe(true);
       expect(flicked(card, 12, 20)).toBe(true);
       expect(flicked(card, -12, -20)).toBe(true);
-      // Neither way dominates: taken as along the list.
       expect(flicked(card, 15, 15)).toBe(true);
+      // 9 and 9 is 12.7 pt in all, and 9 pt along the list.
+      expect(flicked(card, 9, 9)).toBe(false);
+      expect(flicked(card, 9, -9)).toBe(false);
       const { chip } = chipRow();
       expect(flicked(chip, 20, 12)).toBe(true);
-      expect(flicked(chip, 12, 20)).toBe(false);
+      expect(flicked(chip, 12, 20)).toBe(true);
+      expect(flicked(chip, 8, 26)).toBe(false);
+      expect(flicked(chip, 9, 9)).toBe(false);
+    });
+
+    it('passes diagonal rolls on a button outside any scroller', () => {
+      const { newProject } = projectList();
+      for (const durationMs of [50, 120, 400]) {
+        expect(flicked(newProject, 26, -24, durationMs), `${durationMs} ms`).toBe(false);
+        expect(flicked(newProject, -26, 24, durationMs), `${durationMs} ms`).toBe(false);
+        expect(flicked(newProject, 24, 26, durationMs), `${durationMs} ms`).toBe(false);
+        expect(flicked(newProject, 30, 30, durationMs), `${durationMs} ms`).toBe(false);
+      }
     });
 
     it('swallows either way where an outer scroller takes the other axis', () => {
@@ -491,6 +542,45 @@ describe('guardTouchTaps', () => {
       expect(flicked(card, 0, -60)).toBe(true);
     });
 
+    it('looks from the element now at the press point when the touched one was replaced', () => {
+      // A live title re-rendered under the finger: the touched element is
+      // out of the document, and its replacement sits in the same card.
+      const { card, title } = projectList();
+      const rerendered = element('card-title', card);
+      const elementFromPoint = replaced(title, rerendered);
+      expect(flicked(title, 0, -24)).toBe(true);
+      // Asked for the point the finger landed on, not where it lifted.
+      expect(elementFromPoint).toHaveBeenLastCalledWith(200, 438);
+      expect(flicked(title, 26, -24)).toBe(true);
+      // The replacement is held to the same limits as an element still there.
+      expect(flicked(title, 24, 0)).toBe(false);
+      expect(flicked(title, 26, -8, 120)).toBe(false);
+      expect(flicked(title, 0, -TAP_SCROLL_SLOP_PX)).toBe(false);
+    });
+
+    it('passes a roll on a replaced element with no scroller at the press point', () => {
+      const { newProject, title } = projectList();
+      const elementFromPoint = replaced(title, newProject);
+      expect(flicked(title, 0, -24)).toBe(false);
+      expect(flicked(title, 26, -24)).toBe(false);
+      // Nothing at the point at all, as outside the viewport.
+      elementFromPoint.mockReturnValue(null);
+      expect(flicked(title, 0, -24)).toBe(false);
+    });
+
+    it('asks for the element at the press point only when the touched one is gone', () => {
+      const { doc, card, title } = projectList();
+      const elementFromPoint = vi.fn(() => null);
+      doc.elementFromPoint = elementFromPoint;
+      expect(flicked(title, 0, -24)).toBe(true);
+      expect(elementFromPoint).not.toHaveBeenCalled();
+      // Gone, but a tap, or past the 45 px limit: nothing is looked up.
+      replaced(title, card);
+      expect(flicked(title, 0, -8)).toBe(false);
+      expect(flicked(title, 0, -60)).toBe(true);
+      expect(title.ownerDocument.elementFromPoint).not.toHaveBeenCalled();
+    });
+
     it('passes a roll that landed on something that is not an element', () => {
       expect(flicked({ nodeType: 9 }, 0, -24)).toBe(false);
       expect(flicked(undefined, 0, -24)).toBe(false);
@@ -537,6 +627,16 @@ describe('guardTouchTaps', () => {
       expect(flicked(card, 16, 0)).toBe(true);
       stubScale(1);
       expect(flicked(card, 0, -6)).toBe(false);
+    });
+
+    it('holds each axis to the scroll limit in screen points', () => {
+      const { card } = projectList();
+      stubScale(2);
+      // 13 px across and 6 px up is 12 pt along the list; 13 and 5 is 10 pt.
+      expect(flicked(card, 13, -6)).toBe(true);
+      expect(flicked(card, 13, -5)).toBe(false);
+      stubScale(1);
+      expect(flicked(card, 13, -6)).toBe(false);
     });
 
     it('measures in layout px where the scale cannot be read', () => {

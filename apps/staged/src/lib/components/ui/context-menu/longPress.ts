@@ -397,16 +397,19 @@ export function createLongPress(options: LongPressOptions): LongPressController 
 
   // A scroll that carries the touched element is the list moving under the
   // finger. One that leaves it in place is the browser holding the row still
-  // while content above it changed height, and the press stands. An element
-  // that cannot be measured, at `touchstart` or now, counts as moved: dropping
+  // while content above it changed height, and the press stands. With nothing
+  // that can be measured, at `touchstart` or now, it counts as moved: dropping
   // a press costs a second try, keeping one opens a menu under a finger that
   // was scrolling.
   function onscroll(event: Event) {
     if (!start || timer === null) return;
     // A touched element replaced during the hold is inside no scroller and
-    // has no position: the nearest element above it still in the DOM stands
-    // in for it.
-    const held = rested.find(({ node }) => !isDetached(node));
+    // has no position: the nearest element above it still in the DOM that had
+    // a box at `touchstart` stands in for it. One with no box (a
+    // `display: contents` wrapper) is passed over for the next one up, and
+    // followed only when nothing above it had a box either.
+    const present = rested.filter(({ node }) => !isDetached(node));
+    const held = present.find(({ at }) => at) ?? present[0];
     if (!held) {
       clearTimer();
       return;

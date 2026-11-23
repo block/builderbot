@@ -257,9 +257,9 @@ pub(crate) fn read_draft(path: &Path) -> Result<String, DraftError> {
 /// therefore gives the same title and body back, whatever the body opens
 /// with.
 ///
-/// Nothing calls this yet: `write_note` still takes the title as an argument
-/// and publishes the whole draft as the body.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The local `write_note` handler calls this for a call that passes no
+/// `title` (`NoteSubmission::from_draft`). A call that passes one still
+/// publishes the whole draft as the body.
 pub(crate) fn split_title(draft: &str) -> Result<(String, String), DraftError> {
     let (first_line, rest) = draft.split_once('\n').unwrap_or((draft, ""));
     let title = first_line

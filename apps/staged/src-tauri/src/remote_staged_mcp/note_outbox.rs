@@ -3042,7 +3042,7 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
                 &slot,
                 &draft,
                 WriteNoteParams {
-                    title: "Title".to_string(),
+                    title: Some("Title".to_string()),
                     suggested_next_steps: None,
                 },
             );
@@ -3116,7 +3116,7 @@ and you have not answered it in chat yet, answer it now, briefly. Otherwise send
             &slot,
             &draft,
             WriteNoteParams {
-                title: "Title".to_string(),
+                title: Some("Title".to_string()),
                 suggested_next_steps: None,
             },
         );

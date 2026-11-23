@@ -38,6 +38,8 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
+use crate::note_draft::DraftError;
+
 /// MCP server name the tool is registered under, on both transports. Agents
 /// that namespace tools see it as `mcp__staged__write_note`; prompts refer to
 /// the bare `write_note`.
@@ -96,9 +98,16 @@ impl SuggestedNextSteps {
 /// `remote_staged_mcp::note_outbox`).
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct WriteNoteParams {
+    // Optional for the handler only. A call without `title` takes the title
+    // from the draft's first line (`NoteSubmission::from_draft`); a call
+    // with one behaves as it did when the field was required. The schema
+    // agents are shown is not changed yet: `with = "String"` keeps `title`
+    // a required string there, and the doc comment below is its
+    // description.
     /// The note title, shown as its heading. Plain text, no markdown, no
     /// leading `#`.
-    pub title: String,
+    #[schemars(with = "String")]
+    pub title: Option<String>,
     /// What the user might want to do next. Keep both fields to a few words
     /// and use null when there is no clear next action.
     #[serde(default)]
@@ -126,20 +135,80 @@ pub struct NoteSubmission {
     pub source: NoteSubmissionSource,
 }
 
+/// Why `write_note` refused a draft it could read
+/// ([`NoteSubmission::from_params`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubmissionError {
+    /// The call passed `title` and the title or the body failed
+    /// [`NoteSubmission::from_parts`]; this is its reason.
+    Arguments(String),
+    /// The call passed no `title` and the draft does not open with one
+    /// ([`crate::note_draft::split_title`]).
+    Draft(DraftError),
+}
+
+impl SubmissionError {
+    /// The `write_note` error text. A draft error names `draft_path` so the
+    /// agent fixes the file within the turn.
+    pub(crate) fn describe(&self, draft_path: &str) -> String {
+        match self {
+            Self::Arguments(reason) => format!(
+                "write_note rejected: {reason}. Call it again with a non-empty one-line title."
+            ),
+            Self::Draft(error) => error.describe(draft_path),
+        }
+    }
+}
+
 impl NoteSubmission {
-    /// Validate and normalize tool arguments plus the body read from the
-    /// draft into a submission. The rules are [`Self::from_parts`]'s.
+    /// Validate and normalize tool arguments plus the draft
+    /// (`note_draft::read_draft`'s text) into a submission.
+    ///
+    /// - With `title`: the title is the argument and the whole draft is the
+    ///   body, under [`Self::from_parts`]'s rules. A `# Heading` at the top
+    ///   of the draft is body text, as it was before `title` became
+    ///   optional.
+    /// - Without `title`: the draft's first line is the title and the rest
+    ///   is the body ([`Self::from_draft`]).
     pub(crate) fn from_params(
         params: WriteNoteParams,
-        body: &str,
+        draft: &str,
         source: NoteSubmissionSource,
-    ) -> Result<Self, String> {
-        Self::from_parts(&params.title, body, params.suggested_next_steps, source)
+    ) -> Result<Self, SubmissionError> {
+        match params.title {
+            Some(title) => Self::from_parts(&title, draft, params.suggested_next_steps, source)
+                .map_err(SubmissionError::Arguments),
+            None => Self::from_draft(draft, params.suggested_next_steps, source)
+                .map_err(SubmissionError::Draft),
+        }
+    }
+
+    /// A submission whose title is the draft's first line, a `# Title`
+    /// heading, and whose body is everything below it
+    /// ([`crate::note_draft::split_title`]). The heading line is not part
+    /// of the stored body.
+    ///
+    /// The title is kept as written: unlike [`Self::from_parts`], a `#` the
+    /// title text itself starts with is not stripped, so `# #12 follow-up`
+    /// is titled `#12 follow-up`. `split_title` already returns a one-line,
+    /// non-empty title and a non-empty body, both trimmed.
+    pub(crate) fn from_draft(
+        draft: &str,
+        suggested_next_steps: Option<SuggestedNextSteps>,
+        source: NoteSubmissionSource,
+    ) -> Result<Self, DraftError> {
+        let (title, body) = crate::note_draft::split_title(draft)?;
+        Ok(Self {
+            title,
+            body,
+            suggested_next_steps: suggested_next_steps.map(SuggestedNextSteps::normalized),
+            source,
+        })
     }
 
     /// Validate and normalize a title, a body and suggested next steps into
-    /// a submission, whatever carried them: the tool's arguments and the
-    /// draft locally ([`Self::from_params`]), or the outbox's `meta.json`
+    /// a submission, whatever carried them: the tool's `title` argument and
+    /// the draft locally ([`Self::from_params`]), or the outbox's `meta.json`
     /// and `note.md` remotely (`remote_staged_mcp::note_outbox`). The outbox
     /// reader calls this directly, so it does not depend on the shape of
     /// [`WriteNoteParams`].
@@ -293,14 +362,20 @@ work done. If the user asked you a question, answer it before making this call."
 /// Reads the draft first: a missing, empty, oversized, non-UTF-8 or
 /// non-regular draft is a tool error naming the path, and the slot is left
 /// untouched so the agent fixes the file and calls again within the turn.
+///
+/// The title then comes from the call when it passes `title` (the whole
+/// draft is the body) and from the draft's first line when it does not (a
+/// `# Title` heading, with the body below it). A draft that has no such
+/// line, or nothing under it, is rejected the same way as an unreadable
+/// one. See [`NoteSubmission::from_params`].
 pub(crate) fn handle_write_note(
     session_id: &str,
     slot: &NoteSubmissionSlot,
     draft_path: &Path,
     params: WriteNoteParams,
 ) -> CallToolResult {
-    let body = match crate::note_draft::read_draft(draft_path) {
-        Ok(body) => body,
+    let draft = match crate::note_draft::read_draft(draft_path) {
+        Ok(draft) => draft,
         Err(error) => {
             log::warn!(
                 "Session {session_id}: write_note could not read the draft {}: {error:?}",
@@ -311,7 +386,7 @@ pub(crate) fn handle_write_note(
             )]);
         }
     };
-    match NoteSubmission::from_params(params, &body, NoteSubmissionSource::Tool) {
+    match NoteSubmission::from_params(params, &draft, NoteSubmissionSource::Tool) {
         Ok(submission) => {
             let message = submission.saved_message();
             log::info!(
@@ -323,9 +398,15 @@ pub(crate) fn handle_write_note(
             store_submission(slot, submission);
             CallToolResult::success(vec![ContentBlock::text(message)])
         }
-        Err(reason) => CallToolResult::error(vec![ContentBlock::text(format!(
-            "write_note rejected: {reason}. Call it again with a non-empty one-line title."
-        ))]),
+        Err(error) => {
+            log::warn!(
+                "Session {session_id}: write_note rejected the call for the draft {}: {error:?}",
+                draft_path.display()
+            );
+            CallToolResult::error(vec![ContentBlock::text(
+                error.describe(&draft_path.to_string_lossy()),
+            )])
+        }
     }
 }
 
@@ -427,9 +508,34 @@ question, answer it before making this call."
 
     fn params(title: &str) -> WriteNoteParams {
         WriteNoteParams {
-            title: title.to_string(),
+            title: Some(title.to_string()),
             suggested_next_steps: None,
         }
+    }
+
+    /// A call that passes no `title`: the draft's first line names it.
+    fn no_title() -> WriteNoteParams {
+        WriteNoteParams {
+            title: None,
+            suggested_next_steps: None,
+        }
+    }
+
+    /// The reason a call that passed `title` was refused.
+    fn argument_reason(result: Result<NoteSubmission, SubmissionError>) -> String {
+        match result {
+            Err(SubmissionError::Arguments(reason)) => reason,
+            other => panic!("expected an argument rejection, got {other:?}"),
+        }
+    }
+
+    /// The text of a tool result's first content block.
+    fn result_text(result: &CallToolResult) -> String {
+        let content = serde_json::to_value(&result.content).unwrap();
+        content[0]["text"]
+            .as_str()
+            .expect("a text result")
+            .to_string()
     }
 
     /// A temp directory holding the session's draft at `draft.md`.
@@ -470,30 +576,22 @@ question, answer it before making this call."
 
     #[test]
     fn submission_rejects_empty_or_multiline_titles_and_empty_bodies() {
-        assert!(
-            NoteSubmission::from_params(params(""), "body", NoteSubmissionSource::Tool)
-                .unwrap_err()
-                .contains("title")
-        );
-        assert!(
-            NoteSubmission::from_params(params("# "), "body", NoteSubmissionSource::Tool)
-                .unwrap_err()
-                .contains("title")
-        );
-        assert!(
-            NoteSubmission::from_params(params("a\nb"), "body", NoteSubmissionSource::Tool)
-                .unwrap_err()
-                .contains("single line")
-        );
-        assert!(
-            NoteSubmission::from_params(params("Title"), "  \n", NoteSubmissionSource::Tool)
-                .unwrap_err()
-                .contains("body")
-        );
+        let reject = |title: &str, body: &str| {
+            argument_reason(NoteSubmission::from_params(
+                params(title),
+                body,
+                NoteSubmissionSource::Tool,
+            ))
+        };
+        assert!(reject("", "body").contains("title"));
+        assert!(reject("# ", "body").contains("title"));
+        assert!(reject("a\nb", "body").contains("single line"));
+        assert!(reject("Title", "  \n").contains("body"));
     }
 
-    /// `from_params` is `from_parts` over the arguments' fields: the same
-    /// submission for valid input and the same reason for each rejection.
+    /// `from_params` with a `title` is `from_parts` over the arguments'
+    /// fields: the same submission for valid input and the same reason for
+    /// each rejection.
     #[test]
     fn from_parts_validates_and_normalizes_exactly_like_from_params() {
         let steps = || {
@@ -518,7 +616,8 @@ question, answer it before making this call."
                     let mut p = params(title);
                     p.suggested_next_steps = steps.clone();
                     assert_eq!(
-                        NoteSubmission::from_parts(title, body, steps, source),
+                        NoteSubmission::from_parts(title, body, steps, source)
+                            .map_err(SubmissionError::Arguments),
                         NoteSubmission::from_params(p, body, source),
                         "title {title:?}, body {body:?}"
                     );
@@ -649,6 +748,296 @@ done."
         assert!(!has_submission(&slot));
     }
 
+    /// A call with no `title` takes the title from the draft's first line
+    /// and stores the body without that line.
+    #[test]
+    fn handler_takes_the_title_and_body_from_the_draft_when_the_call_has_no_title() {
+        let draft = Draft::new();
+        let slot = new_submission_slot();
+
+        let path = draft.write(
+            "\n\n# Design the outbox\n\nFirst body ![Shot](staged-media://abc.png)\n\n## Details\n",
+        );
+        let result = handle_write_note("s1", &slot, &path, no_title());
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let body = "First body ![Shot](staged-media://abc.png)\n\n## Details";
+        // The result echoes the parsed title, and the count is the body
+        // without the heading line.
+        assert_eq!(
+            result_text(&result),
+            saved_message("Design the outbox", body.len())
+        );
+        let current = current_submission(&slot).unwrap();
+        assert_eq!(
+            current,
+            NoteSubmission {
+                title: "Design the outbox".to_string(),
+                body: body.to_string(),
+                suggested_next_steps: None,
+                source: NoteSubmissionSource::Tool,
+            }
+        );
+        // What the post-completion hooks read holds the title once.
+        assert_eq!(
+            current.as_note_content(),
+            format!("# Design the outbox\n{body}")
+        );
+
+        // (draft, title, body)
+        let cases = [
+            // Only the first line is consumed: a body that opens with its
+            // own H1 keeps it.
+            ("# Title\n\n# Section\n\nText", "Title", "# Section\n\nText"),
+            // The title text is kept as written, a `#` of its own included.
+            ("# #12 follow-up\nBody", "#12 follow-up", "Body"),
+            (
+                "# Use `foo` for [bar](x) #\nBody",
+                "Use `foo` for [bar](x) #",
+                "Body",
+            ),
+            ("#\t Tabbed \t\nBody", "Tabbed", "Body"),
+            // A byte order mark and blank lines above the heading are not
+            // part of the draft the split sees.
+            ("\u{feff}\n\n# Marked\r\n\r\nBody\r\n", "Marked", "Body"),
+        ];
+        for (text, title, body) in cases {
+            draft.write(text);
+            let result = handle_write_note("s1", &slot, &path, no_title());
+            assert_ne!(result.is_error, Some(true), "{text:?}: {result:?}");
+            assert_eq!(
+                result_text(&result),
+                saved_message(title, body.len()),
+                "{text:?}"
+            );
+            let current = current_submission(&slot).unwrap();
+            assert_eq!(
+                (current.title.as_str(), current.body.as_str()),
+                (title, body),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// The suggested next steps reach a submission the same way with and
+    /// without `title`, and a call's JSON may leave `title` out or null.
+    #[test]
+    fn a_call_without_a_title_deserializes_and_keeps_its_suggested_next_steps() {
+        let draft = Draft::new();
+        let path = draft.write("# Plan\n\nBody");
+        for arguments in [
+            serde_json::json!({
+                "suggested_next_steps": {
+                    "suggestedNextCommitStep": "  Fix it ",
+                    "suggestedNextNoteStep": "   ",
+                }
+            }),
+            serde_json::json!({
+                "title": null,
+                "suggested_next_steps": {
+                    "suggestedNextCommitStep": "Fix it",
+                    "suggestedNextNoteStep": null,
+                }
+            }),
+        ] {
+            let params: WriteNoteParams = serde_json::from_value(arguments.clone())
+                .unwrap_or_else(|e| panic!("{arguments}: {e}"));
+            assert_eq!(params.title, None, "{arguments}");
+            let slot = new_submission_slot();
+            let result = handle_write_note("s1", &slot, &path, params);
+            assert_ne!(result.is_error, Some(true), "{arguments}: {result:?}");
+            assert_eq!(
+                current_submission(&slot).unwrap(),
+                NoteSubmission {
+                    title: "Plan".to_string(),
+                    body: "Body".to_string(),
+                    suggested_next_steps: Some(SuggestedNextSteps {
+                        suggested_next_commit_step: Some("Fix it".to_string()),
+                        suggested_next_note_step: None,
+                    }),
+                    source: NoteSubmissionSource::Tool,
+                },
+                "{arguments}"
+            );
+        }
+
+        let empty: WriteNoteParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty.title, None);
+        assert_eq!(empty.suggested_next_steps, None);
+        let titled: WriteNoteParams =
+            serde_json::from_value(serde_json::json!({ "title": "T" })).unwrap();
+        assert_eq!(titled.title.as_deref(), Some("T"));
+
+        // `from_draft` keeps the source it is given.
+        let submission =
+            NoteSubmission::from_draft("# Plan\n\nBody", None, NoteSubmissionSource::Outbox)
+                .unwrap();
+        assert_eq!(submission.source, NoteSubmissionSource::Outbox);
+        assert_eq!(submission.suggested_next_steps, None);
+    }
+
+    /// With no `title`, a draft that does not open with a `# Title` line, or
+    /// has nothing under it, is rejected in `DraftError`'s words and the
+    /// slot keeps what it held.
+    #[test]
+    fn handler_rejects_a_draft_with_no_title_line_and_leaves_the_slot_untouched() {
+        let draft = Draft::new();
+        let path = draft.path();
+        let shown = path.to_string_lossy().into_owned();
+
+        let cases = [
+            ("Plain text\n\nBody", DraftError::MissingTitle),
+            ("## Section\n\nBody", DraftError::MissingTitle),
+            ("### Deeper\n\nBody", DraftError::MissingTitle),
+            ("#\nBody", DraftError::MissingTitle),
+            ("#   \nBody", DraftError::MissingTitle),
+            ("#Title\n\nBody", DraftError::MissingTitle),
+            ("#note:6c48d5ac\n\nBody", DraftError::MissingTitle),
+            ("Title\n=====\n\nBody", DraftError::MissingTitle),
+            ("---\ntitle: T\n---\n\nBody", DraftError::MissingTitle),
+            ("Intro line\n# Title\n\nBody", DraftError::MissingTitle),
+            ("# Title", DraftError::TitleOnly),
+            ("\n# Title\n\n  \n", DraftError::TitleOnly),
+        ];
+
+        // An empty slot stays empty.
+        let slot = new_submission_slot();
+        for (text, error) in &cases {
+            draft.write(text);
+            let result = handle_write_note("s1", &slot, &path, no_title());
+            assert_eq!(result.is_error, Some(true), "{text:?}");
+            assert_eq!(result_text(&result), error.describe(&shown), "{text:?}");
+            assert!(!has_submission(&slot), "{text:?} must not fill the slot");
+        }
+
+        // The texts, word for word.
+        draft.write("## Section\n\nBody");
+        assert_eq!(
+            result_text(&handle_write_note("s1", &slot, &path, no_title())),
+            format!(
+                "write_note rejected: the draft file `{shown}` does not start with the note's \
+title. Its first non-blank line must be a level-1 markdown heading: `# ` followed by the title \
+on one line (not `##`, not a line underlined with `===`, and nothing above it). Add that line \
+at the top and leave the rest of the note below it, then call write_note again."
+            )
+        );
+        draft.write("# Title\n");
+        assert_eq!(
+            result_text(&handle_write_note("s1", &slot, &path, no_title())),
+            format!(
+                "write_note rejected: the draft file `{shown}` holds only the title line. \
+Write the note body in markdown below the `# ` title line, then call write_note again."
+            )
+        );
+
+        // A slot filled by an earlier call of the turn keeps that note.
+        draft.write("# Kept\n\nKept body");
+        handle_write_note("s1", &slot, &path, no_title());
+        let kept = current_submission(&slot).unwrap();
+        for (text, _) in &cases {
+            draft.write(text);
+            let result = handle_write_note("s1", &slot, &path, no_title());
+            assert_eq!(result.is_error, Some(true), "{text:?}");
+            assert_eq!(
+                current_submission(&slot).as_ref(),
+                Some(&kept),
+                "{text:?} must not replace the earlier note"
+            );
+        }
+
+        // Read errors come first and read the same with or without `title`.
+        std::fs::remove_file(&path).unwrap();
+        let without = handle_write_note("s1", &slot, &path, no_title());
+        let with = handle_write_note("s1", &slot, &path, params("Title"));
+        assert_eq!(result_text(&without), DraftError::Missing.describe(&shown));
+        assert_eq!(result_text(&without), result_text(&with));
+        draft.write("  \n\t\n");
+        let without = handle_write_note("s1", &slot, &path, no_title());
+        assert_eq!(result_text(&without), DraftError::Empty.describe(&shown));
+        assert_eq!(current_submission(&slot).as_ref(), Some(&kept));
+    }
+
+    /// A call that still passes `title` is handled as before the argument
+    /// became optional: the argument is the title, the whole draft is the
+    /// body, and a heading at the top of the draft is neither required nor
+    /// removed.
+    #[test]
+    fn a_call_that_passes_a_title_still_publishes_the_whole_draft_as_the_body() {
+        let draft = Draft::new();
+        let slot = new_submission_slot();
+        let path = draft.path();
+
+        // (draft, `title` argument, stored title, stored body)
+        let cases = [
+            // A draft that opens with a heading keeps it in the body, even
+            // when it differs from the argument or repeats it.
+            (
+                "# Draft heading\n\nBody",
+                "Passed title",
+                "Passed title",
+                "# Draft heading\n\nBody",
+            ),
+            ("# Same\n\nBody", "Same", "Same", "# Same\n\nBody"),
+            // A heading with nothing under it is a body like any other.
+            ("# Only a heading", "Passed", "Passed", "# Only a heading"),
+            // Drafts the no-title path rejects are accepted with a title.
+            ("Plain body", "Passed", "Passed", "Plain body"),
+            (
+                "## Section\n\nText",
+                "Passed",
+                "Passed",
+                "## Section\n\nText",
+            ),
+            // The argument is still trimmed and loses one leading `#`.
+            ("Body", "  # Design  ", "Design", "Body"),
+        ];
+        for (text, argument, title, body) in cases {
+            draft.write(text);
+            let result = handle_write_note("s1", &slot, &path, params(argument));
+            assert_ne!(result.is_error, Some(true), "{text:?}: {result:?}");
+            assert_eq!(
+                result_text(&result),
+                saved_message(title, body.len()),
+                "{text:?}"
+            );
+            let current = current_submission(&slot).unwrap();
+            assert_eq!(
+                (current.title.as_str(), current.body.as_str()),
+                (title, body),
+                "{text:?}"
+            );
+        }
+
+        // A bad `title` is rejected in the same words as before, whatever
+        // the draft opens with: the heading does not stand in for it.
+        let slot = new_submission_slot();
+        draft.write("# Draft heading\n\nBody");
+        for (argument, text) in [
+            (
+                "",
+                "write_note rejected: `title` must not be empty. Call it again with a non-empty \
+one-line title.",
+            ),
+            (
+                "# ",
+                "write_note rejected: `title` must not be empty. Call it again with a non-empty \
+one-line title.",
+            ),
+            (
+                "Two\nlines",
+                "write_note rejected: `title` must be a single line. Call it again with a \
+non-empty one-line title.",
+            ),
+        ] {
+            let result = handle_write_note("s1", &slot, &path, params(argument));
+            assert_eq!(result.is_error, Some(true), "{argument:?}");
+            assert_eq!(result_text(&result), text, "{argument:?}");
+            assert!(!has_submission(&slot), "{argument:?}");
+        }
+    }
+
+    /// Making `title` optional for the handler does not change what the
+    /// tool advertises: `title` is still a required string with the same
+    /// description.
     #[test]
     fn input_schema_names_title_and_steps_only_with_camel_case_step_keys() {
         let schema = write_note_input_schema();
@@ -661,5 +1050,15 @@ done."
         let required = schema["required"].as_array().expect("required list");
         let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(required, ["title"]);
+        assert_eq!(
+            schema["properties"]["title"],
+            serde_json::json!({
+                // The field's doc comment, line break included.
+                "description":
+                    "The note title, shown as its heading. Plain text, no markdown, no\nleading `#`.",
+                "type": "string",
+            }),
+            "{text}"
+        );
     }
 }

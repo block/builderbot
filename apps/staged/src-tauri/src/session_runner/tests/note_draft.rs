@@ -159,7 +159,7 @@ fn a_body_that_opens_with_a_heading_survives_seed_republish_and_store() {
                 &slot,
                 &draft,
                 crate::note_tool::WriteNoteParams {
-                    title: format!("Kept title {round}"),
+                    title: Some(format!("Kept title {round}")),
                     suggested_next_steps: None,
                 },
             );

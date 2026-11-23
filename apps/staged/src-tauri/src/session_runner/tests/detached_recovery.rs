@@ -690,7 +690,7 @@ fn an_expired_window_settles_the_row_once_and_stops_the_polling() {
 fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
     let valid = NoteSubmission::from_params(
         crate::note_tool::WriteNoteParams {
-            title: "Plan".into(),
+            title: Some("Plan".into()),
             suggested_next_steps: None,
         },
         "Body\n```pikchr\nbox \"ok\"\n```",
@@ -704,7 +704,7 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
 
     let broken = NoteSubmission::from_params(
         crate::note_tool::WriteNoteParams {
-            title: "Plan".into(),
+            title: Some("Plan".into()),
             suggested_next_steps: None,
         },
         "Body\n```pikchr\nboxx \"bad\"\n```",
@@ -1270,7 +1270,7 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
     assert!(detail.contains("10 minutes"), "{detail}");
     let valid = NoteSubmission::from_params(
         crate::note_tool::WriteNoteParams {
-            title: "Plan".into(),
+            title: Some("Plan".into()),
             suggested_next_steps: None,
         },
         "Body",

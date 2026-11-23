@@ -2311,8 +2311,7 @@ pub fn start_session(
                 let writer = Arc::new(
                     MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
                         .with_note_slot(Arc::clone(&note_slot))
-                        .with_activity_clock(Arc::clone(&activity))
-                        .with_sent_prompt(prompt.as_str()),
+                        .with_activity_clock(Arc::clone(&activity)),
                 );
                 // The token the connection observes. A child of the session's
                 // so a Stop reaches it, but one this loop can also fire on its
@@ -10776,6 +10775,61 @@ mod tests {
             validate_latest_message_pikchr(&messages),
             LatestAssistantPikchrValidation::Valid
         );
+    }
+
+    /// The requests a run writes by itself open with Staged's instructions,
+    /// in the form the session-title check recognises them by
+    /// (`store::opens_with_staged_instructions`); what a run adds to a first
+    /// prompt goes after it, so the prompt still opens as it was built.
+    #[test]
+    fn run_written_prompts_open_with_instructions_the_title_check_recognises() {
+        let messages = vec![session_message(
+            MessageRole::Assistant,
+            "Intro\n```pikchr\nbox \"unterminated\n```",
+        )];
+        let LatestAssistantPikchrValidation::Invalid(error) =
+            validate_latest_message_pikchr(&messages)
+        else {
+            panic!("the block does not parse");
+        };
+        let draft = "/tmp/draft.md";
+
+        let prompts = [
+            note_write_followup_prompt(Some(draft)),
+            note_write_followup_prompt(None),
+            build_pikchr_correction_prompt(
+                &error,
+                PikchrErrorOrigin::SubmittedNote,
+                true,
+                Some(draft),
+            ),
+            build_pikchr_correction_prompt(&error, PikchrErrorOrigin::SubmittedNote, true, None),
+            build_pikchr_correction_prompt(&error, PikchrErrorOrigin::FinalMessage, true, None),
+            build_pikchr_correction_prompt(&error, PikchrErrorOrigin::FinalMessage, false, None),
+        ];
+        for prompt in &prompts {
+            let opening: String = prompt.chars().take(60).collect();
+            assert!(
+                crate::store::opens_with_staged_instructions(prompt),
+                "{opening:?}"
+            );
+        }
+
+        let built = "<action>\nWrite a note.\n</action>\n\nSummarise the branch";
+        for (is_note_session, tool_attached) in [(false, false), (true, true), (true, false)] {
+            let sent = first_turn_prompt(built.to_string(), is_note_session, tool_attached, None);
+            assert!(sent.starts_with(built), "{sent:?}");
+        }
+        // Sent as typed, like a chat follow-up: nothing of Staged's ahead.
+        let typed = "Also cover the error path";
+        assert_eq!(
+            first_turn_prompt(typed.to_string(), false, false, None),
+            typed
+        );
+        assert!(!crate::store::opens_with_staged_instructions(typed));
+        assert!(!crate::store::opens_with_staged_instructions(
+            crate::rate_limit_scheduler::AUTO_RETRY_RESUME_PROMPT
+        ));
     }
 
     #[test]

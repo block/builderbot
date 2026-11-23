@@ -14,60 +14,126 @@ use super::{Store, StoreError};
 /// What an agent appends to a title it cut short.
 const TRUNCATION_MARKERS: [&str; 2] = ["…", "..."];
 
-/// Whether an agent-pushed session title is only the start of `input`, a
-/// message Staged sent the agent, rather than a title the agent wrote.
+/// How the instructions Staged puts ahead of a request open.
+const STAGED_INSTRUCTIONS_OPENING: &str = "<action>";
+
+/// Whether `input`, a message Staged sent an agent, opens with Staged's own
+/// instructions: the `<action>` block Staged puts ahead of the user's text
+/// in a session's first prompt, whatever its kind, and at the top of the
+/// requests it writes by itself (a note update, a note or Pikchr follow-up,
+/// a pull request or commit action).
 ///
-/// Some agents name a session after the opening of its first message. Every
-/// Staged message opens with the instructions Staged puts ahead of the user's
-/// text, so such a title is the first words of those instructions and says
-/// nothing about the session.
-///
-/// The title has to be a literal prefix of the input, compared the way an
-/// agent derives one: each run of whitespace (newlines included) counts as a
-/// single space, whitespace around either text is ignored, and the title may
-/// end in a truncation marker (`…` or `...`) where it was cut, mid-word or
-/// not. Nothing else is forgiven: case, punctuation and markup must match,
-/// so a title the agent wrote is an echo only if it is word for word how
-/// the input starts. A blank title is never one.
-pub fn title_echoes_input(title: &str, input: &str) -> bool {
-    let title = title.trim();
-    // The whole title first: an input can itself contain `...` at the cut.
-    is_collapsed_prefix(title, input)
-        || TRUNCATION_MARKERS.iter().any(|marker| {
-            title
-                .strip_suffix(marker)
-                .is_some_and(|cut| is_collapsed_prefix(cut, input))
-        })
+/// Everything else reads as typed. That is a chat follow-up, a queued or
+/// mid-turn message and the "continue" that resumes a paused session, which
+/// reach the agent exactly as written, and also the few plain-text messages
+/// Staged writes with no block (a pipeline step's failure hand-off, the
+/// Pikchr sub-agent's prompt). Taking those for typed errs towards keeping
+/// a title: see [`title_echoes_input`].
+pub fn opens_with_staged_instructions(input: &str) -> bool {
+    input
+        .trim_start_matches(is_title_whitespace)
+        .starts_with(STAGED_INSTRUCTIONS_OPENING)
 }
 
-/// Whether `prefix` is non-blank and `text` starts with it, both read with
-/// their whitespace collapsed (see [`collapsed`]).
-fn is_collapsed_prefix(prefix: &str, text: &str) -> bool {
+/// Whether an agent-pushed session title only repeats `input`, a message
+/// Staged sent the agent, rather than being a title the agent wrote.
+///
+/// Some agents name a session after the opening of its first message. For a
+/// prompt Staged built that is the first words of Staged's instructions, and
+/// for any message it is the user's request cut to length: neither is a name
+/// for the session.
+///
+/// The title is an echo when it is one of:
+/// - the whole input;
+/// - the start of the input, ending in a truncation marker (`…` or `...`)
+///   where it was cut, mid-word or not;
+/// - the start of the input with no marker, when the input opens with
+///   Staged's instructions ([`opens_with_staged_instructions`]). No agent
+///   writes a title that begins the way those do. A message sent as typed is
+///   different: "Fix the login flow" is a fair title for "Fix the login flow
+///   so expired tokens are refreshed", so there a bare start is taken for a
+///   title the agent wrote.
+///
+/// "Start" is literal, compared the way an agent derives such a title: each
+/// run of whitespace (newlines included) counts as a single space and
+/// whitespace around either text is ignored. Nothing else is forgiven: case,
+/// punctuation and markup must match. A blank title is never an echo.
+pub fn title_echoes_input(title: &str, input: &str) -> bool {
+    let title = title.trim_matches(is_title_whitespace);
+    let cut_at_a_marker = TRUNCATION_MARKERS.iter().any(|marker| {
+        title
+            .strip_suffix(marker)
+            .is_some_and(|cut| collapsed_prefix(cut, input).is_some())
+    });
+    // The title as it stands too: an input can have its own `...` there.
+    cut_at_a_marker
+        || match collapsed_prefix(title, input) {
+            Some(Covers::All) => true,
+            Some(Covers::Start) => opens_with_staged_instructions(input),
+            None => false,
+        }
+}
+
+/// How much of a text one of its prefixes covers.
+enum Covers {
+    All,
+    Start,
+}
+
+/// Whether `prefix` is non-blank and `text` starts with it, and if so
+/// whether it is all of `text`; both read with their whitespace collapsed
+/// (see [`collapsed`]).
+fn collapsed_prefix(prefix: &str, text: &str) -> Option<Covers> {
     let mut prefix = collapsed(prefix).peekable();
-    if prefix.peek().is_none() {
-        return false;
-    }
+    prefix.peek()?;
     let mut text = collapsed(text);
-    prefix.all(|c| text.next() == Some(c))
+    if !prefix.all(|c| text.next() == Some(c)) {
+        return None;
+    }
+    Some(match text.next() {
+        None => Covers::All,
+        Some(_) => Covers::Start,
+    })
 }
 
 /// The characters of `text` with each run of whitespace as one space and
 /// none at either end.
 fn collapsed(text: &str) -> impl Iterator<Item = char> + '_ {
-    text.split_whitespace()
+    text.split(is_title_whitespace)
+        .filter(|word| !word.is_empty())
         .enumerate()
         .flat_map(|(index, word)| (index > 0).then_some(' ').into_iter().chain(word.chars()))
 }
 
+/// Whitespace as the normalisation behind such a title reads it. codex-acp,
+/// which collapses its input this way, is JavaScript, whose `\s` and `trim`
+/// also take U+FEFF (a byte-order mark); `char::is_whitespace` does not.
+fn is_title_whitespace(c: char) -> bool {
+    c.is_whitespace() || c == '\u{feff}'
+}
+
 impl Store {
     /// Whether `title` echoes any message Staged sent in this session (see
-    /// [`title_echoes_input`]): the stored user rows, which hold each prompt
-    /// as built, instructions included. Hidden ACP rows that replay a user
-    /// message have no content and are passed over.
+    /// [`title_echoes_input`] and [`Store::any_session_input`]).
     pub fn session_title_echoes_input(
         &self,
         session_id: &str,
         title: &str,
+    ) -> Result<bool, StoreError> {
+        self.any_session_input(session_id, |input| title_echoes_input(title, input))
+    }
+
+    /// Whether `matches` holds for any message Staged sent in this session,
+    /// oldest first: the stored user rows, each holding a message as it was
+    /// built or typed (a prompt Staged built has its instructions in the
+    /// row). Hidden ACP rows that replay a user message have no content and
+    /// are passed over.
+    ///
+    /// `matches` runs with the store locked, so it must not use the store.
+    pub fn any_session_input(
+        &self,
+        session_id: &str,
+        mut matches: impl FnMut(&str) -> bool,
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -77,9 +143,9 @@ impl Store {
         )?;
         let mut rows = stmt.query(params![session_id])?;
         while let Some(row) = rows.next()? {
-            // Borrowed: a prompt can be long and only its start is read.
+            // Borrowed: a prompt can be long and often only its start is read.
             let input = row.get_ref(0)?.as_str().unwrap_or_default();
-            if title_echoes_input(title, input) {
+            if matches(input) {
                 return Ok(true);
             }
         }
@@ -141,8 +207,30 @@ mod tests {
         Project information:\n  You are working in project \"Login\".\n</action>\n\n\
         Fix the login flow so expired tokens are refreshed";
 
+    /// A message sent as typed, with no instructions ahead of it: a chat
+    /// follow-up.
+    const TYPED: &str = "Fix the login flow so expired tokens are refreshed";
+
     #[test]
-    fn title_that_starts_the_input_is_an_echo() {
+    fn staged_instructions_are_recognised_by_how_they_open() {
+        assert!(opens_with_staged_instructions(INPUT));
+        assert!(opens_with_staged_instructions(
+            "\n\u{feff}  <action>\nDo it"
+        ));
+        for typed in [
+            TYPED,
+            "Continue where you left off.",
+            "",
+            "<Action>\nDo it",
+            "Do it <action>",
+            "action> Do it",
+        ] {
+            assert!(!opens_with_staged_instructions(typed), "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn title_that_starts_instructions_staged_wrote_is_an_echo() {
         assert!(title_echoes_input("<action>", INPUT));
         assert!(title_echoes_input(
             "<action>\nThe user is requesting you make a commit",
@@ -152,6 +240,72 @@ mod tests {
         assert!(title_echoes_input("<action>\nThe user is reque", INPUT));
         // The whole input.
         assert!(title_echoes_input(INPUT, INPUT));
+    }
+
+    #[test]
+    fn title_that_starts_a_typed_message_is_one_the_agent_wrote() {
+        for title in [
+            "Fix the login flow",
+            "Fix",
+            "Fix the login flow so expired tokens are",
+            // Cut mid-word, but with nothing to say it was cut.
+            "Fix the login flow so exp",
+            "  Fix the\nlogin flow  ",
+        ] {
+            assert!(!title_echoes_input(title, TYPED), "{title:?}");
+        }
+        assert!(!title_echoes_input(
+            "Continue",
+            "Continue where you left off."
+        ));
+    }
+
+    #[test]
+    fn whole_or_marked_as_cut_typed_message_is_an_echo() {
+        for title in [
+            // All of it, however the whitespace fell.
+            TYPED,
+            "  Fix the login flow so expired\ntokens are   refreshed ",
+            // Cut and marked, at a word and mid-word.
+            "Fix the login flow…",
+            "Fix the login flow...",
+            "Fix the login flow so exp…",
+            "Fix the login flow …",
+        ] {
+            assert!(title_echoes_input(title, TYPED), "{title:?}");
+        }
+        assert!(title_echoes_input(
+            "Continue where you left off.",
+            "Continue where you left off."
+        ));
+        // All of it and a marker is not the message cut short.
+        assert!(!title_echoes_input(
+            "Fix the login flow so expired tokens are refreshed, and more…",
+            TYPED
+        ));
+    }
+
+    #[test]
+    fn byte_order_mark_reads_as_whitespace() {
+        // JavaScript's `\s` takes U+FEFF, so an agent's title has a space,
+        // or nothing at an end, where the input has one.
+        assert!(title_echoes_input(
+            "<action> The user is requesting…",
+            "\u{feff}<action>\u{feff}The user\u{feff}\u{feff} is requesting a note"
+        ));
+        assert!(title_echoes_input(
+            "Fix the login flow",
+            "\u{feff}Fix the\u{feff}login flow\u{feff}"
+        ));
+        assert!(title_echoes_input(
+            "\u{feff}Fix the login…\u{feff}",
+            "Fix the login flow"
+        ));
+        // It is not dropped: no whitespace in the title, none assumed.
+        assert!(!title_echoes_input(
+            "Fix thelogin flow",
+            "Fix the\u{feff}login flow"
+        ));
     }
 
     #[test]
@@ -187,6 +341,15 @@ mod tests {
         // An input with its own `...` where the title stops.
         assert!(title_echoes_input("Wait...", "Wait... what broke?"));
         assert!(title_echoes_input("Wait......", "Wait... what broke?"));
+        assert!(title_echoes_input(
+            "Wait... what broke?",
+            "Wait... what broke?"
+        ));
+        assert!(title_echoes_input(
+            "<action> Wait...",
+            "<action>\nWait... what broke?\n</action>"
+        ));
+        assert!(title_echoes_input("Wait...", "Wait..."));
     }
 
     #[test]
@@ -273,13 +436,33 @@ mod tests {
             )
             .unwrap();
 
+        // A chat follow-up, stored as typed.
+        store
+            .add_session_message(&session.id, MessageRole::User, "Now cover it with tests")
+            .unwrap();
+
         assert!(echoes("<action> The user is requesting…"));
         assert!(echoes("<action> Follow-up instructions."));
+        // The typed message whole or marked as cut, but not its bare start.
+        assert!(echoes("Now cover it with tests"));
+        assert!(echoes("Now cover it…"));
+        assert!(!echoes("Now cover it"));
         // What the agent said, another session's input, a written title.
         assert!(!echoes("Done: tokens refresh"));
         assert!(!echoes("Rename the module"));
         assert!(!echoes("Refresh expired login tokens"));
         assert!(!echoes("Also log the refresh"));
+
+        // The rows are offered oldest first, until one matches.
+        let mut seen = Vec::new();
+        let found = store
+            .any_session_input(&session.id, |input| {
+                seen.push(input.chars().take(8).collect::<String>());
+                input.starts_with("<action>\nFollow-up")
+            })
+            .unwrap();
+        assert!(found);
+        assert_eq!(seen, ["<action>", "<action>"]);
     }
 
     #[test]

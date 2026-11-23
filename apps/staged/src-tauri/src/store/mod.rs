@@ -67,7 +67,8 @@ pub use project_transfer::{BranchLanding, BranchTransfer, ProjectTransfer};
 pub use repo_badges::{fallback_short_name, next_hue};
 pub use session_poll::{SessionPoll, SessionPollRequest};
 pub use session_titles::{
-    non_empty_acp_title, pending_commit_subject, review_title, title_echoes_input,
+    non_empty_acp_title, opens_with_staged_instructions, pending_commit_subject, review_title,
+    title_echoes_input,
 };
 pub use sessions::{session_actor_id, ChildSessionInfo};
 pub use tag_import::{

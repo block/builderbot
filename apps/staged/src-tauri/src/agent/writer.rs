@@ -69,10 +69,11 @@ pub struct MessageWriter {
     /// Bumped on every event the driver hands this writer, for a watchdog
     /// that wants to know how long the agent has been silent.
     activity: Option<Arc<super::ActivityClock>>,
-    /// The prompt this writer's connection sends, exactly as sent, when the
-    /// runner knows it: what a session title is checked against on top of
-    /// the session's stored messages (see [`MessageWriter::title_echoes_input`]).
-    sent_prompt: Option<String>,
+    /// The text of each prompt this writer's connection has sent, as the
+    /// agent received it (see `on_prompt_sent`): what a session title is
+    /// checked against on top of the session's stored messages (see
+    /// [`MessageWriter::title_echoes_input`]).
+    sent_prompts: std::sync::Mutex<Vec<String>>,
 }
 
 /// The title of a tool call recorded from an update that names none (see
@@ -178,7 +179,7 @@ impl MessageWriter {
             tool_result_rows: Mutex::new(HashMap::new()),
             note_slot: None,
             activity: None,
-            sent_prompt: None,
+            sent_prompts: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -238,19 +239,12 @@ impl MessageWriter {
         self
     }
 
-    /// Tell the writer the prompt its connection sends, exactly as sent. A
-    /// run's first prompt can carry more than the stored user message does
-    /// (attachment notes, a notice for the agent only), and a session title
-    /// that echoes the prompt is measured against all of it.
-    pub fn with_sent_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.sent_prompt = Some(prompt.into());
-        self
-    }
-
-    /// Whether an agent-provided session title is only the start of a
-    /// message Staged sent in this session, which is how some agents name a
-    /// session and never a name worth showing: Staged's messages open with
-    /// its own instructions (see [`title_echoes_input`] for the comparison).
+    /// Whether an agent-provided session title only repeats a message
+    /// Staged sent in this session, which is how some agents name a session
+    /// and never a name worth showing (see [`title_echoes_input`] for the
+    /// comparison, which asks more of a title before calling it an echo of a
+    /// message that was sent as typed than of one that opens with Staged's
+    /// instructions).
     ///
     /// Every message of the session counts, not just its first: the stored
     /// user rows cover earlier runs, follow-ups and a writer that is only
@@ -258,18 +252,37 @@ impl MessageWriter {
     /// it arrives, or is sent again, turns later, and an agent that renames
     /// the session after a later message gets the same answer.
     fn title_echoes_input(&self, title: &str) -> bool {
+        self.any_input(|input| title_echoes_input(title, input))
+    }
+
+    /// [`MessageWriter::title_echoes_input`] for the title a session has
+    /// stored, which went through [`sanitize_title`] on its way in: it is
+    /// compared with each input as the same sanitising leaves it.
+    fn stored_title_echoes_input(&self, stored: &str) -> bool {
+        self.any_input(|input| {
+            if input.contains('`') {
+                title_echoes_input(stored, &sanitize_title(input))
+            } else {
+                title_echoes_input(stored, input)
+            }
+        })
+    }
+
+    /// Whether `matches` holds for any message Staged sent in this session:
+    /// the prompts of this connection as the agent received them, then the
+    /// session's stored user rows.
+    fn any_input(&self, matches: impl Fn(&str) -> bool) -> bool {
         if self
-            .sent_prompt
-            .as_deref()
-            .is_some_and(|prompt| title_echoes_input(title, prompt))
+            .sent_prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|prompt| matches(prompt))
         {
             return true;
         }
-        match self
-            .store
-            .session_title_echoes_input(&self.session_id, title)
-        {
-            Ok(echoes) => echoes,
+        match self.store.any_session_input(&self.session_id, &matches) {
+            Ok(found) => found,
             Err(e) => {
                 log::warn!(
                     "Session {}: couldn't compare the ACP session title with the session's \
@@ -278,6 +291,40 @@ impl MessageWriter {
                 );
                 false
             }
+        }
+    }
+
+    /// Clear the session's stored title when it is itself an echo of a
+    /// message Staged sent: one kept by a build that still stored them. Run
+    /// when an echo arrives, which is when an agent that names sessions this
+    /// way sends the same title again (on every reload of the session, for
+    /// one), so such a session goes back to its fallback name instead of
+    /// keeping the echo for good. A title the agent wrote is not an echo and
+    /// stays.
+    fn clear_stored_echo_title(&self) {
+        let stored = match self.store.get_session(&self.session_id) {
+            Ok(session) => session.and_then(|session| session.acp_title),
+            Err(e) => {
+                log::warn!(
+                    "Session {}: couldn't read the stored ACP session title: {e}",
+                    self.session_id
+                );
+                return;
+            }
+        };
+        let Some(stored) = stored else {
+            return;
+        };
+        if !self.stored_title_echoes_input(&stored) {
+            return;
+        }
+        match self.store.update_session_acp_title(&self.session_id, None) {
+            Ok(()) => log::info!(
+                "Session {}: cleared a stored ACP session title that repeats a message Staged \
+                 sent",
+                self.session_id
+            ),
+            Err(e) => log::error!("Failed to clear the stored ACP session title: {e}"),
         }
     }
 
@@ -556,6 +603,23 @@ impl acp_client::MessageWriter for MessageWriter {
         self.record_user_message(text, images, attachment_ids).await;
     }
 
+    /// Keep the prompt's text for [`MessageWriter::title_echoes_input`]: an
+    /// agent that names a session after its input reads every text block of
+    /// the request, run together, so the blocks are kept joined (the join
+    /// is whitespace, which the comparison collapses), and the prompt block
+    /// by itself for an agent that reads only that one. Not the agent
+    /// speaking, so the activity clock is left alone.
+    async fn on_prompt_sent(&self, text_blocks: &[&str]) {
+        let Some(prompt) = text_blocks.first() else {
+            return;
+        };
+        let mut sent = self.sent_prompts.lock().unwrap();
+        sent.push(prompt.to_string());
+        if text_blocks.len() > 1 {
+            sent.push(text_blocks.join(" "));
+        }
+    }
+
     async fn should_finish_after_response(&self) -> bool {
         self.heard_from_agent();
         // Inspect only the currently streamed response, never older transcript
@@ -626,15 +690,17 @@ impl acp_client::MessageWriter for MessageWriter {
         // above keeps the update as received either way; nothing reads a
         // title from it.
         match &info.title {
-            // A title that is only the start of what Staged sent names
-            // nothing: whatever title the session has, or would fall back
-            // to, stands.
+            // A title that only repeats what Staged sent names nothing: the
+            // title the agent wrote for the session, or what the session
+            // falls back to without one, stands. A stored title that is such
+            // an echo itself goes.
             MaybeUndefined::Value(title) if self.title_echoes_input(title) => {
                 log::debug!(
-                    "Session {}: ignoring an ACP session title that repeats the start of a \
-                     message Staged sent",
+                    "Session {}: ignoring an ACP session title that repeats a message Staged \
+                     sent",
                     self.session_id
                 );
+                self.clear_stored_echo_title();
             }
             MaybeUndefined::Value(title) => {
                 let title = sanitize_title(title);
@@ -1611,6 +1677,30 @@ mod tests {
         store.get_session(session_id).unwrap().unwrap().acp_title
     }
 
+    /// What the connection tells the writer just before it sends a prompt.
+    /// Through the trait object, which is all the connection has.
+    async fn prompt_sent(writer: &MessageWriter, text_blocks: &[&str]) {
+        let writer: &dyn acp_client::MessageWriter = writer;
+        writer.on_prompt_sent(text_blocks).await;
+    }
+
+    /// A chat follow-up: stored, and sent, exactly as the user typed it.
+    const TYPED_FOLLOW_UP: &str = "Add tests for the token refresh and run them";
+
+    /// A writer for the turn that sends [`TYPED_FOLLOW_UP`] to a session
+    /// whose first message was [`STAGED_PROMPT`].
+    async fn setup_writer_after_typed_follow_up() -> (Arc<Store>, String, MessageWriter) {
+        let (store, session_id, writer) = setup_writer_after_prompt();
+        store
+            .add_session_message(&session_id, MessageRole::Assistant, "Tokens now refresh.")
+            .unwrap();
+        store
+            .add_session_message(&session_id, MessageRole::User, TYPED_FOLLOW_UP)
+            .unwrap();
+        prompt_sent(&writer, &[TYPED_FOLLOW_UP]).await;
+        (store, session_id, writer)
+    }
+
     #[tokio::test]
     async fn session_title_that_starts_the_sent_prompt_is_ignored() {
         let (store, session_id, writer) = setup_writer_after_prompt();
@@ -1719,8 +1809,8 @@ mod tests {
             .add_session_message(&session_id, MessageRole::User, follow_up)
             .unwrap();
 
-        let later_turn =
-            MessageWriter::new(session_id.clone(), Arc::clone(&store)).with_sent_prompt(follow_up);
+        let later_turn = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+        prompt_sent(&later_turn, &[follow_up]).await;
         let catching_up = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
         for writer in [&later_turn, &catching_up] {
             push_title(writer, "<action> The user is requesting you make a commit…").await;
@@ -1735,24 +1825,217 @@ mod tests {
         );
     }
 
-    /// A run's first prompt can say more to the agent than the stored user
-    /// message does; a title that runs on into that part is an echo too.
+    /// A title that is the start of a message sent as typed, with nothing to
+    /// say it was cut, is a title the agent wrote: "Add tests" names a
+    /// session whose user asked to "Add tests for ...".
     #[tokio::test]
-    async fn prompt_echo_is_measured_against_the_prompt_as_sent() {
+    async fn written_title_that_starts_a_typed_follow_up_is_accepted() {
+        let (store, session_id, writer) = setup_writer_after_typed_follow_up().await;
+
+        for title in [
+            "Add tests for the token refresh",
+            "Add tests",
+            "Add tests for the token refresh and run",
+        ] {
+            push_title(&writer, title).await;
+            assert_eq!(acp_title(&store, &session_id).as_deref(), Some(title));
+        }
+
+        // The same for the message Staged sends to resume a paused session.
+        let resume = crate::rate_limit_scheduler::AUTO_RETRY_RESUME_PROMPT;
+        store
+            .add_session_message(&session_id, MessageRole::User, resume)
+            .unwrap();
+        prompt_sent(&writer, &[resume]).await;
+        push_title(&writer, "Continue").await;
+        assert_eq!(acp_title(&store, &session_id).as_deref(), Some("Continue"));
+    }
+
+    /// The whole of a typed message, or its start marked as cut, is still
+    /// the agent repeating its input.
+    #[tokio::test]
+    async fn whole_and_marked_as_cut_echoes_of_a_typed_follow_up_are_ignored() {
+        let (store, session_id, writer) = setup_writer_after_typed_follow_up().await;
+        let resume = crate::rate_limit_scheduler::AUTO_RETRY_RESUME_PROMPT;
+        store
+            .add_session_message(&session_id, MessageRole::User, resume)
+            .unwrap();
+        // One that sent the follow-up, and one that only has the stored rows.
+        let catching_up = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
+
+        for writer in [&writer, &catching_up] {
+            for title in [
+                TYPED_FOLLOW_UP,
+                "  Add tests for the token refresh\nand run them ",
+                "Add tests for the token refr…",
+                "Add tests for the token refresh...",
+                resume,
+            ] {
+                push_title(writer, title).await;
+                assert_eq!(acp_title(&store, &session_id), None, "{title:?}");
+            }
+        }
+    }
+
+    /// A session titled by a build that still stored echoes keeps getting
+    /// the same echo from its agent (on every reload, for one). The echo
+    /// arriving again takes the stored one out, so the session falls back
+    /// the way a new one does.
+    #[tokio::test]
+    async fn stored_prompt_echo_is_cleared_when_the_echo_arrives_again() {
+        let echo = "<action> The user is requesting you make a commit based on the prompt \
+                    below. Make the necessary code chan…";
+        for stored in [
+            // The echo that arrives.
+            echo,
+            // Another cut of the same prompt, and one with no marker.
+            "<action> The user is requesting you make a comm…",
+            "<action> The user is requesting",
+        ] {
+            let (store, session_id, _) = setup_writer_after_prompt();
+            store
+                .update_session_acp_title(&session_id, Some(stored))
+                .unwrap();
+            // A reload's writer: it has sent nothing itself.
+            let writer = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+
+            push_title(&writer, echo).await;
+            assert_eq!(acp_title(&store, &session_id), None, "{stored:?}");
+
+            // The session takes a written title as any other does.
+            push_title(&writer, "Refresh expired login tokens").await;
+            assert_eq!(
+                acp_title(&store, &session_id).as_deref(),
+                Some("Refresh expired login tokens")
+            );
+        }
+    }
+
+    /// A title is stored without its backticks, so a stored echo of a prompt
+    /// that has some is recognised with the prompt read the same way. An
+    /// echo of a typed message that was stored is cleared like any other.
+    #[tokio::test]
+    async fn stored_echo_is_recognised_as_it_was_stored() {
+        let (store, session_id, writer) = setup_writer();
+        let prompt = "<action>\nCall the `write_note` tool with the note's `title`.\n</action>\n\n\
+                      Summarise the branch";
+        store
+            .add_session_message(&session_id, MessageRole::User, prompt)
+            .unwrap();
+        store
+            .add_session_message(&session_id, MessageRole::User, TYPED_FOLLOW_UP)
+            .unwrap();
+
+        // As the earlier build stored `<action> Call the `write_note` tool…`.
+        store
+            .update_session_acp_title(&session_id, Some("<action> Call the write_note tool…"))
+            .unwrap();
+        push_title(&writer, "<action> Call the `write_note` tool…").await;
+        assert_eq!(acp_title(&store, &session_id), None);
+
+        store
+            .update_session_acp_title(&session_id, Some("Add tests for the token refr…"))
+            .unwrap();
+        push_title(&writer, TYPED_FOLLOW_UP).await;
+        assert_eq!(acp_title(&store, &session_id), None);
+    }
+
+    /// Only a stored echo is cleared. A title the agent wrote stays through
+    /// every kind of echo, including one that is the bare start of a typed
+    /// message and one that shares its opening with the prompt.
+    #[tokio::test]
+    async fn stored_written_title_is_never_cleared_by_an_echo() {
+        let (store, session_id, writer) = setup_writer_after_typed_follow_up().await;
+        let catching_up = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
+
+        for written in [
+            "Refresh expired login tokens",
+            "Add tests for the token refresh",
+            "<action> tags in prompts",
+        ] {
+            store
+                .update_session_acp_title(&session_id, Some(written))
+                .unwrap();
+            for writer in [&writer, &catching_up] {
+                for echo in [
+                    "<action> The user is requesting you make a commit…",
+                    "<action>\nThe user is requesting",
+                    TYPED_FOLLOW_UP,
+                    "Add tests for the token refr…",
+                ] {
+                    push_title(writer, echo).await;
+                    assert_eq!(
+                        acp_title(&store, &session_id).as_deref(),
+                        Some(written),
+                        "{echo:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An agent that names a session after its input reads every text block
+    /// of the request: the prompt, then what the connection adds for the
+    /// attachments. The connection reports those blocks, and a title that
+    /// runs on into them is an echo of the message as a whole.
+    #[tokio::test]
+    async fn prompt_echo_is_measured_against_every_text_block_sent() {
+        let (store, session_id, _) = setup_writer();
+        // The stored row is what the user typed.
+        store
+            .add_session_message(&session_id, MessageRole::User, "also add tests")
+            .unwrap();
+        let title = "also add tests page 1 of 2 of spec.pdf page 2 of 2 of spec.pdf";
+
+        let writer = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+        prompt_sent(
+            &writer,
+            &[
+                "also add tests",
+                "page 1 of 2 of spec.pdf",
+                "page 2 of 2 of spec.pdf",
+            ],
+        )
+        .await;
+        for echo in [title, "also add tests page 1 of 2 of sp…", "also add tests"] {
+            push_title(&writer, echo).await;
+            assert_eq!(acp_title(&store, &session_id), None, "{echo:?}");
+        }
+        // Its bare start is a title, as for any typed message.
+        push_title(&writer, "also add").await;
+        assert_eq!(acp_title(&store, &session_id).as_deref(), Some("also add"));
+
+        // A writer that sent nothing (one catching the session up) has the
+        // stored row only, which the title runs past.
+        let catching_up = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
+        push_title(&catching_up, title).await;
+        assert_eq!(acp_title(&store, &session_id).as_deref(), Some(title));
+    }
+
+    /// The prompt block can itself say more than the stored user message
+    /// (a note about an attachment that was left out, a notice for the
+    /// agent only). It is kept by itself too, for an agent that names the
+    /// session after that block alone.
+    #[tokio::test]
+    async fn prompt_echo_is_measured_against_the_prompt_block_as_sent() {
         let (store, session_id, _) = setup_writer();
         store
             .add_session_message(&session_id, MessageRole::User, "Describe this")
             .unwrap();
-        let title = "Describe this [Attached: diagram.pdf, 2 pages]";
+        let prompt_block = "Describe this\n\n[Attached image big.png (9000000 bytes) not included \
+                            in this prompt: over the 20 MB image budget]";
+        let title = "Describe this [Attached image big.png (9000000 bytes) not included in \
+                     this prompt: over the 20 MB image budget]";
 
-        let writer = MessageWriter::new(session_id.clone(), Arc::clone(&store))
-            .with_sent_prompt("Describe this\n\n[Attached: diagram.pdf, 2 pages]\n\nMore");
+        let writer = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+        prompt_sent(&writer, &[prompt_block, "page 1 of 1 of small.pdf"]).await;
         push_title(&writer, title).await;
         assert_eq!(acp_title(&store, &session_id), None);
 
-        // Without the sent prompt it is longer than anything stored.
-        let writer = MessageWriter::new(session_id.clone(), Arc::clone(&store));
-        push_title(&writer, title).await;
+        // Nothing is kept for a request with no text.
+        let silent = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+        prompt_sent(&silent, &[]).await;
+        push_title(&silent, title).await;
         assert_eq!(acp_title(&store, &session_id).as_deref(), Some(title));
     }
 

@@ -1,7 +1,13 @@
 import type { DisplayRootInput } from './pathDisplayRoots';
 import type { RichToolItem, ToolStatus } from './acpTranscript';
 import { formatJson, terminalRefsFromAcpContent, textFromAcpContent } from './acpTranscript';
-import { writeNoteToolCall, writeNoteVerb, type WriteNoteCall } from './noteToolCall';
+import {
+  writeNoteCallHasDetails,
+  writeNoteRowDetail,
+  writeNoteToolCall,
+  writeNoteVerb,
+  type WriteNoteCall,
+} from './noteToolCall';
 import { makePathsRelative, parseToolCall, stripCodeFences } from './sessionModalHelpers';
 import { deferredToolBody, deferredToolBodyIds } from './toolCallBodies';
 import { toolCallImageContent, toolCallOutputText, type ToolCallImage } from './toolCallImages';
@@ -44,7 +50,10 @@ export interface ToolCallMetadata {
   /** Whether {@link inputText} would render anything, without formatting it. */
   hasInputText: boolean;
   parsedCommands: ParsedToolCommand[];
-  /** What a `write_note` call published (title, next steps); `null` for every other tool. */
+  /**
+   * The arguments of a `write_note` call: its suggested next steps, and the
+   * title of a call recorded with one. `null` for every other tool.
+   */
   note: WriteNoteCall | null;
   command: string | null;
   workingDirectory: string | null;
@@ -185,10 +194,11 @@ export function buildToolCallViewModel(
   return {
     key: item.key,
     category,
-    // The transcript builder already names a `write_note` row after its
-    // note; items built elsewhere (tests, legacy rows) get the same header.
+    // The transcript builder already gives a `write_note` row this header;
+    // items built elsewhere (tests, legacy rows) get the same one. The row
+    // is its verb alone unless the call was recorded with a title.
     verb: metadata.note ? writeNoteVerb(item.status) : item.verb,
-    detail: metadata.note ? metadata.note.title : item.detail,
+    detail: metadata.note ? writeNoteRowDetail(metadata.note) : item.detail,
     status: item.status,
     statusLabel: item.statusLabel,
     statusTone: item.statusTone,
@@ -361,7 +371,9 @@ export function buildToolCallSections(
 ): ToolCallSection[] {
   const sections: ToolCallSection[] = [];
 
-  if (metadata.note) {
+  // A call that suggested no step and was recorded with no title has nothing
+  // for a note section to show; its result alone decides whether it expands.
+  if (metadata.note && writeNoteCallHasDetails(metadata.note)) {
     sections.push({ kind: 'note', note: metadata.note });
   }
 
@@ -369,8 +381,9 @@ export function buildToolCallSections(
     sections.push({ kind: 'locations', locations: metadata.locations });
   }
 
-  // A note's input is its title and suggested next steps: the note section
-  // shows them, so the raw JSON would only repeat it.
+  // A note's input is its suggested next steps, with the title on a call
+  // recorded with one: the note section shows them, so the raw JSON would
+  // only repeat it.
   if (metadata.hasInputText && !metadata.note) {
     // `text` defers to the metadata's memoized getter so the caret-driven
     // `hasDetails` check (which only reads `kind`) never triggers formatting.

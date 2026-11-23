@@ -91,9 +91,20 @@ function row(id: number, role: SessionMessage['role'], content: string): Session
 
 const NOTE_TITLE = 'Plan: fix the flaky login test';
 
+/** The call's arguments: the suggested next steps only. The title is in the draft file. */
+const NOTE_INPUT: Record<string, unknown> = {
+  suggested_next_steps: { suggestedNextCommitStep: 'Implement this plan' },
+};
+/** The arguments of a call recorded before the title moved into the draft file. */
+const TITLED_NOTE_INPUT = { title: NOTE_TITLE, ...NOTE_INPUT };
+
 /** A `write_note` call row as a bridge stores it, under that bridge's tool name. */
-function noteCall(id: number, name: string, status = 'completed'): SessionMessage {
-  const input = { title: NOTE_TITLE };
+function noteCall(
+  id: number,
+  name: string,
+  status = 'completed',
+  input = NOTE_INPUT
+): SessionMessage {
   return {
     ...row(id, 'tool_call', JSON.stringify({ name, input })),
     acpEventKind: 'tool_call',
@@ -245,6 +256,25 @@ describe('SessionChatPane after a saved note', () => {
     ];
     await mountPane();
 
+    // The row is its verb alone: the call has no title.
+    expect(toolRows()).toEqual([['Note rejected', undefined]]);
+    expect(assistantTexts()).toEqual(['Done']);
+  });
+
+  it('treats calls recorded with a title as before', async () => {
+    // A transcript from before the title moved into the draft file: the
+    // rejected call's row is named after the title it passed, its Done
+    // shows, and the Done after the saved call is left out.
+    transcript.current = [
+      row(1, 'user', 'Plan a fix for the flaky login test'),
+      noteCall(2, CLAUDE, 'failed', TITLED_NOTE_INPUT),
+      row(3, 'assistant', 'Done'),
+      row(4, 'user', 'The diagram is broken. Fix it.'),
+      noteCall(5, CLAUDE, 'completed', TITLED_NOTE_INPUT),
+      row(6, 'assistant', 'Done'),
+    ];
+    await mountPane();
+
     expect(toolRows()).toEqual([['Note rejected', NOTE_TITLE]]);
     expect(assistantTexts()).toEqual(['Done']);
   });
@@ -259,7 +289,7 @@ describe('SessionChatPane after a saved note', () => {
     ];
     await mountPane();
 
-    expect(toolRows()).toEqual([['Note not saved', NOTE_TITLE]]);
+    expect(toolRows()).toEqual([['Note not saved', undefined]]);
     expect(assistantTexts()).toEqual(['Done']);
   });
 

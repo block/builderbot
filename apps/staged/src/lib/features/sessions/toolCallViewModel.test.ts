@@ -660,12 +660,13 @@ describe('buildToolCallViewModel output handling', () => {
 
 describe('write_note tool rows', () => {
   const input = {
-    title: 'README.md: Sandbox repository purpose',
     suggested_next_steps: {
       suggestedNextCommitStep: 'Expand the README',
       suggestedNextNoteStep: null,
     },
   };
+  // A call recorded before the title moved into the draft file.
+  const titledInput = { title: 'README.md: Sandbox repository purpose', ...input };
   const saved = [
     {
       type: 'content',
@@ -675,79 +676,129 @@ describe('write_note tool rows', () => {
       },
     },
   ];
+  const rejected = [
+    {
+      type: 'content',
+      content: {
+        type: 'text',
+        text: "write_note rejected: the draft file `/tmp/staged-note-draft-s1.md` does not start with the note's title.",
+      },
+    },
+  ];
+  const noteCall = (name: string, callInput: unknown) =>
+    message({ id: 1, role: 'tool_call', content: JSON.stringify({ name, input: callInput }) });
 
   it.each([
     ['Claude', 'mcp__staged__write_note'],
     ['Goose', 'staged: write note'],
     ['Codex', 'mcp.staged.write_note'],
-  ])(
-    'renders the %s form as a note with its title and next steps instead of a command',
-    (_, name) => {
-      const model = buildToolCallViewModel(
-        richTool({
-          verb: 'Ran',
-          detail: name,
-          call: message({ id: 1, role: 'tool_call', content: JSON.stringify({ name, input }) }),
-          rawInput: input,
-          content: saved,
-        })
-      );
-
-      expect(model.category).toBe('note');
-      expect(model.verb).toBe('Saved note');
-      expect(model.detail).toBe('README.md: Sandbox repository purpose');
-      expect(model.metadata.note).toEqual({
-        title: 'README.md: Sandbox repository purpose',
-        suggestedNextCommitStep: 'Expand the README',
-        suggestedNextNoteStep: null,
-      });
-      expect(model.metadata.command).toBeNull();
-      expect(model.sections[0]).toEqual({ kind: 'note', note: model.metadata.note });
-      expect(model.sections.some((section) => section.kind === 'input')).toBe(false);
-      expect(model.output.primaryText).toContain('Saved note');
-      expect(model.hasDetails).toBe(true);
-    }
-  );
-
-  it('reads the note from the tool_call content when the raw input is deferred', () => {
+  ])('renders the %s form as a note with its next steps instead of a command', (_, name) => {
     const model = buildToolCallViewModel(
       richTool({
-        call: message({
-          id: 1,
-          role: 'tool_call',
-          content: JSON.stringify({ name: 'mcp__staged__write_note', input }),
-        }),
-        rawInput: { $deferred: { messageId: 1, field: 'input' } },
+        verb: 'Ran',
+        detail: name,
+        call: noteCall(name, input),
+        rawInput: input,
+        content: saved,
       })
     );
+
     expect(model.category).toBe('note');
-    expect(model.metadata.note?.title).toBe(input.title);
+    expect(model.verb).toBe('Saved note');
+    // The call has no title, so the row is its verb alone.
+    expect(model.detail).toBe('');
+    expect(model.metadata.note).toEqual({
+      title: null,
+      suggestedNextCommitStep: 'Expand the README',
+      suggestedNextNoteStep: null,
+    });
+    expect(model.metadata.command).toBeNull();
+    expect(model.sections[0]).toEqual({ kind: 'note', note: model.metadata.note });
+    expect(model.sections.some((section) => section.kind === 'input')).toBe(false);
+    expect(model.output.primaryText).toContain('Saved note');
+    expect(model.hasDetails).toBe(true);
+  });
+
+  it('names a call recorded with a title after it, as before', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        verb: 'Ran',
+        detail: 'mcp__staged__write_note',
+        call: noteCall('mcp__staged__write_note', titledInput),
+        rawInput: titledInput,
+        content: saved,
+      })
+    );
+
+    expect(model.category).toBe('note');
+    expect(model.verb).toBe('Saved note');
+    expect(model.detail).toBe('README.md: Sandbox repository purpose');
+    expect(model.metadata.note).toEqual({
+      title: 'README.md: Sandbox repository purpose',
+      suggestedNextCommitStep: 'Expand the README',
+      suggestedNextNoteStep: null,
+    });
+    expect(model.sections[0]).toEqual({ kind: 'note', note: model.metadata.note });
+    expect(model.sections.some((section) => section.kind === 'input')).toBe(false);
+    expect(model.hasDetails).toBe(true);
+  });
+
+  it.each([
+    ['no arguments', {}],
+    ['steps that are both null', { suggested_next_steps: { suggestedNextCommitStep: null } }],
+  ])('gives a call with %s no note section: its result alone expands the row', (_, bare) => {
+    const call = noteCall('mcp__staged__write_note', bare);
+    const running = buildToolCallViewModel(
+      richTool({ status: 'in_progress', call, rawInput: bare })
+    );
+    expect(running.category).toBe('note');
+    expect(running.verb).toBe('Saving note');
+    expect(running.detail).toBe('');
+    expect(running.metadata.note).toEqual({
+      title: null,
+      suggestedNextCommitStep: null,
+      suggestedNextNoteStep: null,
+    });
+    expect(running.sections.some((section) => section.kind === 'note')).toBe(false);
+    // The raw JSON stays hidden: a note row is never an input dump.
+    expect(running.sections.some((section) => section.kind === 'input')).toBe(false);
+    expect(running.hasDetails).toBe(false);
+
+    const failed = buildToolCallViewModel(
+      richTool({ status: 'failed', call, rawInput: bare, content: rejected })
+    );
+    expect(failed.verb).toBe('Note rejected');
+    expect(failed.detail).toBe('');
+    expect(failed.sections.some((section) => section.kind === 'note')).toBe(false);
+    expect(failed.output.primaryText).toContain('does not start with');
+    expect(failed.hasDetails).toBe(true);
+  });
+
+  it('reads the note from the tool_call content when the raw input is deferred', () => {
+    const deferred = { $deferred: { messageId: 1, field: 'input' } };
+    const model = buildToolCallViewModel(
+      richTool({ call: noteCall('mcp__staged__write_note', input), rawInput: deferred })
+    );
+    expect(model.category).toBe('note');
+    expect(model.metadata.note?.suggestedNextCommitStep).toBe('Expand the README');
+
+    const titled = buildToolCallViewModel(
+      richTool({ call: noteCall('mcp__staged__write_note', titledInput), rawInput: deferred })
+    );
+    expect(titled.detail).toBe(titledInput.title);
   });
 
   it("names the row by status and keeps other servers' write tools generic", () => {
     const note = (status: ToolStatus) =>
       buildToolCallViewModel(
-        richTool({
-          status,
-          call: message({
-            id: 1,
-            role: 'tool_call',
-            content: JSON.stringify({ name: 'mcp__staged__write_note', input }),
-          }),
-        })
+        richTool({ status, call: noteCall('mcp__staged__write_note', input) })
       );
     expect(note('in_progress').verb).toBe('Saving note');
     expect(note('failed').verb).toBe('Note rejected');
     expect(note('cancelled').verb).toBe('Note not saved');
 
     const other = buildToolCallViewModel(
-      richTool({
-        call: message({
-          id: 1,
-          role: 'tool_call',
-          content: JSON.stringify({ name: 'mcp__other__write_note', input }),
-        }),
-      })
+      richTool({ call: noteCall('mcp__other__write_note', input) })
     );
     expect(other.category).not.toBe('note');
     expect(other.metadata.note).toBeNull();

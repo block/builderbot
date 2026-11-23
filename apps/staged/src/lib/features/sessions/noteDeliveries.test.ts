@@ -31,18 +31,28 @@ function message(
 const user = (id: number, content = 'Write the note') => message({ id, role: 'user', content });
 const assistant = (id: number, content: string) => message({ id, role: 'assistant', content });
 
-const NOTE_INPUT = { title: 'Plan' };
+/** The call's arguments: the suggested next steps only. The title is in the draft file. */
+const NOTE_INPUT: Record<string, unknown> = {
+  suggested_next_steps: { suggestedNextCommitStep: 'Implement this plan' },
+};
+/** The arguments of a call recorded before the title moved into the draft file. */
+const TITLED_NOTE_INPUT = { title: 'Plan', ...NOTE_INPUT };
 
 /** A `write_note` call row, in Claude Code's spelling unless `name` says otherwise. */
-function noteCall(id: number, status: ToolStatus = 'completed', name = 'mcp__staged__write_note') {
+function noteCall(
+  id: number,
+  status: ToolStatus = 'completed',
+  name = 'mcp__staged__write_note',
+  input = NOTE_INPUT
+) {
   return message({
     id,
     role: 'tool_call',
-    content: JSON.stringify({ name, input: NOTE_INPUT }),
+    content: JSON.stringify({ name, input }),
     acpEventKind: 'tool_call',
     acpToolCallId: `tc-${id}`,
     acpToolStatus: status,
-    acpRawInput: NOTE_INPUT,
+    acpRawInput: input,
   });
 }
 
@@ -100,6 +110,19 @@ describe('listNoteDeliveries', () => {
     ['Codex', 'mcp.staged.write_note'],
   ])('finds the call as %s names it', (_agent, name) => {
     expect(cards([user(1), noteCall(2, 'completed', name)])).toEqual([callKey(2)]);
+  });
+
+  it.each([
+    ['no arguments', {}],
+    ['a title, as recorded before the title moved into the draft file', TITLED_NOTE_INPUT],
+  ])('finds a call with %s', (_label, input) => {
+    // The arguments only fill in the row: the call is a delivery by its name.
+    const rows = [user(1), noteCall(2, 'completed', 'mcp__staged__write_note', input)];
+    const found = deliveries(rows);
+    expect([...found.cardToolKeys]).toEqual([callKey(2)]);
+    expect(found.firstKey).toBe(callKey(2));
+    // A call that was rejected keeps its row, whatever it passed.
+    expect(cards([user(1), noteCall(2, 'failed', 'mcp__staged__write_note', input)])).toEqual([]);
   });
 
   it('finds a call whose row holds only the tool name', () => {

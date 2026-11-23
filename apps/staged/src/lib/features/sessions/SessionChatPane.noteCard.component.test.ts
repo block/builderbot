@@ -101,9 +101,20 @@ function row(id: number, role: SessionMessage['role'], content: string): Session
 
 const NOTE_TITLE = 'Plan: fix the flaky login test';
 
+/** The call's arguments: the suggested next steps only. The title is in the draft file. */
+const NOTE_INPUT: Record<string, unknown> = {
+  suggested_next_steps: { suggestedNextCommitStep: 'Implement this plan' },
+};
+/** The arguments of a call recorded before the title moved into the draft file. */
+const TITLED_NOTE_INPUT = { title: NOTE_TITLE, ...NOTE_INPUT };
+
 /** A `write_note` call row as a bridge stores it, under that bridge's tool name. */
-function noteCall(id: number, name: string, status = 'completed'): SessionMessage {
-  const input = { title: NOTE_TITLE };
+function noteCall(
+  id: number,
+  name: string,
+  status = 'completed',
+  input = NOTE_INPUT
+): SessionMessage {
   return {
     ...row(id, 'tool_call', JSON.stringify({ name, input })),
     acpEventKind: 'tool_call',
@@ -193,7 +204,10 @@ describe('SessionChatPane note card', () => {
       card.textContent?.trim()
     );
 
-  /** The header of each tool row: its verb and what it acted on. */
+  /**
+   * The header of each tool row: its verb and what it acted on. A `write_note`
+   * row has only the verb, unless the call was recorded with a title.
+   */
   const toolRows = () =>
     [...document.querySelectorAll('.tool-group .tool-header')].map((header) => [
       header.querySelector('.tool-name')?.textContent?.trim(),
@@ -226,9 +240,8 @@ describe('SessionChatPane note card', () => {
     await mountPane();
 
     expect(noteCards()).toEqual(['Note created']);
-    // The call has no row of its own, and no title beside the card.
+    // The call has no row of its own.
     expect(toolRows()).toEqual([]);
-    expect(document.querySelector('.messages')?.textContent).not.toContain(NOTE_TITLE);
     // The card is where the row was: in the call's tool group, after the
     // reply, and it ends the turn since the closing "Done" is hidden.
     expect(document.querySelectorAll('.tool-group > .note-activity-card')).toHaveLength(1);
@@ -283,15 +296,41 @@ describe('SessionChatPane note card', () => {
     ];
     await mountPane();
 
-    // The rejected call stays a row with its title; the retry is the card,
+    // The rejected call stays a row, the verb alone; the retry is the card,
     // and the first delivery, since the rejected call delivered nothing.
-    expect(toolRows()).toEqual([['Note rejected', NOTE_TITLE]]);
+    expect(toolRows()).toEqual([['Note rejected', undefined]]);
     expect(shown()).toEqual([
       'Plan a fix for the flaky login test',
       'Note rejected',
       'The diagram did not render. Fixing it.',
       'Note created',
     ]);
+  });
+
+  it('renders calls recorded with a title as before', async () => {
+    // A transcript from before the title moved into the draft file: each
+    // call passed the title, and a call that kept its row is named after it.
+    const titled = (id: number, status?: string) => noteCall(id, CLAUDE, status, TITLED_NOTE_INPUT);
+    transcript.current = [
+      row(1, 'user', 'Plan a fix for the flaky login test'),
+      titled(2, 'failed'),
+      row(3, 'assistant', 'The diagram did not render. Fixing it.'),
+      titled(4),
+      row(5, 'assistant', 'Done'),
+    ];
+    await mountPane();
+
+    expect(toolRows()).toEqual([['Note rejected', NOTE_TITLE]]);
+    expect(noteCards()).toEqual(['Note created']);
+    expect(shown()).toEqual([
+      'Plan a fix for the flaky login test',
+      'Note rejected',
+      'The diagram did not render. Fixing it.',
+      'Note created',
+    ]);
+    // The saved call is the card, with no row of its own and no title beside
+    // it: the rejected call's row is the only place the title shows.
+    expect(document.querySelector('.messages')?.textContent?.split(NOTE_TITLE)).toHaveLength(2);
   });
 
   it('keeps the tool row of an interrupted call', async () => {
@@ -304,7 +343,7 @@ describe('SessionChatPane note card', () => {
     ];
     await mountPane();
 
-    expect(toolRows()).toEqual([['Note not saved', NOTE_TITLE]]);
+    expect(toolRows()).toEqual([['Note not saved', undefined]]);
     expect(noteCards()).toEqual([]);
   });
 
@@ -368,7 +407,7 @@ describe('SessionChatPane note card', () => {
       noteCall(2, CLAUDE, 'in_progress'),
     ];
     await mountPane();
-    expect(toolRows()).toEqual([['Saving note', NOTE_TITLE]]);
+    expect(toolRows()).toEqual([['Saving note', undefined]]);
     expect(noteCards()).toEqual([]);
 
     transcript.current = [transcript.current[0], noteCall(2, CLAUDE)];
@@ -425,7 +464,7 @@ describe('SessionChatPane note card', () => {
       await mountPane(noteContext(5));
 
       expect(noteCards()).toEqual([]);
-      expect(toolRows()).toEqual([['Saved note', NOTE_TITLE]]);
+      expect(toolRows()).toEqual([['Saved note', undefined]]);
       expect(followupButton()).toBe('Ask for the note to be updated');
       // The closing "Done" stays hidden either way.
       expect(shown()).toEqual(['Plan a fix for the flaky login test', 'Saved note']);
@@ -434,7 +473,7 @@ describe('SessionChatPane note card', () => {
     it('swaps the row for the card when the refreshed note is newer', async () => {
       transcript.current = savedTurn();
       await mountPane(noteContext(5));
-      expect(toolRows()).toEqual([['Saved note', NOTE_TITLE]]);
+      expect(toolRows()).toEqual([['Saved note', undefined]]);
 
       // The dialog refetched the note: it was stored after the turn.
       props.noteInfo = noteContext(40);
@@ -464,7 +503,7 @@ describe('SessionChatPane note card', () => {
       await pollOnce();
 
       expect(noteCards()).toEqual([]);
-      expect(toolRows()).toEqual([['Saved note', NOTE_TITLE]]);
+      expect(toolRows()).toEqual([['Saved note', undefined]]);
       expect(followupButton()).toBe('Ask for the note to be updated');
     });
 

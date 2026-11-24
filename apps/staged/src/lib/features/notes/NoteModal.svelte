@@ -211,8 +211,10 @@
   let noteIdentity = $derived(noteIdentityKey({ noteKind, sessionId, noteId }));
   let liveNote = $derived(liveNoteFor(fetchedNote, noteIdentity, noteUpdatedAt));
   // Ordering guard for overlapping refreshes — a burst of writes fires a burst
-  // of events, and only the newest fetch may write `fetchedNote`.
+  // of events. Each fetch takes a number as it starts, and a result may write
+  // `fetchedNote` unless one from a fetch started after it already has.
   let liveNoteRefreshSeq = 0;
+  let liveNoteAppliedSeq = 0;
   let assistantMessagesAfterNote = $state(0);
   let assistantMessagesAfterNoteLoadedKey = $state<string | null>(null);
   let chatAutoOpenDecisionKey = $state<string | null>(null);
@@ -327,6 +329,11 @@
   let previousSessionStatus = $state<Session['status'] | null>(null);
   // The pane's report while the chat is open, the host's status otherwise.
   let sessionActive = $derived(isSessionActive(previousSessionStatus ?? sessionStatus));
+  // The row of a note its session has yet to write is a placeholder titled
+  // with the prompt, with nothing in it to move or copy. A note being
+  // rewritten keeps the menu (it can be copied, and "Move" says why it can't
+  // be), and so does one whose session ended without writing it.
+  let noteTransferable = $derived(hasNoteContent || !sessionActive);
   let noteHasPikchr = $derived(
     extractMarkdownDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
   );
@@ -651,10 +658,14 @@
     if (!identity) return;
     try {
       const refreshed = await fetchLatestNote();
-      // A later refresh already landed, or the note is gone — either way this
-      // result is not the one to render. Nor is one for a note that reference
-      // navigation has since swapped out.
-      if (!refreshed || seq !== liveNoteRefreshSeq || identity !== noteIdentity) return;
+      // The note is gone, or a fetch started after this one has already
+      // landed — either way this result is not the one to render. Nor is one
+      // for a note that reference navigation has since swapped out. A result
+      // that lands while a later fetch is still out is rendered: opening
+      // starts several, and holding out for the last would leave the snapshot
+      // up for every round trip before it, and for good if the last one fails.
+      if (!refreshed || seq <= liveNoteAppliedSeq || identity !== noteIdentity) return;
+      liveNoteAppliedSeq = seq;
       fetchedNote = {
         identity,
         id: refreshed.id,
@@ -960,7 +971,7 @@
             />
           {/if}
           <div class="note-header-actions touch-hit-group">
-            {#if displayNoteId}
+            {#if displayNoteId && noteTransferable}
               <NoteTransferMenu
                 noteId={displayNoteId}
                 {noteKind}

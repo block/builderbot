@@ -45,9 +45,23 @@
 //!   interest call that ends the pause gets snapshots.
 //! - **A session with no row** (deleted, or not written yet) is not an
 //!   error: nothing is sent for it.
+//! - **Another Staged process on the same database.** Its writes mark
+//!   nothing here. While a client is subscribed to a session this process is
+//!   not running, the hub reads SQLite's `data_version` once a second, and
+//!   when another process has committed it reads those sessions again and
+//!   sends a delta of what differs from what the client holds. So a session
+//!   running in another instance follows within about a second. See
+//!   `watch.rs` for which sessions count and the one gap that is left.
 //!
 //! With no client subscribed, or only paused ones, the feed is switched off,
-//! so a session write records nothing and the hub task stays parked.
+//! so a session write records nothing and the hub task stays parked. The
+//! once-a-second read is the only timer the hub runs with nothing owed, and
+//! it runs only for the sessions above.
+//!
+//! The hub task runs for the life of the app. Should it ever end (a panic),
+//! the hub drops its clients and refuses every interest from then on, so a
+//! client's `check_session_stream` and its next interest both fail and it
+//! goes back to polling.
 //!
 //! This sits beside the change feed (`store_events.rs`), which still leaves
 //! sessions out. Polling (`poll_session` and the standalone reads) is
@@ -58,6 +72,7 @@ mod frames;
 mod hub;
 #[cfg(test)]
 mod tests;
+mod watch;
 mod web;
 
 use std::sync::{Arc, Mutex, PoisonError};

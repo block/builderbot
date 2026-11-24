@@ -15,6 +15,8 @@ import type {
 import {
   ESTABLISH_GRACE_MS,
   GAP_RESTART_SPACING_MS,
+  HEALTH_ATTEMPTS,
+  HEALTH_CONFIRM_MS,
   INTEREST_DELAY_MS,
   LINGER_MS,
   RETRY_BASE_MS,
@@ -71,14 +73,31 @@ function createHarness(
   const interests: SessionStreamInterest[] = [];
   let handlers: SessionStreamHandlers | undefined;
   let storeReset: (() => void) | undefined;
+  let healthTrigger: (() => void) | undefined;
   let visibilityChanged: (() => void) | undefined;
+  /** The health checks asked, as [generation, last sequence number]. */
+  const checks: [number, number][] = [];
   const state: {
     hidden: boolean;
     closed: boolean;
     failing: boolean;
     seq: number;
     generation?: number;
-  } = { hidden: false, closed: false, failing: false, seq: 0 };
+    /** What the backend answers a health check, given what it was asked. */
+    healthy: (generation: number, lastSeq: number) => boolean | Promise<boolean>;
+  } = {
+    hidden: false,
+    closed: false,
+    failing: false,
+    seq: 0,
+    // The backend's own rule, with the harness as the backend: the frames
+    // it has sent in the generation of the last interest it accepted.
+    healthy: (generation, lastSeq) => {
+      const accepted = last()?.generation;
+      const sent = state.generation === accepted ? state.seq : 0;
+      return generation === accepted && lastSeq === sent;
+    },
+  };
 
   const owner = new SessionStreamOwner({
     open: (given) => {
@@ -87,6 +106,10 @@ function createHarness(
         setInterest: async (interest) => {
           interests.push(interest);
           if (state.failing) throw new Error('No session stream is open for client');
+        },
+        check: async (generation, lastSeq) => {
+          checks.push([generation, lastSeq]);
+          return state.healthy(generation, lastSeq);
         },
         close: () => {
           state.closed = true;
@@ -97,6 +120,12 @@ function createHarness(
     onStoreReset: (listener) => {
       storeReset = listener;
       return () => {};
+    },
+    onHealthTrigger: (listener) => {
+      healthTrigger = listener;
+      return () => {
+        healthTrigger = undefined;
+      };
     },
     visibility: {
       hidden: () => state.hidden,
@@ -115,6 +144,7 @@ function createHarness(
   return {
     owner,
     interests,
+    checks,
     state,
     last,
     settle,
@@ -127,6 +157,11 @@ function createHarness(
     reopen: () => handlers?.onOpen(),
     close: () => handlers?.onClose(),
     resetStore: () => storeReset?.(),
+    /** One of the status listener's re-hydrate triggers fires. */
+    async triggerHealthCheck() {
+      healthTrigger?.();
+      await vi.advanceTimersByTimeAsync(0);
+    },
     setHidden(hidden: boolean) {
       state.hidden = hidden;
       visibilityChanged?.();
@@ -151,6 +186,7 @@ function createHarness(
   } as {
     owner: SessionStreamOwner;
     interests: SessionStreamInterest[];
+    checks: [number, number][];
     state: typeof state;
     last: () => SessionStreamInterest;
     settle: () => Promise<unknown>;
@@ -158,6 +194,7 @@ function createHarness(
     reopen: () => void;
     close: () => void;
     resetStore: () => void;
+    triggerHealthCheck: () => Promise<void>;
     setHidden: (hidden: boolean) => void;
     frame: (kind: 'snapshot' | 'delta', sessionId: string, given: SessionSummary) => Promise<void>;
     raw: (frame: SessionStreamFrame) => void;
@@ -591,6 +628,27 @@ describe('SessionStreamOwner', () => {
     });
   });
 
+  describe('a resync frame', () => {
+    it('is counted in the sequence and changes nothing', async () => {
+      await h.open();
+      await show(['s1']);
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Reading')]));
+      const calls = h.interests.length;
+
+      // Sent to full subscribers only, which this owner never is.
+      h.raw({ generation: h.last().generation, seq: 2, sessionId: 's1', kind: 'resync' });
+      h.state.seq = 2;
+      await h.settle();
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Reading');
+      expect(h.owner.status('s1')).toBe('running');
+
+      // The next frame is the one after it, not a gap.
+      await h.frame('delta', 's1', summary([assistant(3, 'Writing')]));
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Writing');
+      expect(h.interests).toHaveLength(calls);
+    });
+  });
+
   describe('per-root hints', () => {
     it('derives a session’s hint once for each root set that shows it', async () => {
       await h.open();
@@ -841,6 +899,230 @@ describe('SessionStreamOwner', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(seen).toEqual(['connecting', 'unavailable', 'established']);
       expect(levels(h.last())).toEqual({ s1: 'summary' });
+    });
+  });
+
+  describe('the health check', () => {
+    /** Open, show `s1`, and apply its snapshot: one frame in the generation. */
+    async function established(): Promise<number> {
+      await h.open();
+      await show(['s1']);
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Before')]));
+      return h.last().generation;
+    }
+
+    /** The backend sent one more frame than arrived. */
+    function loseAFrame(): void {
+      h.state.seq += 1;
+    }
+
+    it('asks with its generation and the last frame it applied, and leaves a healthy stream alone', async () => {
+      const generation = await established();
+      const calls = h.interests.length;
+
+      await h.triggerHealthCheck();
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS * 2);
+
+      expect(h.checks).toEqual([[generation, 1]]);
+      expect(h.interests).toHaveLength(calls);
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Before');
+    });
+
+    it('starts over when the last frame was lost and nothing follows it', async () => {
+      const generation = await established();
+      const before = h.last();
+      loseAFrame();
+
+      await h.triggerHealthCheck();
+      // Not at once: the frame could still be on its way.
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS - 1);
+      expect(h.last()).toEqual(before);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await h.settle();
+      expect(h.checks).toEqual([[generation, 1]]);
+      expect(h.last()).toEqual({ ...before, generation: generation + 1 });
+      // What is shown stays until the snapshot replaces it, and nothing
+      // falls back to polling in between.
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Before');
+      expect(h.owner.availability).toBe('established');
+
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(3, 'After')]));
+      expect(h.owner.hint('s1', ['/repo'])).toBe('After');
+    });
+
+    it('starts over when the backend no longer holds the stream', async () => {
+      const generation = await established();
+      h.state.healthy = () => false;
+
+      await h.triggerHealthCheck();
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS);
+      await h.settle();
+
+      expect(h.last().generation).toBe(generation + 1);
+    });
+
+    it('asks again when the frame it was missing arrives while it waits', async () => {
+      const generation = await established();
+      const calls = h.interests.length;
+      // The backend has sent frame 2, which is still on its way.
+      loseAFrame();
+
+      await h.triggerHealthCheck();
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS / 2);
+      h.raw({
+        generation,
+        seq: 2,
+        sessionId: 's1',
+        kind: 'delta',
+        summary: summary([assistant(3, 'Arrived late')]),
+      });
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS);
+
+      expect(h.checks).toEqual([
+        [generation, 1],
+        [generation, 2],
+      ]);
+      expect(h.interests).toHaveLength(calls);
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Arrived late');
+    });
+
+    it('asks again at once when frames arrive while the question is out', async () => {
+      const generation = await established();
+      const calls = h.interests.length;
+      let asked = 0;
+      // Each answer is overtaken by a frame, so each is about a number the
+      // owner has already moved past.
+      h.state.healthy = () => {
+        asked += 1;
+        h.raw({
+          generation,
+          seq: asked + 1,
+          sessionId: 's1',
+          kind: 'delta',
+          summary: summary([assistant(10 + asked, `Frame ${asked + 1}`)]),
+        });
+        return false;
+      };
+
+      await h.triggerHealthCheck();
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS * (HEALTH_ATTEMPTS + 1));
+
+      // It gives up without starting over: a stream this busy is delivering.
+      expect(h.checks.map(([, seq]) => seq)).toEqual(
+        Array.from({ length: HEALTH_ATTEMPTS }, (_, attempt) => attempt + 1)
+      );
+      expect(h.interests).toHaveLength(calls);
+      expect(h.owner.hint('s1', ['/repo'])).toBe(`Frame ${HEALTH_ATTEMPTS + 1}`);
+    });
+
+    it('runs one check at a time', async () => {
+      await established();
+      loseAFrame();
+
+      await h.triggerHealthCheck();
+      await h.triggerHealthCheck();
+      await h.triggerHealthCheck();
+
+      expect(h.checks).toHaveLength(1);
+    });
+
+    it('does not start over twice when something else starts over while it waits', async () => {
+      const generation = await established();
+      loseAFrame();
+
+      await h.triggerHealthCheck();
+      h.resetStore();
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS);
+      await h.settle();
+
+      expect(h.interests.map((interest) => interest.generation).slice(-2)).toEqual([
+        generation,
+        generation + 1,
+      ]);
+      expect(h.last().generation).toBe(generation + 1);
+    });
+
+    it('concludes nothing from a check that fails', async () => {
+      await established();
+      const calls = h.interests.length;
+      h.state.healthy = () => Promise.reject(new Error('unreachable'));
+
+      await h.triggerHealthCheck();
+      await vi.advanceTimersByTimeAsync(HEALTH_CONFIRM_MS * 2);
+
+      expect(h.checks).toHaveLength(1);
+      expect(h.interests).toHaveLength(calls);
+      expect(h.owner.availability).toBe('established');
+
+      // And the next trigger asks again.
+      await h.triggerHealthCheck();
+      expect(h.checks).toHaveLength(2);
+    });
+
+    it('does not ask before the stream is established', async () => {
+      h.owner.start();
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([]);
+
+      // Open, with the first interest still unanswered.
+      h.state.failing = true;
+      h.reopen();
+      await h.settle();
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([]);
+    });
+
+    it('does not ask while a start-over is under way', async () => {
+      await established();
+
+      // Asked for, not yet declared.
+      h.resetStore();
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([]);
+
+      // Declared and accepted: the stream is checkable again.
+      await h.settle();
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([[h.last().generation, 0]]);
+    });
+
+    it('does not ask while the stream is being re-established', async () => {
+      await established();
+
+      h.close();
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([]);
+
+      h.reopen();
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([]);
+
+      await h.settle();
+      await h.triggerHealthCheck();
+      expect(h.checks).toHaveLength(1);
+    });
+
+    it('does not ask for a hidden window', async () => {
+      await established();
+      h.setHidden(true);
+      await h.settle();
+
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([]);
+
+      // Shown again, it asks, in the same generation.
+      h.setHidden(false);
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([[h.last().generation, 1]]);
+    });
+
+    it('stops listening for triggers when it stops', async () => {
+      await established();
+      h.owner.stop();
+
+      await h.triggerHealthCheck();
+      expect(h.checks).toEqual([]);
     });
   });
 

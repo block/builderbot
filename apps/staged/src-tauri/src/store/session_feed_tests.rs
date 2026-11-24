@@ -1062,3 +1062,55 @@ fn a_queue_write_that_changes_no_row_marks_nothing() {
 
     assert_unmarked(&feed);
 }
+
+/// What the session stream relies on to notice a second Staged process: the
+/// bundled SQLite's `data_version` holds still for the store's own writes
+/// and moves for another connection's, whatever kind of write it is.
+#[test]
+fn the_data_version_moves_for_another_connections_commits_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+    let store = Store::new(&path).unwrap();
+    let other = Store::new(&path).unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+
+    // This store's own writes: an insert, an in-place update, a session row.
+    let before = store.data_version().unwrap();
+    store.create_session(&session).unwrap();
+    let id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "one")
+        .unwrap();
+    store.update_message_content(id, "one, rewritten").unwrap();
+    store
+        .update_session_acp_title(&session.id, Some("A title"))
+        .unwrap();
+    assert_eq!(store.data_version().unwrap(), before);
+
+    // Reads by the other connection are not commits.
+    other.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(store.data_version().unwrap(), before);
+
+    // Each kind of write by the other connection.
+    let mut seen = before;
+    let mut moved = |what: &str| {
+        let now = store.data_version().unwrap();
+        assert_ne!(now, seen, "{what} did not move the data version");
+        seen = now;
+    };
+    let other_id = other
+        .add_session_message(&session.id, MessageRole::Assistant, "two")
+        .unwrap();
+    moved("an insert");
+    other
+        .update_message_content(other_id, "two, rewritten")
+        .unwrap();
+    moved("an in-place update");
+    other
+        .update_session_acp_title(&session.id, Some("Another title"))
+        .unwrap();
+    moved("a session row update");
+
+    // And it holds still again once the other connection stops.
+    assert_eq!(store.data_version().unwrap(), seen);
+    assert_eq!(store.data_version().unwrap(), seen);
+}

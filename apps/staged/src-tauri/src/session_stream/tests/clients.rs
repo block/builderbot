@@ -296,6 +296,39 @@ async fn a_closed_sink_removes_its_client() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hub_whose_task_has_ended_holds_no_stream_and_takes_no_interest() {
+    let h = Harness::new();
+    let session = h.session();
+    let client = h.client("a");
+    h.want("a", 1, &[(&session, Summary)]);
+    settle().await;
+    assert_eq!(shape(&client.take()), vec![snapshot(1, &session)]);
+    assert!(h.hub.check("a", 1, 1));
+
+    // The task never returns, so this is what a panic in it leaves behind.
+    h.task.abort();
+    settle().await;
+
+    // The client's health check finds no stream, and its interest is
+    // refused whether or not it opens a new one.
+    assert!(!h.hub.check("a", 1, 1));
+    assert!(h
+        .hub
+        .set_interest("a", interest(2, &[(&session, Summary)]))
+        .is_err());
+    h.client("a");
+    assert!(h
+        .hub
+        .set_interest("a", interest(2, &[(&session, Summary)]))
+        .is_err());
+
+    // And writers are back to recording nothing.
+    assert!(!h.feed.is_active());
+    h.say(&session, MessageRole::Assistant, "unheard");
+    assert!(h.feed.drain().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_late_disconnect_does_not_remove_a_reconnected_client() {
     let h = Harness::new();
     let session = h.session();

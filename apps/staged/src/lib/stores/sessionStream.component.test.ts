@@ -39,10 +39,11 @@ describe('session stream rows', () => {
     owner = new SessionStreamOwner({
       open: (given) => {
         handlers = given;
-        return { setInterest: async () => {}, close: () => {} };
+        return { setInterest: async () => {}, check: async () => true, close: () => {} };
       },
       resolveRoots: async (roots) => normalizeDisplayRoots(roots),
       onStoreReset: () => () => {},
+      onHealthTrigger: () => () => {},
       visibility: null,
     });
     owner.start();

@@ -34,6 +34,14 @@
  *   fell due while it had none is not sent later).
  * - **A hidden window is paused.** The interest is kept and nothing is sent;
  *   showing the window again brings snapshots.
+ * - **A health check.** A lost frame shows as a gap only when a later frame
+ *   arrives, so the last frame of a quiet stream can go missing unnoticed.
+ *   On the status listener's re-hydrate triggers (a return to the window and
+ *   once a minute in a desktop window, a resume or reconnect in the web
+ *   build) the owner asks the backend whether its last frame is the last one
+ *   applied here, and starts over if not. It only asks while the stream is
+ *   established in the generation it last declared and the window is
+ *   showing, so it never competes with a start-over already under way.
  *
  * `availability` says whether consumers can rely on the stream. It is
  * `unavailable` until `start`, with the kill switch off, and once the stream
@@ -42,9 +50,10 @@
  * stays and nothing polls, so a dropped socket does not make every row reload
  * its transcript.
  *
- * Only the title and summary levels are asked for. The full level, the
- * stream health check and a second instance writing the same database are
- * later phases.
+ * Only the title and summary levels are asked for; the full level is a later
+ * phase. A second Staged process writing the same database is the backend's
+ * to notice (`session_stream/watch.rs`): its changes arrive as deltas like
+ * any other.
  */
 
 import { untrack } from 'svelte';
@@ -61,6 +70,7 @@ import {
   HINT_ROW_WINDOW,
   normalizeSessionTitle,
 } from '../features/timeline/sessionHint';
+import { onRehydrate } from '../listeners/rehydrateSignal';
 import {
   listenToEvent,
   openSessionStream,
@@ -121,6 +131,17 @@ export const RETRY_BASE_MS = 1_000;
 export const RETRY_MAX_MS = 30_000;
 /** The least time between two restarts for a lost frame. */
 export const GAP_RESTART_SPACING_MS = 1_000;
+/**
+ * How long a failed health check waits for a frame that may still be on its
+ * way before it counts as a lost one.
+ */
+export const HEALTH_CONFIRM_MS = 1_000;
+/**
+ * How many times one health check asks. Each answer that frames overtook is
+ * asked again; a stream busy enough to overtake them all is delivering, and
+ * a frame it loses shows as a gap.
+ */
+export const HEALTH_ATTEMPTS = 3;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -162,6 +183,8 @@ export interface SessionStreamDeps {
   resolveRoots: (roots: DisplayRootInput) => Promise<string[]>;
   /** Calls `listener` when the backend's store has been replaced. */
   onStoreReset: (listener: () => void) => () => void;
+  /** Calls `listener` when the stream's health is due a check. */
+  onHealthTrigger: (listener: () => void) => () => void;
   /** The page's visibility, or `null` where there is no page. */
   visibility: {
     hidden: () => boolean;
@@ -266,6 +289,7 @@ const defaultDeps: SessionStreamDeps = {
   open: openSessionStream,
   resolveRoots: (roots) => resolveDisplayRoots(roots),
   onStoreReset: (listener) => listenToEvent<void>('store-reset-completed', listener),
+  onHealthTrigger: onRehydrate,
   visibility: documentVisibility(),
 };
 
@@ -295,6 +319,10 @@ export class SessionStreamOwner {
   #lastSeq = 0;
   /** The last interest the backend accepted, serialized. */
   #sentKey: string | null = null;
+  /** The generation of that interest: the one the backend numbers frames in. */
+  #acceptedGeneration: number | null = null;
+  /** A health check is under way. */
+  #checking = false;
   #sending = false;
   #sendTimer: ReturnType<typeof setTimeout> | null = null;
   /** When `#sendTimer` fires. */
@@ -332,6 +360,7 @@ export class SessionStreamOwner {
     // A snapshot that fell due while the backend had no store was not sent
     // and will not be, so ask again once it has one.
     this.#stopListening.push(this.#deps.onStoreReset(() => this.#restart()));
+    this.#stopListening.push(this.#deps.onHealthTrigger(() => void this.checkHealth()));
     this.#setAvailability('connecting');
     this.#link = this.#deps.open({
       onFrame: (frame) => this.#receive(frame),
@@ -346,6 +375,7 @@ export class SessionStreamOwner {
       },
       onClose: () => {
         this.#open = false;
+        this.#acceptedGeneration = null;
         this.#clearSendTimer();
         this.#lost();
       },
@@ -374,6 +404,7 @@ export class SessionStreamOwner {
     }
     this.#open = false;
     this.#sentKey = null;
+    this.#acceptedGeneration = null;
     this.#lastSeq = 0;
     for (const [sessionId, entry] of this.#entries) {
       entry.declared = null;
@@ -751,6 +782,7 @@ export class SessionStreamOwner {
       // The backend may hold an older interest or none, so the retry starts
       // over; in Tauri mode it also opens a new stream.
       this.#failures += 1;
+      this.#acceptedGeneration = null;
       this.#notBefore =
         Date.now() + Math.min(RETRY_BASE_MS * 2 ** (this.#failures - 1), RETRY_MAX_MS);
       this.#lost();
@@ -758,12 +790,76 @@ export class SessionStreamOwner {
       return;
     }
     this.#failures = 0;
+    // The backend numbers its frames in this generation now, whether or not
+    // a newer one has been started here since.
+    this.#acceptedGeneration = interest.generation;
     if (interest.generation === this.#generation) {
       this.#sentKey = key;
       this.#setAvailability('established');
     }
     // Whatever changed while the call ran.
     this.#requestSend();
+  }
+
+  // ── Health ────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether the stream is in a state a health check can say anything about:
+   * established, showing, and in the generation the backend last accepted.
+   * Otherwise a start-over is already on its way, or nothing is being sent.
+   */
+  #checkable(link: SessionStreamLink, generation: number): boolean {
+    return (
+      this.#link === link &&
+      this.#open &&
+      !this.#paused &&
+      this.#availability === 'established' &&
+      this.#generation === generation &&
+      this.#acceptedGeneration === generation
+    );
+  }
+
+  /**
+   * Ask the backend whether the last frame it sent is the last one applied
+   * here, and start over under a new generation if it is not: a frame was
+   * lost with none after it to show the gap, or the backend no longer holds
+   * this stream.
+   *
+   * The backend's answer is "no" for a frame that is still on its way too.
+   * So a "no" is only believed once nothing has arrived for
+   * `HEALTH_CONFIRM_MS`, counted from before the question was asked. If
+   * frames did arrive, the question is asked again with the new number.
+   */
+  async checkHealth(): Promise<void> {
+    const link = this.#link;
+    const generation = this.#generation;
+    if (this.#checking || !link || !this.#checkable(link, generation)) return;
+    this.#checking = true;
+    try {
+      for (let attempt = 0; attempt < HEALTH_ATTEMPTS; attempt += 1) {
+        const seq = this.#lastSeq;
+        let healthy: boolean;
+        try {
+          healthy = await link.check(generation, seq);
+        } catch {
+          // No answer says nothing about the frames. If the backend is out
+          // of reach, the socket's close or the next interest call says so.
+          return;
+        }
+        if (healthy || !this.#checkable(link, generation)) return;
+        if (this.#lastSeq === seq) {
+          await new Promise((resolve) => setTimeout(resolve, HEALTH_CONFIRM_MS));
+          if (!this.#checkable(link, generation)) return;
+          if (this.#lastSeq === seq) {
+            console.warn('[sessionStream] The stream is behind the backend; starting over');
+            this.#restart();
+            return;
+          }
+        }
+      }
+    } finally {
+      this.#checking = false;
+    }
   }
 
   // ── Availability ──────────────────────────────────────────────────────────

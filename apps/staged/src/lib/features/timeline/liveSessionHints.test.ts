@@ -585,11 +585,13 @@ describe('createLiveSessionHints on the session stream', () => {
             setInterest: async (interest) => {
               interests.push(interest);
             },
+            check: async () => true,
             close: () => {},
           };
         },
         resolveRoots: async (roots) => normalizeDisplayRoots(roots),
         onStoreReset: () => () => {},
+        onHealthTrigger: () => () => {},
         visibility: { hidden: () => false, listen: () => () => {} },
       });
       return { ...original, sessionStream: owner };

@@ -616,6 +616,27 @@ describe('web transport', () => {
       link.close();
     });
 
+    it('asks the backend about its frames for the client id its socket connected with', async () => {
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      const fetch = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue(false) });
+      vi.stubGlobal('fetch', fetch);
+      const { openSessionStream } = await import('./transport');
+      const link = openSessionStream({ onFrame: vi.fn(), onOpen: vi.fn(), onClose: vi.fn() });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+
+      await expect(link.check(3, 17)).resolves.toBe(false);
+
+      expect(fetch.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)])).toEqual([
+        [
+          '/api/invoke/check_session_stream',
+          { clientId: 'web-client-1', generation: 3, lastSeq: 17 },
+        ],
+      ]);
+
+      link.close();
+    });
+
     it('rejects an interest the backend refuses', async () => {
       vi.stubGlobal('WebSocket', MockWebSocket);
       vi.stubGlobal(
@@ -721,6 +742,23 @@ describe('tauri session stream', () => {
     const frame = { generation: 1, seq: 1, sessionId: 's1', kind: 'snapshot' };
     channels[0].onmessage(frame);
     expect(onFrame).toHaveBeenCalledWith(frame);
+
+    link.close();
+  });
+
+  it('asks the backend about its frames without touching the channel', async () => {
+    const { openSessionStream } = await import('./transport');
+    const link = openSessionStream({ onFrame: vi.fn(), onOpen: vi.fn(), onClose: vi.fn() });
+    await link.setInterest(INTEREST);
+    invoke.mockResolvedValueOnce(true);
+
+    await expect(link.check(3, 17)).resolves.toBe(true);
+
+    // The window is the client: the backend takes its id from the window.
+    expect(invoke.mock.calls[1]).toEqual(['check_session_stream', { generation: 3, lastSeq: 17 }]);
+    // A check is not an interest call, so the next one still passes no channel.
+    await link.setInterest({ ...INTEREST, paused: true });
+    expect(sentChannels()).toEqual(['__CHANNEL__:1', undefined, undefined]);
 
     link.close();
   });

@@ -1095,8 +1095,13 @@ export interface SessionStreamFrame {
    * `snapshot`: the session's state, which replaces what the client holds.
    * `delta`: the current session fields and the current version of each
    * changed row, to upsert by id.
+   * `resync`: another Staged process wrote the database and the backend
+   * cannot say which rows changed, so the client reads the session again.
+   * Only the full level is sent one, and that level is not served yet, so
+   * none arrives; it is counted in the sequence and otherwise ignored.
    */
-  kind: 'snapshot' | 'delta';
+  kind: 'snapshot' | 'delta' | 'resync';
+  /** Left out of a `resync`. */
   summary?: SessionSummary;
 }
 

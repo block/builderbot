@@ -7,6 +7,7 @@
 
 mod cadence;
 mod clients;
+mod foreign;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -31,7 +32,12 @@ struct Harness {
     hub: Arc<SessionStreamHub>,
     store: Arc<Store>,
     feed: Arc<SessionFeed>,
+    /// How many rounds the hub has gone to the store for: a round of reads,
+    /// or a read of the data version alone.
+    rounds: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
+    /// The database file's directory, for a harness that has one.
+    _dir: Option<tempfile::TempDir>,
 }
 
 impl Harness {
@@ -45,19 +51,44 @@ impl Harness {
     }
 
     fn build(readable: bool) -> Self {
+        Self::over(Store::in_memory().unwrap(), readable, None)
+    }
+
+    /// A hub over a database file, and a second store on the same file with
+    /// no feed: what another Staged process is to this one.
+    fn beside_another_instance() -> (Self, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.db");
+        let store = Store::new(&path).unwrap();
+        let other = Store::new(&path).unwrap();
+        (Self::over(store, true, Some(dir)), other)
+    }
+
+    fn over(store: Store, readable: bool, dir: Option<tempfile::TempDir>) -> Self {
         let feed = Arc::new(SessionFeed::default());
-        let store = Arc::new(Store::in_memory().unwrap().with_session_feed(feed.clone()));
+        let store = Arc::new(store.with_session_feed(feed.clone()));
         let hub = Arc::new(SessionStreamHub::new(feed.clone()));
+        let rounds = Arc::new(AtomicUsize::new(0));
         let task = tokio::spawn(hub::run(hub.clone(), {
             let store = store.clone();
-            move || readable.then(|| store.clone())
+            let rounds = rounds.clone();
+            move || {
+                rounds.fetch_add(1, Ordering::SeqCst);
+                readable.then(|| store.clone())
+            }
         }));
         Self {
             hub,
             store,
             feed,
+            rounds,
             task,
+            _dir: dir,
         }
+    }
+
+    fn rounds(&self) -> usize {
+        self.rounds.load(Ordering::SeqCst)
     }
 
     /// A running session in `/tmp`.

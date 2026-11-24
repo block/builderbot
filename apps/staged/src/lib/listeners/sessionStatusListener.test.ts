@@ -846,6 +846,30 @@ describe('sessionStatusListener busy-state hydration', () => {
       await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(2));
     });
 
+    it('announces every hydration, for whatever else checks itself at those moments', async () => {
+      const { onRehydrate } = await import('./rehydrateSignal');
+      const announced = vi.fn();
+      const stop = onRehydrate(announced);
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      // Startup.
+      expect(announced).toHaveBeenCalledTimes(1);
+
+      // A return to the window, past the minimum gap.
+      vi.advanceTimersByTime(5_000);
+      window.dispatchEvent(new Event('focus'));
+      expect(announced).toHaveBeenCalledTimes(2);
+
+      // The interval.
+      vi.advanceTimersByTime(60_000);
+      expect(announced).toHaveBeenCalledTimes(3);
+
+      stop();
+      vi.advanceTimersByTime(60_000);
+      expect(announced).toHaveBeenCalledTimes(3);
+    });
+
     it('installs no triggers outside Tauri mode', async () => {
       vi.doMock('../transport', () => ({ isTauri: false, listenToEvent }));
       const { listenForSessionStatus } = await import('./sessionStatusListener');

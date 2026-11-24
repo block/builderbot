@@ -6,9 +6,13 @@
 //! from a read made after the frame before it, and frames reach the sink in
 //! that order. The commands only change the state under its lock and wake
 //! the task; they never read the store or send.
+//!
+//! The feed holds this process's writes only. What the hub does about
+//! another process's is in `watch.rs`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -20,6 +24,7 @@ use crate::store::{SessionDirty, SessionFeed, SessionSummary, Store, SummaryRows
 use super::frames::{
     SessionStreamFrame, SessionStreamFrameKind, SessionStreamInterest, SessionStreamLevel,
 };
+use super::watch::{self, Watch, FOREIGN_CHECK};
 
 /// How long a change waits before it is read, so the rest of its burst is
 /// read with it.
@@ -65,6 +70,12 @@ pub struct SessionStreamHub {
     /// Wakes the task for an interest change, which the feed knows nothing
     /// about.
     poke: Notify,
+    /// The hub task has ended. It runs for the life of the app, so this
+    /// means it panicked. Nobody would send a frame again, so from then on
+    /// the hub holds no client and refuses every interest: a client's health
+    /// check finds no stream, its interest fails, and it falls back to
+    /// polling instead of showing what it last received for ever.
+    stopped: AtomicBool,
 }
 
 #[derive(Default)]
@@ -72,6 +83,9 @@ struct HubState {
     clients: HashMap<String, Client>,
     /// Hands out connection tokens and tracked-session revisions.
     counter: u64,
+    /// When the database's `data_version` is next read. `None` while no
+    /// unpaused client tracks a session another process may write.
+    watch_at: Option<Instant>,
 }
 
 impl HubState {
@@ -119,6 +133,9 @@ struct Tracked {
     /// The opening prompt's id once a read has found it, so later reads skip
     /// the lookup.
     opening_prompt_id: Option<i64>,
+    /// Whether another process may write the session, and the rows the
+    /// client holds, for finding what such a write changed.
+    watch: Watch,
 }
 
 impl Tracked {
@@ -132,6 +149,7 @@ impl Tracked {
             last_sent: None,
             sent_fields: None,
             opening_prompt_id: None,
+            watch: Watch::default(),
         }
     }
 
@@ -153,6 +171,16 @@ impl Tracked {
         self.ready_at.get_or_insert(now + GATHER);
     }
 
+    /// Another process has committed since the session was read: read it
+    /// again. `data_version` cannot say which rows, so the read is of the
+    /// newest ones, as for a snapshot.
+    fn written_elsewhere(&mut self, now: Instant) {
+        if !self.needs_snapshot {
+            self.watch.ask_refresh();
+        }
+        self.ready_at.get_or_insert(now);
+    }
+
     fn due_at(&self) -> Option<Instant> {
         let ready = self.ready_at?;
         Some(match self.last_sent {
@@ -170,9 +198,35 @@ struct Delivery {
     revision: u64,
     level: SessionStreamLevel,
     snapshot: bool,
+    /// Not a snapshot, and still a read of the newest rows: another process
+    /// wrote the database, and the rows that differ from what the client
+    /// holds are sent.
+    refresh: bool,
+    /// Whether the session was this process's when the frame was planned.
+    ours: bool,
     window: u32,
     rows: BTreeSet<i64>,
     opening_prompt_id: Option<i64>,
+}
+
+/// What the task does next.
+struct Plan {
+    /// The frames that are due and have room in their sinks.
+    deliveries: Vec<Delivery>,
+    /// The database's `data_version` is due a read.
+    check_version: bool,
+    /// When the next frame or version read falls due.
+    next: Option<Instant>,
+}
+
+impl Plan {
+    /// Whether this round takes the database's `data_version`: a check is
+    /// due, or it reads a session another process may write, whose read is
+    /// tagged with the value. A round of this process's own sessions, which
+    /// is every round with one Staged running, does not.
+    fn wants_version(&self) -> bool {
+        self.check_version || self.deliveries.iter().any(|delivery| !delivery.ours)
+    }
 }
 
 /// One session's read for a round of deliveries, shared by every client that
@@ -184,14 +238,22 @@ struct SummaryRead {
 }
 
 enum Loaded {
-    Summary {
-        summary: SessionSummary,
-        title_fields: u64,
-        summary_fields: u64,
-    },
+    Summary(Box<LoadedSummary>),
     /// The session row does not exist, or there is no store to read.
     Gone,
     Failed,
+}
+
+/// A session that was read, with what the hub works out from it once for
+/// every client.
+struct LoadedSummary {
+    summary: SessionSummary,
+    title_fields: u64,
+    summary_fields: u64,
+    /// The fingerprint of each of `summary.rows`, in their order.
+    row_prints: Vec<u64>,
+    /// Whether this process is the one writing the session.
+    ours: bool,
 }
 
 impl SessionStreamHub {
@@ -200,6 +262,7 @@ impl SessionStreamHub {
             feed,
             state: Mutex::default(),
             poke: Notify::new(),
+            stopped: AtomicBool::new(false),
         }
     }
 
@@ -213,6 +276,9 @@ impl SessionStreamHub {
     pub fn connect(&self, client_id: &str, sink: Arc<dyn FrameSink>) -> u64 {
         let mut state = self.lock();
         let connection = state.next_id();
+        if self.stopped.load(Ordering::Acquire) {
+            return connection;
+        }
         state.clients.insert(
             client_id.to_owned(),
             Client {
@@ -258,7 +324,15 @@ impl SessionStreamHub {
         let now = Instant::now();
         {
             let mut state = self.lock();
-            let HubState { clients, counter } = &mut *state;
+            // Read under the lock the task's end takes to clear the clients,
+            // so an interest cannot land after that and switch the feed on
+            // for nobody.
+            if self.stopped.load(Ordering::Acquire) {
+                return Err("The session stream has stopped".to_string());
+            }
+            let HubState {
+                clients, counter, ..
+            } = &mut *state;
             let client = clients
                 .get_mut(client_id)
                 .ok_or_else(|| format!("No session stream is open for client {client_id}"))?;
@@ -287,13 +361,16 @@ impl SessionStreamHub {
                     Some(tracked) if tracked.level == level => tracked,
                     // Lowered to the title level: the rows are no longer
                     // wanted, and whatever else is owed still is.
-                    Some(tracked) if tracked.level > level => Tracked {
-                        level,
-                        revision: revision(),
-                        rows: BTreeSet::new(),
-                        sent_fields: None,
-                        ..tracked
-                    },
+                    Some(mut tracked) if tracked.level > level => {
+                        tracked.watch.forget_rows();
+                        Tracked {
+                            level,
+                            revision: revision(),
+                            rows: BTreeSet::new(),
+                            sent_fields: None,
+                            ..tracked
+                        }
+                    }
                     _ => Tracked::new(level, revision(), ready_at),
                 };
                 client.sessions.insert(session_id, tracked);
@@ -302,6 +379,7 @@ impl SessionStreamHub {
                 for tracked in client.sessions.values_mut() {
                     tracked.ready_at = None;
                     tracked.rows.clear();
+                    tracked.watch.cancel_refresh();
                 }
             }
             client.generation = Some(interest.generation);
@@ -337,6 +415,16 @@ impl SessionStreamHub {
         }
     }
 
+    /// The hub task has ended: forget every client and switch the feed off,
+    /// so writers stop recording marks nobody will drain.
+    fn stop(&self) {
+        let mut state = self.lock();
+        self.stopped.store(true, Ordering::Release);
+        state.clients.clear();
+        state.watch_at = None;
+        self.sync_feed(&state);
+    }
+
     /// The hub must outlive a panic on a thread that held its state: the
     /// state is ids, flags and instants, usable as it stands.
     fn lock(&self) -> MutexGuard<'_, HubState> {
@@ -344,20 +432,25 @@ impl SessionStreamHub {
     }
 
     /// Hand the drained marks to the clients that want them, and take out
-    /// every frame that is due and has room in its sink. Also returns when
-    /// the next one falls due.
-    fn plan(
-        &self,
-        marks: &HashMap<String, SessionDirty>,
-        now: Instant,
-    ) -> (Vec<Delivery>, Option<Instant>) {
+    /// every frame that is due and has room in its sink. Also says whether
+    /// the database's `data_version` is due a read, and when the next thing
+    /// falls due.
+    fn plan(&self, marks: &HashMap<String, SessionDirty>, now: Instant) -> Plan {
         let mut state = self.lock();
+        let HubState {
+            clients, watch_at, ..
+        } = &mut *state;
         let mut deliveries = Vec::new();
         let mut next: Option<Instant> = None;
-        for (client_id, client) in state.clients.iter_mut() {
+        let mut watching = false;
+        for (client_id, client) in clients.iter_mut() {
             if client.paused {
                 continue;
             }
+            watching |= client
+                .sessions
+                .values()
+                .any(|tracked| !tracked.watch.is_ours());
             for (session_id, dirty) in marks {
                 if let Some(tracked) = client.sessions.get_mut(session_id) {
                     tracked.mark(dirty, now);
@@ -382,23 +475,62 @@ impl SessionStreamHub {
                 }
                 room -= 1;
                 tracked.ready_at = None;
+                let refresh = tracked.watch.take_refresh();
                 deliveries.push(Delivery {
                     client_id: client_id.clone(),
                     session_id: session_id.clone(),
                     revision: tracked.revision,
                     level: tracked.level,
                     snapshot: tracked.needs_snapshot,
+                    refresh: refresh && !tracked.needs_snapshot,
+                    ours: tracked.watch.is_ours(),
                     window: client.summary_window,
                     rows: std::mem::take(&mut tracked.rows),
                     opening_prompt_id: tracked.opening_prompt_id,
                 });
             }
         }
-        (deliveries, next)
+        // The first read of the version comes a whole interval after the
+        // watch starts: the read that made a session watched took the value
+        // itself.
+        let check_version = match *watch_at {
+            _ if !watching => {
+                *watch_at = None;
+                false
+            }
+            Some(at) if at <= now => {
+                *watch_at = Some(now + FOREIGN_CHECK);
+                true
+            }
+            Some(at) => {
+                earliest(&mut next, at);
+                false
+            }
+            None => {
+                *watch_at = Some(now + FOREIGN_CHECK);
+                earliest(&mut next, now + FOREIGN_CHECK);
+                false
+            }
+        };
+        Plan {
+            deliveries,
+            check_version,
+            next,
+        }
     }
 
     /// Build the planned frames from what was read and send them.
-    fn deliver(&self, deliveries: Vec<Delivery>, loaded: &HashMap<String, Loaded>, now: Instant) {
+    ///
+    /// `version` is the database's `data_version` from before the reads,
+    /// when the round took it. Every session another process may have
+    /// written since its own last read is then put down for a re-read.
+    fn deliver(
+        &self,
+        deliveries: Vec<Delivery>,
+        loaded: &HashMap<String, Loaded>,
+        version: Option<i64>,
+        now: Instant,
+    ) {
         let mut outbox = Vec::new();
         {
             let mut state = self.lock();
@@ -420,23 +552,29 @@ impl SessionStreamHub {
                     tracked.ready_at.get_or_insert(now);
                     continue;
                 }
-                let Some(Loaded::Summary {
-                    summary,
-                    title_fields,
-                    summary_fields,
-                }) = loaded.get(&delivery.session_id)
-                else {
+                let Some(Loaded::Summary(read)) = loaded.get(&delivery.session_id) else {
                     // No row: a deleted session, or one not written yet.
                     // Nothing is sent and nothing is retried; if the row is
-                    // ever written, that write brings a snapshot. A read
-                    // that failed is tried again.
+                    // ever written, that write brings a snapshot, whichever
+                    // process makes it. A read that failed is tried again.
                     tracked.needs_snapshot = true;
                     tracked.ready_at = match loaded.get(&delivery.session_id) {
                         Some(Loaded::Failed) => Some(now + READ_RETRY),
                         _ => None,
                     };
+                    if let Some(Loaded::Gone) = loaded.get(&delivery.session_id) {
+                        tracked.watch.read(false, version);
+                    }
                     continue;
                 };
+                let LoadedSummary {
+                    summary,
+                    title_fields,
+                    summary_fields,
+                    row_prints,
+                    ours,
+                } = &**read;
+                tracked.watch.read(*ours, version);
                 let opening_prompt_id = summary.opening_prompt_id.or(tracked.opening_prompt_id);
                 tracked.opening_prompt_id = opening_prompt_id;
                 let title_only = delivery.level == SessionStreamLevel::Title;
@@ -445,27 +583,48 @@ impl SessionStreamHub {
                 } else {
                     *summary_fields
                 };
-                let rows: Vec<_> = if title_only {
+                // A read of the newest rows holds at least this client's
+                // window of them, and anything else it holds is older.
+                let window = delivery.window as usize;
+                let newest = summary.rows.len().saturating_sub(window);
+                let picked: Vec<usize> = if title_only {
                     Vec::new()
                 } else if delivery.snapshot {
-                    // The read holds at least this client's window of newest
-                    // rows, and anything else it holds is older.
-                    let skip = summary.rows.len().saturating_sub(delivery.window as usize);
-                    summary.rows[skip..].to_vec()
+                    (newest..summary.rows.len()).collect()
                 } else {
-                    summary
-                        .rows
-                        .iter()
-                        .filter(|row| delivery.rows.contains(&row.id))
-                        .cloned()
+                    // The rows this process marked, and after another
+                    // process's write the newest rows the client does not
+                    // hold as they are now.
+                    (0..summary.rows.len())
+                        .filter(|&index| {
+                            let id = summary.rows[index].id;
+                            delivery.rows.contains(&id)
+                                || (delivery.refresh
+                                    && index >= newest
+                                    && !tracked.watch.holds(id, row_prints[index]))
+                        })
                         .collect()
                 };
-                if !delivery.snapshot && rows.is_empty() && tracked.sent_fields == Some(fields) {
+                if !delivery.snapshot && picked.is_empty() && tracked.sent_fields == Some(fields) {
                     continue;
                 }
+                if !title_only {
+                    tracked.watch.sent(
+                        delivery.snapshot,
+                        picked
+                            .iter()
+                            .map(|&index| (summary.rows[index].id, row_prints[index])),
+                        window,
+                    );
+                }
+                let rows = picked
+                    .into_iter()
+                    .map(|index| summary.rows[index].clone())
+                    .collect();
                 let frame_summary = SessionSummary {
                     status: summary.status.clone(),
                     acp_title: summary.acp_title.clone(),
+                    owner_pid: summary.owner_pid,
                     working_dir: summary.working_dir.clone().filter(|_| !title_only),
                     pipeline: summary.pipeline.clone().filter(|_| !title_only),
                     opening_prompt_id: opening_prompt_id.filter(|_| !title_only),
@@ -493,6 +652,15 @@ impl SessionStreamHub {
                     },
                 ));
             }
+            if let Some(version) = version {
+                for client in state.clients.values_mut().filter(|client| !client.paused) {
+                    for tracked in client.sessions.values_mut() {
+                        if tracked.watch.missed(version) {
+                            tracked.written_elsewhere(now);
+                        }
+                    }
+                }
+            }
         }
         // Sent without the lock: a frame can be large, and an interest call
         // must not wait behind its serialization.
@@ -512,7 +680,7 @@ fn earliest(next: &mut Option<Instant>, at: Instant) {
     *next = Some(next.map_or(at, |current| current.min(at)));
 }
 
-fn fingerprint(fields: impl Hash) -> u64 {
+pub(super) fn fingerprint(fields: impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
     fields.hash(&mut hasher);
     hasher.finish()
@@ -525,7 +693,7 @@ impl Loaded {
             .pipeline
             .as_ref()
             .and_then(|pipeline| serde_json::to_string(pipeline).ok());
-        Self::Summary {
+        Self::Summary(Box::new(LoadedSummary {
             title_fields: fingerprint((status, &summary.acp_title)),
             summary_fields: fingerprint((
                 status,
@@ -533,8 +701,10 @@ impl Loaded {
                 &summary.working_dir,
                 &pipeline,
             )),
+            row_prints: summary.rows.iter().map(watch::row_print).collect(),
+            ours: watch::is_ours(&summary),
             summary,
-        }
+        }))
     }
 }
 
@@ -544,15 +714,15 @@ fn reads_for(deliveries: &[Delivery]) -> Vec<SummaryRead> {
     let mut reads: BTreeMap<&str, Option<SummaryRowsQuery>> = BTreeMap::new();
     for delivery in deliveries {
         let rows = reads.entry(delivery.session_id.as_str()).or_default();
-        if delivery.level != SessionStreamLevel::Summary
-            || (!delivery.snapshot && delivery.rows.is_empty())
-        {
+        let newest = delivery.snapshot || delivery.refresh;
+        if delivery.level != SessionStreamLevel::Summary || (!newest && delivery.rows.is_empty()) {
             continue;
         }
         let query = rows.get_or_insert_with(SummaryRowsQuery::default);
-        if delivery.snapshot {
+        if newest {
             query.newest = query.newest.max(delivery.window);
-        } else {
+        }
+        if !delivery.snapshot {
             query.ids.extend(&delivery.rows);
         }
         query.opening_prompt_id = query.opening_prompt_id.or(delivery.opening_prompt_id);
@@ -568,12 +738,29 @@ fn reads_for(deliveries: &[Delivery]) -> Vec<SummaryRead> {
 
 /// Read the sessions on the blocking pool, each under its own hold of the
 /// store's connection, so a writer waits for one session's read at most.
-async fn load(store: Option<Arc<Store>>, reads: Vec<SummaryRead>) -> HashMap<String, Loaded> {
+///
+/// With `version`, the database's `data_version` is taken first and
+/// returned. Taken before the reads, it can only be older than what they
+/// saw, so a commit that lands in between is caught by the next check and
+/// costs a repeated read, where the other order would lose it.
+async fn load(
+    store: Option<Arc<Store>>,
+    reads: Vec<SummaryRead>,
+    version: bool,
+) -> (Option<i64>, HashMap<String, Loaded>) {
     let Some(store) = store else {
-        return HashMap::new();
+        return (None, HashMap::new());
     };
     let loaded = tokio::task::spawn_blocking(move || {
-        reads
+        let version = version
+            .then(|| {
+                store
+                    .data_version()
+                    .map_err(|e| log::warn!("Session stream could not read the data version: {e}"))
+                    .ok()
+            })
+            .flatten();
+        let loaded = reads
             .into_iter()
             .map(|read| {
                 let loaded = match store.read_session_summary(&read.session_id, read.rows.as_ref())
@@ -590,12 +777,13 @@ async fn load(store: Option<Arc<Store>>, reads: Vec<SummaryRead>) -> HashMap<Str
                 };
                 (read.session_id, loaded)
             })
-            .collect()
+            .collect();
+        (version, loaded)
     })
     .await;
     loaded.unwrap_or_else(|e| {
         log::warn!("Session stream read did not finish: {e}");
-        HashMap::new()
+        (None, HashMap::new())
     })
 }
 
@@ -604,20 +792,32 @@ async fn load(store: Option<Arc<Store>>, reads: Vec<SummaryRead>) -> HashMap<Str
 /// `store` is asked for the store on every round, since a reset replaces it.
 ///
 /// With nothing owed the task is parked on its two wake-ups and no timer
-/// runs. With no unpaused client the feed is inactive, so session writes do
-/// not wake it either.
+/// runs, unless a client tracks a session another process may write: then
+/// one runs once a second, for the `data_version` read (`watch.rs`). With
+/// no unpaused client the feed is inactive, so session writes do not wake
+/// the task either.
 pub(super) async fn run(hub: Arc<SessionStreamHub>, store: impl Fn() -> Option<Arc<Store>>) {
+    /// Runs when the task ends however it ends, a panic included.
+    struct Stop<'a>(&'a SessionStreamHub);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.stop();
+        }
+    }
+    let _stop = Stop(&hub);
     loop {
         // Drained before the read, so the read holds every write these marks
         // stand for. A write that lands in between is in the read too and
         // marks again, which costs one repeated row.
         let marks = hub.feed.drain();
-        let (deliveries, next) = hub.plan(&marks, Instant::now());
-        if !deliveries.is_empty() {
-            let loaded = load(store(), reads_for(&deliveries)).await;
-            hub.deliver(deliveries, &loaded, Instant::now());
+        let plan = hub.plan(&marks, Instant::now());
+        if !plan.deliveries.is_empty() || plan.check_version {
+            let version = plan.wants_version();
+            let (version, loaded) = load(store(), reads_for(&plan.deliveries), version).await;
+            hub.deliver(plan.deliveries, &loaded, version, Instant::now());
             continue;
         }
+        let next = plan.next;
         let woken = async {
             tokio::select! {
                 _ = hub.feed.marked() => {}

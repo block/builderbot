@@ -57,6 +57,15 @@ pub enum SessionStreamFrameKind {
     /// The current version of what changed: the client replaces the session
     /// fields and upserts the rows by id. Applying one twice is harmless.
     Delta,
+    /// Another process has written the database and the hub cannot say
+    /// which of the session's rows changed: the client reads the session
+    /// again from its cursor. It carries nothing else.
+    ///
+    /// For the full level, where the rows a client holds are too many to
+    /// compare here. That level is not served yet, so nothing sends this
+    /// yet; the title and summary levels get a delta of what differs
+    /// instead.
+    Resync,
 }
 
 /// One session's update for one client.
@@ -70,7 +79,8 @@ pub struct SessionStreamFrame {
     pub seq: u64,
     pub session_id: String,
     pub kind: SessionStreamFrameKind,
-    /// At the title level only the status and title are set.
+    /// At the title level only the status and title are set. Left out of a
+    /// `Resync`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<SessionSummary>,
 }

@@ -548,6 +548,7 @@ function webSocketListen<T>(
 /** The name frames arrive under on the web socket (`session_stream/web.rs`). */
 const SESSION_STREAM_EVENT = 'session-stream';
 const SESSION_STREAM_INTEREST_COMMAND = 'set_session_stream_interest';
+const SESSION_STREAM_CHECK_COMMAND = 'check_session_stream';
 
 export interface SessionStreamHandlers {
   /** A frame, in the order the backend sent it. */
@@ -575,6 +576,14 @@ export interface SessionStreamLink {
    * at a time: wait for the last one to settle before the next.
    */
   setInterest(interest: SessionStreamInterest): Promise<void>;
+  /**
+   * Whether the last frame the backend sent this client in `generation` is
+   * number `lastSeq`. `false` also when the backend holds no stream for this
+   * client or another generation, and for a frame that is still on its way:
+   * the answer and the frames travel separately, so one can overtake the
+   * other.
+   */
+  check(generation: number, lastSeq: number): Promise<boolean>;
   close(): void;
 }
 
@@ -632,6 +641,10 @@ function openTauriSessionStream(handlers: SessionStreamHandlers): SessionStreamL
         throw e;
       }
     },
+    async check(generation, lastSeq) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return invoke<boolean>(SESSION_STREAM_CHECK_COMMAND, { generation, lastSeq });
+    },
     close() {
       closed = true;
       channel = null;
@@ -652,6 +665,14 @@ function openWebSessionStream(handlers: SessionStreamHandlers): SessionStreamLin
       await invokeCommand(SESSION_STREAM_INTEREST_COMMAND, {
         clientId: getPrPollClientId(),
         interest,
+      });
+    },
+    async check(generation, lastSeq) {
+      const { getPrPollClientId } = await import('./services/prPollingService');
+      return invokeCommand<boolean>(SESSION_STREAM_CHECK_COMMAND, {
+        clientId: getPrPollClientId(),
+        generation,
+        lastSeq,
       });
     },
     close: unlisten,

@@ -56,6 +56,7 @@ import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
 import { disconnectedSessionsStore } from '../stores/disconnectedSessions.svelte';
+import { signalRehydrate } from './rehydrateSignal';
 import type {
   ActiveSessionInfo,
   PrCreatedPayload,
@@ -365,6 +366,9 @@ export async function hydrateActiveSessions(): Promise<void> {
   // point the row exists and any snapshot fetched afterwards includes it.
   const fetchStartedAt = Date.now();
   lastHydrationStartedAt = fetchStartedAt;
+  // Whatever else is pushed to this page checks itself at the same moments
+  // (the session stream's health check).
+  signalRehydrate();
   const sweptWorkflows: SweptWorkflowSession[] = [];
   const untrackedPushes = new Map<string, UntrackedPush>();
   hydrationFetchesInFlight++;

@@ -268,3 +268,36 @@ fn a_session_with_no_transcript_has_no_opening_prompt() {
     assert_eq!(summary.opening_prompt_id, None);
     assert!(summary.rows.is_empty());
 }
+
+#[test]
+fn the_owner_is_read_and_never_serialized() {
+    let (store, session) = store_with_session();
+    let mut queued = Session::new_queued("later");
+    queued.owner_pid = None;
+    store.create_session(&queued).unwrap();
+
+    let running = store
+        .read_session_summary(&session.id, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(running.owner_pid, Some(std::process::id()));
+    let queued = store
+        .read_session_summary(&queued.id, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.owner_pid, None);
+
+    let json = serde_json::to_value(&running).unwrap();
+    let fields: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        fields
+            .iter()
+            .all(|field| !field.to_lowercase().contains("pid")),
+        "the owner went out on the wire: {fields:?}"
+    );
+}

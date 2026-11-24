@@ -45,6 +45,12 @@ pub struct SessionSummary {
     pub status: SessionStatus,
     /// `Session::acp_title`.
     pub acp_title: Option<String>,
+    /// `Session::owner_pid`: the Staged process running the session, while
+    /// its status is `running`. Never sent. The session stream reads it to
+    /// tell a session whose writes all pass through this process's store
+    /// from one another process may write.
+    #[serde(skip)]
+    pub owner_pid: Option<u32>,
     /// The session stream leaves this out at its title level.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
@@ -84,14 +90,24 @@ impl Store {
         // As in `poll_session`: the lock excludes this process's writers, and
         // the read transaction extends the snapshot to any other process.
         let tx = conn.transaction()?;
-        let fields: Option<(String, Option<String>, String, Option<String>)> = tx
+        type Fields = (String, Option<String>, String, Option<String>, Option<u32>);
+        let fields: Option<Fields> = tx
             .query_row(
-                "SELECT status, acp_title, working_dir, pipeline FROM sessions WHERE id = ?1",
+                "SELECT status, acp_title, working_dir, pipeline, owner_pid
+                 FROM sessions WHERE id = ?1",
                 params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((status, acp_title, working_dir, pipeline_json)) = fields else {
+        let Some((status, acp_title, working_dir, pipeline_json, owner_pid)) = fields else {
             return Ok(None);
         };
         let mut summary = SessionSummary {
@@ -99,6 +115,7 @@ impl Store {
             // and a pipeline that does not parse is no pipeline.
             status: SessionStatus::parse(&status).unwrap_or(SessionStatus::Error),
             acp_title,
+            owner_pid,
             working_dir: Some(working_dir),
             pipeline: pipeline_json.as_deref().and_then(|json| {
                 serde_json::from_str(json)

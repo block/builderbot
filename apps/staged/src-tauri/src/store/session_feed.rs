@@ -12,6 +12,10 @@
 //! equivalent of the change feed's "refetch everything" response, and a slow
 //! consumer here cannot trigger that response there.
 //!
+//! The feed sees this process's writes only. Another Staged process on the
+//! same database writes through its own store and marks nothing here;
+//! [`Store::data_version`] is how a consumer learns that one has committed.
+//!
 //! The feed starts inactive and stays so until a consumer has someone to
 //! deliver to. While it is inactive a mark costs one atomic load, and nothing
 //! is recorded.
@@ -175,6 +179,23 @@ impl Store {
         if let Some(feed) = &self.session_feed {
             feed.mark_queue(session_id);
         }
+    }
+}
+
+impl Store {
+    /// SQLite's `PRAGMA data_version` for the store's connection: a number
+    /// that stays the same across this connection's own writes and differs
+    /// once any other connection has committed to the database, an in-place
+    /// `UPDATE` included. The store holds the process's one read-write
+    /// connection, so a different value means another process wrote, though
+    /// not what it wrote.
+    ///
+    /// Only two values from one store compare: the number means nothing
+    /// across connections.
+    pub fn data_version(&self) -> Result<i64, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let version = conn.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+        Ok(version)
     }
 }
 

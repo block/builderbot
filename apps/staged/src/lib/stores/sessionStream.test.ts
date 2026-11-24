@@ -6,6 +6,8 @@ import {
 import { deriveHint, HINT_ROW_WINDOW } from '../features/timeline/sessionHint';
 import type { SessionStreamHandlers } from '../transport';
 import type {
+  SessionFull,
+  SessionPollRequest,
   SessionStatus,
   SessionStreamFrame,
   SessionStreamInterest,
@@ -182,6 +184,14 @@ function createHarness(
       // Root aliases resolve in a microtask.
       await vi.advanceTimersByTimeAsync(0);
     },
+    /** Deliver a full-level frame, or a resync, with the next sequence number. */
+    chatFrame(kind: 'snapshot' | 'delta' | 'resync', sessionId: string, full?: SessionFull) {
+      const interest = last();
+      if (state.seq > 0 && interest.generation !== state.generation) state.seq = 0;
+      state.generation = interest.generation;
+      state.seq += 1;
+      handlers?.onFrame({ generation: interest.generation, seq: state.seq, sessionId, kind, full });
+    },
     raw: (frame: SessionStreamFrame) => handlers?.onFrame(frame),
   } as {
     owner: SessionStreamOwner;
@@ -197,6 +207,11 @@ function createHarness(
     triggerHealthCheck: () => Promise<void>;
     setHidden: (hidden: boolean) => void;
     frame: (kind: 'snapshot' | 'delta', sessionId: string, given: SessionSummary) => Promise<void>;
+    chatFrame: (
+      kind: 'snapshot' | 'delta' | 'resync',
+      sessionId: string,
+      full?: SessionFull
+    ) => void;
     raw: (frame: SessionStreamFrame) => void;
   };
 }
@@ -327,7 +342,7 @@ describe('SessionStreamOwner', () => {
       expect(h.last().sessions).toEqual([{ sessionId: 's1', level: 'summary' }]);
     });
 
-    it('only ever asks for the title and summary levels', async () => {
+    it('asks for the title and summary levels only, for sessions shown as rows', async () => {
       await h.open();
       h.owner.consume().sync({ summary: ['s1', 's2'], title: ['s3'] });
       await h.settle();
@@ -337,6 +352,7 @@ describe('SessionStreamOwner', () => {
       for (const interest of h.interests) {
         for (const session of interest.sessions) {
           expect(['title', 'summary']).toContain(session.level);
+          expect(session.cursor).toBeUndefined();
         }
       }
     });
@@ -628,24 +644,316 @@ describe('SessionStreamOwner', () => {
     });
   });
 
-  describe('a resync frame', () => {
-    it('is counted in the sequence and changes nothing', async () => {
+  describe('chats', () => {
+    function cursor(sinceId: number, rest: Partial<SessionPollRequest> = {}): SessionPollRequest {
+      return { sinceId, refetchIds: [], metadataSinceId: 0, metadataRefetchIds: [], ...rest };
+    }
+
+    /** A pane showing `sessionId` as a chat, holding rows up to `held.sinceId`. */
+    function openPane(sessionId: string, held: { sinceId: number } = { sinceId: 0 }) {
+      const frames: [string, SessionFull][] = [];
+      const asked: number[] = [];
+      const chat = h.owner.openChat(sessionId, {
+        cursor: () => {
+          asked.push(held.sinceId);
+          return cursor(held.sinceId);
+        },
+        onFrame: (kind, full) => frames.push([kind, full]),
+      });
+      return { chat, frames, asked, held };
+    }
+
+    const full = (rest: Partial<SessionFull> = {}): SessionFull => ({
+      messages: [],
+      acpMetadataMessages: [],
+      ...rest,
+    });
+
+    const chatOf = (interest: SessionStreamInterest, sessionId: string) =>
+      interest.sessions.find((s) => s.sessionId === sessionId && s.level === 'full');
+
+    it('declares an open chat at the full level, with what the pane holds as its cursor', async () => {
+      await h.open();
+      openPane('s1', { sinceId: 41 });
+      await h.settle();
+
+      expect(h.last().sessions).toEqual([{ sessionId: 's1', level: 'full', cursor: cursor(41) }]);
+    });
+
+    it('reads the cursor when the interest is sent, not when the chat is opened', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      // The pane merges something before the burst's call goes out.
+      pane.held.sinceId = 44;
+      await h.settle();
+
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(44));
+    });
+
+    it('serves a session that is a row and an open chat at both levels', async () => {
+      await h.open();
+      await show(['s1']);
+      const pane = openPane('s1', { sinceId: 3 });
+      await h.settle();
+
+      expect(h.last().sessions).toEqual([
+        { sessionId: 's1', level: 'full', cursor: cursor(3) },
+        { sessionId: 's1', level: 'summary' },
+      ]);
+
+      // One level per frame: each goes where it belongs and nowhere else.
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Reading')]));
+      expect(pane.frames).toEqual([]);
+      const delta = full({ messages: [{ id: 4 } as SessionFull['messages'][number]] });
+      h.chatFrame('delta', 's1', delta);
+      expect(pane.frames).toEqual([['delta', delta]]);
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Reading');
+      expect(h.owner.status('s1')).toBe('running');
+    });
+
+    it('leaves the cursor out once it has been given, so the deltas carry on', async () => {
+      await h.open();
+      openPane('s1', { sinceId: 41 });
+      await h.settle();
+      const calls = h.interests.length;
+
+      // Something else changes the interest.
+      await show(['s2']);
+      expect(h.interests).toHaveLength(calls + 1);
+      expect(chatOf(h.last(), 's1')).toEqual({ sessionId: 's1', level: 'full' });
+    });
+
+    it('sends nothing more while nothing changes', async () => {
+      await h.open();
+      const pane = openPane('s1');
+      await h.settle();
+      const calls = h.interests.length;
+
+      h.chatFrame('snapshot', 's1', full());
+      h.chatFrame('delta', 's1', full());
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.interests).toHaveLength(calls);
+      expect(pane.frames).toHaveLength(2);
+    });
+
+    it('hands every frame of a session to both panes showing it', async () => {
+      await h.open();
+      const first = openPane('s1', { sinceId: 90 });
+      await h.settle();
+      const second = openPane('s1', { sinceId: 40 });
+      await h.settle();
+
+      const snapshot = full();
+      h.chatFrame('snapshot', 's1', snapshot);
+      expect(first.frames).toEqual([['snapshot', snapshot]]);
+      expect(second.frames).toEqual([['snapshot', snapshot]]);
+    });
+
+    it('asks for a snapshot both panes can use when a second one joins', async () => {
+      await h.open();
+      openPane('s1', { sinceId: 90 });
+      await h.settle();
+      const calls = h.interests.length;
+
+      openPane('s1', { sinceId: 40 });
+      await h.settle();
+
+      // One session, declared once, read from the earlier of the two cursors.
+      expect(h.interests).toHaveLength(calls + 1);
+      expect(h.last().sessions).toEqual([{ sessionId: 's1', level: 'full', cursor: cursor(40) }]);
+    });
+
+    it('keeps the session while either pane shows it, and drops it with the last', async () => {
+      await h.open();
+      const first = openPane('s1');
+      const second = openPane('s1');
+      await h.settle();
+
+      first.chat.release();
+      await h.settle();
+      expect(chatOf(h.last(), 's1')).toBeDefined();
+      h.chatFrame('delta', 's1', full());
+      expect(first.frames).toEqual([]);
+      expect(second.frames).toHaveLength(1);
+
+      second.chat.release();
+      await h.settle();
+      expect(h.last().sessions).toEqual([]);
+      // A chat does not linger.
+      await vi.advanceTimersByTimeAsync(LINGER_MS);
+      expect(h.last().sessions).toEqual([]);
+    });
+
+    it('ignores a full frame for a chat nobody holds any more', async () => {
+      await h.open();
+      const pane = openPane('s1');
+      await h.settle();
+      pane.chat.release();
+
+      h.chatFrame('delta', 's1', full());
+      expect(pane.frames).toEqual([]);
+      // Counted all the same: the next frame is not a gap.
+      const generation = h.last().generation;
+      await h.settle();
+      expect(h.last().generation).toBe(generation);
+    });
+
+    it('answers a resync frame with the cursor of what the pane holds now', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      await h.settle();
+      const calls = h.interests.length;
+      const generation = h.last().generation;
+
+      pane.held.sinceId = 57;
+      h.chatFrame('resync', 's1');
+      await h.settle();
+
+      expect(h.interests).toHaveLength(calls + 1);
+      // The same generation: only this session is read again.
+      expect(h.last().generation).toBe(generation);
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(57));
+      expect(pane.frames).toEqual([]);
+
+      // The frame after it is the next in sequence, not a gap.
+      h.chatFrame('snapshot', 's1', full());
+      expect(pane.frames).toHaveLength(1);
+      await h.settle();
+      expect(h.last().generation).toBe(generation);
+    });
+
+    it('counts a resync frame for a session that is only a row and changes nothing', async () => {
       await h.open();
       await show(['s1']);
       await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Reading')]));
       const calls = h.interests.length;
 
-      // Sent to full subscribers only, which this owner never is.
-      h.raw({ generation: h.last().generation, seq: 2, sessionId: 's1', kind: 'resync' });
-      h.state.seq = 2;
+      // Sent to full subscribers only; one for a chat just let go of can
+      // still arrive.
+      h.chatFrame('resync', 's1');
       await h.settle();
       expect(h.owner.hint('s1', ['/repo'])).toBe('Reading');
       expect(h.owner.status('s1')).toBe('running');
 
-      // The next frame is the one after it, not a gap.
       await h.frame('delta', 's1', summary([assistant(3, 'Writing')]));
       expect(h.owner.hint('s1', ['/repo'])).toBe('Writing');
       expect(h.interests).toHaveLength(calls);
+    });
+
+    it('gives the cursor again when a pane asks to be read again', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      await h.settle();
+      const calls = h.interests.length;
+
+      pane.held.sinceId = 45;
+      pane.chat.resync();
+      pane.chat.resync();
+      await h.settle();
+
+      expect(h.interests).toHaveLength(calls + 1);
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(45));
+    });
+
+    it('gives fresh cursors when it starts over for a lost frame', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      await h.settle();
+      h.chatFrame('snapshot', 's1', full());
+      const generation = h.last().generation;
+
+      pane.held.sinceId = 60;
+      // Sequence 3 where 2 was due.
+      h.raw({ generation, seq: 3, sessionId: 's1', kind: 'delta', full: full() });
+      await vi.advanceTimersByTimeAsync(GAP_RESTART_SPACING_MS);
+      await h.settle();
+
+      expect(h.last().generation).toBeGreaterThan(generation);
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(60));
+      // The frame that showed the gap went with its generation.
+      expect(pane.frames).toHaveLength(1);
+    });
+
+    it('gives fresh cursors when the stream reopens', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      await h.settle();
+
+      h.close();
+      pane.held.sinceId = 50;
+      h.reopen();
+      await h.settle();
+
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(50));
+    });
+
+    it('gives no cursor to a paused backend, and a fresh one when the window is shown', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      await h.settle();
+
+      h.setHidden(true);
+      await h.settle();
+      expect(h.last().paused).toBe(true);
+      expect(chatOf(h.last(), 's1')).toEqual({ sessionId: 's1', level: 'full' });
+      const calls = h.interests.length;
+
+      // Asked for while hidden: nothing would be read, so nothing is sent.
+      pane.chat.resync();
+      await h.settle();
+      expect(h.interests).toHaveLength(calls);
+
+      pane.held.sinceId = 70;
+      h.setHidden(false);
+      await h.settle();
+      expect(h.last().paused).toBe(false);
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(70));
+    });
+
+    it('gives a fresh cursor when the window is shown, with nothing asked while it was hidden', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      await h.settle();
+      h.setHidden(true);
+      await h.settle();
+
+      // The backend reads the chat again from the last cursor it was given,
+      // which is from before the pause. What the pane holds now is newer.
+      pane.held.sinceId = 70;
+      h.setHidden(false);
+      await h.settle();
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(70));
+    });
+
+    it('gives the cursor again after an interest call that failed', async () => {
+      await h.open();
+      const pane = openPane('s1', { sinceId: 41 });
+      h.state.failing = true;
+      await h.settle();
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(41));
+
+      h.state.failing = false;
+      pane.held.sinceId = 43;
+      await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
+      await h.settle();
+      expect(chatOf(h.last(), 's1')?.cursor).toEqual(cursor(43));
+    });
+
+    it('lets a pane release its chat while a frame is being handed out', async () => {
+      await h.open();
+      const second: [string, SessionFull][] = [];
+      const first = h.owner.openChat('s1', {
+        cursor: () => cursor(0),
+        onFrame: () => first.release(),
+      });
+      h.owner.openChat('s1', {
+        cursor: () => cursor(0),
+        onFrame: (kind, given) => second.push([kind, given]),
+      });
+      await h.settle();
+
+      h.chatFrame('delta', 's1', full());
+      expect(second).toHaveLength(1);
     });
   });
 

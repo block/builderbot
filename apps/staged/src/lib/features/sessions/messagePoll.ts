@@ -6,6 +6,12 @@
  * tool call (e.g. one forwarded from a background subagent) inserts tool rows
  * after the assistant row the writer is still extending, so that row falls
  * behind the cursor. The pane asks for it by id alongside the tail.
+ *
+ * The session stream sends the same rows when they are written instead of
+ * when they are asked for (`sessionStream.svelte.ts`). The cursors here are
+ * then what the pane gives the stream to be read from
+ * (`unionSessionPollRequests` when two panes show one session), and a frame's
+ * rows are merged by `mergeFrameMessages`.
  */
 
 import type { SessionMessage, SessionPollRequest } from '../../types';
@@ -32,6 +38,25 @@ export function sessionPollRequest(
     metadataRefetchIds: acpMetadataMessages
       .filter((message) => message.acpToolCallId && !isToolMetadataSettled(message))
       .map((message) => message.id),
+  };
+}
+
+/**
+ * One cursor for several panes on one session: it reads everything any of
+ * them would be sent for its own. The stream reads a session once for a
+ * window, and every pane showing it there takes the same frames; rows a pane
+ * already holds merge as no-ops.
+ */
+export function unionSessionPollRequests(
+  requests: readonly SessionPollRequest[]
+): SessionPollRequest {
+  const ids = (pick: (request: SessionPollRequest) => number[]) =>
+    [...new Set(requests.flatMap(pick))].sort((a, b) => a - b);
+  return {
+    sinceId: Math.min(...requests.map((request) => request.sinceId)),
+    refetchIds: ids((request) => request.refetchIds),
+    metadataSinceId: Math.min(...requests.map((request) => request.metadataSinceId)),
+    metadataRefetchIds: ids((request) => request.metadataRefetchIds),
   };
 }
 
@@ -119,6 +144,61 @@ export function mergeSinceMessages(
   }
 
   return next ? { messages: next, appended } : null;
+}
+
+/**
+ * Merge the rows of a stream frame into the cached transcript, or return
+ * `null` when nothing changed.
+ *
+ * A frame is not a since-fetch. Its rows are the ones that were written,
+ * wherever they sit, and it does not repeat the tail it follows, so nothing
+ * can be spliced: each row replaces its cached copy by id (only when it
+ * differs, with the same identity rules as `mergeSinceMessages`), and a row
+ * the cache does not hold is added in id order. A snapshot is merged the same
+ * way; it is read from a cursor, so it does repeat the tail, as a row that
+ * replaces itself.
+ *
+ * Rows older than the first cached row belong to a page that is not loaded
+ * (see `transcriptWindow.ts`) and are dropped: `loadOlderMessages` reads them
+ * when the user gets there. That is also what keeps a snapshot read from
+ * another pane's cursor from growing this pane's window backwards.
+ *
+ * Unlike a since-fetch, a frame says nothing about rows it does not carry, so
+ * nothing is ever removed here.
+ */
+export function mergeFrameMessages(
+  existing: readonly SessionMessage[],
+  updated: readonly SessionMessage[]
+): MergedSinceMessages | null {
+  const firstId = existing[0]?.id;
+  const lastId = existing[existing.length - 1]?.id;
+  let next: SessionMessage[] | null = null;
+  const added = new Map<number, SessionMessage>();
+  for (const update of updated) {
+    const index = findIndexFromEnd(existing, update.id);
+    if (index < 0) {
+      if (firstId === undefined || update.id > firstId) added.set(update.id, update);
+      continue;
+    }
+    const message = retainInlineToolBodies(existing[index], update);
+    if (isSameMessage(existing[index], message)) continue;
+    next ??= [...existing];
+    next[index] = message;
+  }
+  if (added.size === 0) return next ? { messages: next, appended: false } : null;
+
+  const rows = [...added.values()].sort((a, b) => a.id - b.id);
+  const base = next ?? existing;
+  const newestAdded = rows[rows.length - 1].id;
+  if (lastId === undefined || rows[0].id > lastId) {
+    return { messages: [...base, ...rows], appended: true };
+  }
+  // A row inside the cached span that the cache does not hold: it joins in
+  // id order.
+  return {
+    messages: [...base, ...rows].sort((a, b) => a.id - b.id),
+    appended: newestAdded > lastId,
+  };
 }
 
 /** Whether the tail re-fetch returned only identical copies of rows already

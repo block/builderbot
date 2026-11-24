@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mergeFrameMessages,
   mergeSinceMessages,
   openAssistantRefetchIds,
   pollShouldStop,
   sessionPollRequest,
+  unionSessionPollRequests,
 } from './messagePoll';
 import type { MessageRole, SessionMessage } from '../../types';
 
@@ -291,6 +293,256 @@ describe('mergeSinceMessages from an empty transcript', () => {
 
   it('reports no change while the transcript is still empty', () => {
     expect(mergeSinceMessages([], [], 0)).toBeNull();
+  });
+});
+
+/**
+ * The cases above, as the session stream delivers them. A snapshot is read
+ * from the pane's cursor, so it holds the rows the since-fetch returned; a
+ * delta holds only the rows that were written. Either way the pane has to
+ * end up with the transcript the poll would have given it.
+ */
+describe('mergeFrameMessages', () => {
+  const settledWrite = (() => {
+    const input = { file_path: '/tmp/a.txt', content: 'x'.repeat(3000) };
+    const inFlight: SessionMessage = {
+      ...message(3, 'tool_call', 'Write'),
+      acpEventKind: 'tool_call',
+      acpToolCallId: 'tc-3',
+      acpToolStatus: 'in_progress',
+      acpRawInput: input,
+    };
+    const settled: SessionMessage = {
+      ...inFlight,
+      acpToolStatus: 'completed',
+      acpRawInput: {
+        $deferred: { messageId: 3, field: 'input', bytes: JSON.stringify(input).length },
+      },
+      acpContent: [{ type: 'content', content: { type: 'text', text: 'ok' } }],
+    };
+    return { input, inFlight, settled };
+  })();
+
+  interface Case {
+    name: string;
+    existing: SessionMessage[];
+    /** What a since-fetch from `lastId` returns, which is also a snapshot's rows. */
+    fetched: SessionMessage[];
+    lastId: number;
+    /** The rows that were written since `existing` was read: a delta's rows. */
+    written: SessionMessage[];
+  }
+
+  const cases: Case[] = [
+    {
+      name: 'an open assistant row behind the tail is extended',
+      existing: [
+        message(1, 'user', 'hi'),
+        message(2, 'assistant', 'The'),
+        message(3, 'tool_call', 'Read'),
+        message(4, 'tool_result', 'ok'),
+      ],
+      fetched: [message(2, 'assistant', 'The search is back'), message(4, 'tool_result', 'ok')],
+      lastId: 4,
+      written: [message(2, 'assistant', 'The search is back')],
+    },
+    {
+      name: 'nothing was written',
+      existing: [
+        message(2, 'assistant', 'The'),
+        message(3, 'tool_call', 'Read'),
+        message(4, 'tool_result', 'ok'),
+      ],
+      fetched: [message(2, 'assistant', 'The'), message(4, 'tool_result', 'ok')],
+      lastId: 4,
+      written: [],
+    },
+    {
+      name: 'the tail streams',
+      existing: [message(1, 'user', 'hi'), message(2, 'assistant', 'The')],
+      fetched: [message(2, 'assistant', 'The end')],
+      lastId: 2,
+      written: [message(2, 'assistant', 'The end')],
+    },
+    {
+      name: 'rows arrive past the tail while an earlier one is extended',
+      existing: [message(2, 'assistant', 'The'), message(3, 'tool_call', 'Read')],
+      fetched: [
+        message(2, 'assistant', 'The search'),
+        message(3, 'tool_call', 'Read'),
+        message(4, 'tool_result', 'ok'),
+      ],
+      lastId: 3,
+      written: [message(2, 'assistant', 'The search'), message(4, 'tool_result', 'ok')],
+    },
+    {
+      name: 'a read from a cursor the pane has since moved past',
+      existing: [
+        message(4, 'user', 'hi'),
+        message(5, 'assistant', 'The'),
+        message(6, 'tool_call', 'Read'),
+        message(7, 'tool_result', 'ok'),
+      ],
+      fetched: [
+        message(5, 'assistant', 'The'),
+        message(6, 'tool_call', 'Read'),
+        message(7, 'tool_result', 'ok'),
+        message(8, 'assistant', 'Done'),
+      ],
+      lastId: 5,
+      written: [message(8, 'assistant', 'Done')],
+    },
+    {
+      name: 'a read that ends before the rows the pane holds',
+      existing: [
+        message(4, 'user', 'hi'),
+        message(5, 'assistant', 'The'),
+        message(6, 'tool_call', 'Read'),
+        message(7, 'tool_result', 'ok'),
+      ],
+      fetched: [message(5, 'assistant', 'The search'), message(6, 'tool_call', 'Read')],
+      lastId: 5,
+      written: [message(5, 'assistant', 'The search')],
+    },
+    {
+      name: 'only a row’s metadata changed',
+      existing: [message(2, 'assistant', 'The'), message(3, 'tool_call', 'Read')],
+      fetched: [
+        { ...message(2, 'assistant', 'The'), acpMessageId: 'msg-1' },
+        message(3, 'tool_call', 'Read'),
+      ],
+      lastId: 3,
+      written: [{ ...message(2, 'assistant', 'The'), acpMessageId: 'msg-1' }],
+    },
+    {
+      name: 'a tool row settles with its body deferred and a row follows',
+      existing: [message(2, 'assistant', 'The'), settledWrite.inFlight],
+      fetched: [settledWrite.settled, message(4, 'assistant', 'Done')],
+      lastId: 3,
+      written: [settledWrite.settled, message(4, 'assistant', 'Done')],
+    },
+    {
+      name: 'an empty transcript fills',
+      existing: [],
+      fetched: [message(1, 'user', 'hi'), message(2, 'assistant', 'hello')],
+      lastId: 0,
+      written: [message(1, 'user', 'hi'), message(2, 'assistant', 'hello')],
+    },
+  ];
+
+  for (const frame of ['snapshot', 'delta'] as const) {
+    it.each(cases)(`gives what the poll gives as a ${frame}: $name`, (c) => {
+      const viaPoll = mergeSinceMessages(c.existing, c.fetched, c.lastId);
+      const viaFrame = mergeFrameMessages(c.existing, frame === 'snapshot' ? c.fetched : c.written);
+
+      expect(viaFrame === null).toBe(viaPoll === null);
+      if (!viaPoll || !viaFrame) return;
+      expect(viaFrame.messages).toEqual(viaPoll.messages);
+      expect(viaFrame.appended).toBe(viaPoll.appended);
+      // A row the update did not change keeps its identity, so its group
+      // does not re-render.
+      const changed = new Set(c.written.map((m) => m.id));
+      for (const row of c.existing) {
+        if (changed.has(row.id)) continue;
+        expect(viaFrame.messages.find((m) => m.id === row.id)).toBe(row);
+      }
+    });
+  }
+
+  it('keeps the inline body of a tool row that settles', () => {
+    const { input, inFlight, settled } = settledWrite;
+    const merged = mergeFrameMessages([message(2, 'assistant', 'The'), inFlight], [settled]);
+
+    expect(merged!.appended).toBe(false);
+    expect(merged!.messages[1].acpToolStatus).toBe('completed');
+    expect(merged!.messages[1].acpRawInput).toBe(input);
+  });
+
+  it('adds a row past the tail without touching the tail it follows', () => {
+    // A since-fetch repeats the row at its cursor and splices from there. A
+    // delta does not carry that row, and must not cost the pane it.
+    const existing = [message(1, 'user', 'hi'), message(2, 'assistant', 'The')];
+    const merged = mergeFrameMessages(existing, [message(3, 'tool_call', 'Read')]);
+
+    expect(merged!.appended).toBe(true);
+    expect(merged!.messages.map((m) => m.id)).toEqual([1, 2, 3]);
+    expect(merged!.messages[1]).toBe(existing[1]);
+  });
+
+  it('applies the same delta twice with no change the second time', () => {
+    const existing = [message(1, 'user', 'hi'), message(2, 'assistant', 'The')];
+    const delta = [message(2, 'assistant', 'The end'), message(3, 'tool_call', 'Read')];
+    const once = mergeFrameMessages(existing, delta);
+
+    expect(mergeFrameMessages(once!.messages, delta)).toBeNull();
+  });
+
+  it('drops rows older than the window the pane holds', () => {
+    // The pane holds rows 5 to 7 of a longer transcript. A snapshot read
+    // from another pane's cursor, or a rewrite of an old row, reaches back
+    // past them.
+    const existing = [
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    const merged = mergeFrameMessages(existing, [
+      message(2, 'assistant', 'Earlier'),
+      message(4, 'tool_result', 'old'),
+      message(7, 'tool_result', 'ok'),
+      message(8, 'assistant', 'Done'),
+    ]);
+
+    expect(merged!.messages.map((m) => m.id)).toEqual([5, 6, 7, 8]);
+    expect(mergeFrameMessages(existing, [message(2, 'assistant', 'Earlier')])).toBeNull();
+  });
+
+  it('puts a row the pane does not hold in id order', () => {
+    const existing = [message(4, 'user', 'hi'), message(7, 'tool_result', 'ok')];
+    const merged = mergeFrameMessages(existing, [message(6, 'tool_call', 'Read')]);
+
+    expect(merged!.appended).toBe(false);
+    expect(merged!.messages.map((m) => m.id)).toEqual([4, 6, 7]);
+  });
+
+  it('removes nothing: a frame says nothing about the rows it does not carry', () => {
+    // The since-fetch drops a cached row its tail skips (see above). A
+    // snapshot of the same rows leaves it.
+    const existing = [
+      message(4, 'user', 'hi'),
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    const merged = mergeFrameMessages(existing, [
+      message(5, 'assistant', 'The end'),
+      message(7, 'tool_result', 'ok'),
+    ]);
+
+    expect(merged!.messages.map((m) => m.id)).toEqual([4, 5, 6, 7]);
+  });
+});
+
+describe('unionSessionPollRequests', () => {
+  it('is the cursor itself for one pane', () => {
+    const request = { sinceId: 7, refetchIds: [4], metadataSinceId: 9, metadataRefetchIds: [8] };
+    expect(unionSessionPollRequests([request])).toEqual(request);
+  });
+
+  it('reads from the earliest cursor and every row either pane re-reads', () => {
+    const behind = { sinceId: 40, refetchIds: [38], metadataSinceId: 35, metadataRefetchIds: [33] };
+    const ahead = {
+      sinceId: 90,
+      refetchIds: [88, 38],
+      metadataSinceId: 91,
+      metadataRefetchIds: [89],
+    };
+    expect(unionSessionPollRequests([ahead, behind])).toEqual({
+      sinceId: 40,
+      refetchIds: [38, 88],
+      metadataSinceId: 35,
+      metadataRefetchIds: [33, 89],
+    });
   });
 });
 

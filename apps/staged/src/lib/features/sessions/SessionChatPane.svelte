@@ -55,6 +55,7 @@
     AcpConfigValueSelection,
     Session,
     SessionBackgroundHoldPayload,
+    SessionFull,
     SessionMessage,
     SessionReconcileEvent,
     SessionStatus,
@@ -137,7 +138,15 @@
     statusEventSupersededLoad,
     type SessionBackgroundHold,
   } from './backgroundHold';
-  import { mergeSinceMessages, pollShouldStop, sessionPollRequest } from './messagePoll';
+  import {
+    mergeFrameMessages,
+    mergeSinceMessages,
+    pollShouldStop,
+    sessionPollRequest,
+    type MergedSinceMessages,
+  } from './messagePoll';
+  import { STATUS_HOLD_MS, StatusHold } from './statusHold';
+  import { sessionStream, type SessionChat } from '../../stores/sessionStream.svelte';
   import { retainInlineToolBodies } from './toolCallBodies';
   import {
     applyLatestWindow,
@@ -411,6 +420,22 @@
   let unlistenBackgroundHold: UnlistenFn | null = null;
   let statusEventVersion = 0;
   let closed = false;
+  /**
+   * The pane shows a loaded session and wants what is written to it, from
+   * the session stream when that is established and from the poll otherwise
+   * (`syncUpdateSource`). False while it is closed, parked or loading.
+   */
+  let following = false;
+  /**
+   * This pane's hold on the session at the stream's full level, while the
+   * stream is what feeds it. Open and the poll are exclusive: a tick never
+   * starts while the chat is open, and the chat is not opened while a tick
+   * is in flight, so a fetch and a frame never race for the same row.
+   */
+  let chat: SessionChat | null = null;
+  /** Which status wins between a status event and a frame; see `statusHold.ts`. */
+  const statusHold = new StatusHold();
+  let statusHoldTimer: ReturnType<typeof setTimeout> | null = null;
   /** Latest background hold reported for this session; null when not holding. */
   let backgroundHold = $state<SessionBackgroundHold | null>(null);
   /**
@@ -1174,6 +1199,7 @@
     // is gone; cancel it here rather than rely on the pool parking first.
     deferredRestore.take();
     stopPolling();
+    stopWatchingStream();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
     if (checkNowTimer) clearTimeout(checkNowTimer);
@@ -1221,11 +1247,13 @@
       // that frame and forced a style pass of its own over the new dialog.
       requestAnimationFrame(() => focusComposerWhileOpen(id));
     }
-    loadSession(mode).then(() => {
+    // Untracked: the revalidate reads the transcript it is about to extend
+    // (its cursor, its row count) before its first await. Tracked, every row
+    // that arrived afterwards re-ran this effect, which dropped the session's
+    // updates and fetched the delta again, for as long as the turn wrote.
+    untrack(() => loadSession(mode)).then(() => {
       if (closed || !active || sessionId !== id) return;
-      if (session?.status === 'running') {
-        startPolling();
-      }
+      followSession();
       // Focus input on open
       if (mode === 'full') tick().then(() => focusComposerWhileOpen(id));
     });
@@ -1341,6 +1369,9 @@
           completionReason: payload.completionReason ?? session.completionReason,
           updatedAt: Date.now(),
         };
+        // A frame read before this status was written may still be on its
+        // way, and must not put the older one back.
+        if (chat) holdEventStatus(payload.status);
         // Applying the payload makes the status current even mid-load, so a
         // hold reported after it is judged against this rather than treated as
         // unknown. (A payload for a session that isn't loaded is dropped, as
@@ -1397,6 +1428,13 @@
   /** Re-fetch session `id`, which reconcile may have moved on or backfilled. */
   function refetchReconciled(id: string) {
     if (closed || sessionId !== id) return;
+    if (chat) {
+      // The same read, asked of the stream so that it lands in order with
+      // the frames: a snapshot from this pane's cursor is what the poll
+      // returns for it.
+      chat.resync();
+      return;
+    }
     void poll().then(() => {
       // A live reattach took the session back to running.
       if (!closed && sessionId === id && session?.status === 'running') startPolling();
@@ -1589,6 +1627,10 @@
             messages = next.messages;
             hasOlderMessages = next.hasMore;
             scrollToBottomIfNear(true);
+            // This copy of the window was read on its own, perhaps before
+            // rows a frame has brought since, and a delta is not repeated.
+            // The poll's next tick re-reads the tail; ask the stream to.
+            chat?.resync();
           })
           .catch(() => {});
       }
@@ -1641,42 +1683,51 @@
       if (next === 'full') return next;
       if (session) statusLoadedForSessionId = session.id;
       if (backgroundHold) applyBackgroundHold(id, backgroundHold);
-      const bounded = trimLatestWindow(
-        { messages, hasMore: hasOlderMessages },
-        TRANSCRIPT_PAGE_ROWS,
-        rowsBeforeDelta
-      );
-      if (bounded.messages !== messages) {
-        // `unpark` already restored the scroll position against the untrimmed
-        // rows, and WebKit has no scroll anchoring: dropping rows above the
-        // viewport would shift it onto other rows and hand `handleScroll` a
-        // spurious upward scroll. Hold the first visible group in place; when
-        // the trim removed it follow the transcript to the bottom rather than
-        // land at the top and page the trimmed rows back. In practice the
-        // bottom is the path taken: `trimLatestWindow` only trims when the
-        // delta alone exceeded a page and then keeps only the last page, so
-        // every pre-delta row — including whichever group `unpark` put in
-        // view — is gone. The hold branch is kept as the safety net for a
-        // trim rule that ever retains pre-delta rows, not as the common case.
-        const el = messagesEl;
-        const anchor = el && userScrolledUp ? captureScrollAnchor(el) : null;
-        messages = bounded.messages;
-        hasOlderMessages = bounded.hasMore;
-        await tick();
-        if (el) {
-          if (!anchor || !restoreScrollAnchor(el, anchor)) {
-            el.scrollTop = el.scrollHeight;
-            userScrolledUp = false;
-          }
-          noteScrollPosition(el);
-        }
-      }
+      await boundWindowAfterDelta(rowsBeforeDelta);
       // Otherwise `unpark` restored the scroll position and `poll` follows the
       // bottom when its merge appends, so nothing here forces layout on the open.
       return next;
     } finally {
       await tick();
       resumeIntros();
+    }
+  }
+
+  /**
+   * Bound the window after a catch-up delta (a reopen's, or a stream
+   * snapshot) that may have grown it past a page: see `trimLatestWindow`.
+   * `rowsBeforeDelta` is how many rows the pane held before it.
+   */
+  async function boundWindowAfterDelta(rowsBeforeDelta: number) {
+    const bounded = trimLatestWindow(
+      { messages, hasMore: hasOlderMessages },
+      TRANSCRIPT_PAGE_ROWS,
+      rowsBeforeDelta
+    );
+    if (bounded.messages !== messages) {
+      // `unpark` already restored the scroll position against the untrimmed
+      // rows, and WebKit has no scroll anchoring: dropping rows above the
+      // viewport would shift it onto other rows and hand `handleScroll` a
+      // spurious upward scroll. Hold the first visible group in place; when
+      // the trim removed it follow the transcript to the bottom rather than
+      // land at the top and page the trimmed rows back. In practice the
+      // bottom is the path taken: `trimLatestWindow` only trims when the
+      // delta alone exceeded a page and then keeps only the last page, so
+      // every pre-delta row — including whichever group `unpark` put in
+      // view — is gone. The hold branch is kept as the safety net for a
+      // trim rule that ever retains pre-delta rows, not as the common case.
+      const el = messagesEl;
+      const anchor = el && userScrolledUp ? captureScrollAnchor(el) : null;
+      messages = bounded.messages;
+      hasOlderMessages = bounded.hasMore;
+      await tick();
+      if (el) {
+        if (!anchor || !restoreScrollAnchor(el, anchor)) {
+          el.scrollTop = el.scrollHeight;
+          userScrolledUp = false;
+        }
+        noteScrollPosition(el);
+      }
     }
   }
 
@@ -1689,7 +1740,10 @@
    *  grouped transcript and re-render the entire message list twice a second.
    */
   async function poll(): Promise<PollOutcome> {
-    if (!session || closed || pollInFlight) return 'skipped';
+    // Not while the stream feeds the pane: a fetch cannot be ordered against
+    // the frames, and a delta is not repeated to mend what an older fetch
+    // put back.
+    if (!session || closed || pollInFlight || chat) return 'skipped';
     pollInFlight = true;
     try {
       const statusVersionBeforeFetch = statusEventVersion;
@@ -1698,26 +1752,18 @@
       const request = sessionPollRequest(messages, acpMetadataMessages);
       const queuedTicket = queuedReadOrder.issue();
       const result = await pollSession(sessionId, request);
-      if (closed) return 'skipped';
+      // `chat`: a tick abandoned by `stopPolling` can answer after the pane
+      // has gone on to the stream.
+      if (closed || chat) return 'skipped';
       const s = result.session;
       const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
-      if (s && !statusEventDuringFetch && JSON.stringify(s) !== JSON.stringify(session)) {
-        session = s;
-      }
-      if (
-        queuedReadOrder.admit('queue', queuedTicket) &&
-        JSON.stringify(result.queuedMessages) !== JSON.stringify(queuedMessages)
-      ) {
-        queuedMessages = result.queuedMessages;
-      }
-      refreshLiveDelivery(s?.status ?? session?.status);
-
-      applyAcpMetadataUpdates(result.acpMetadataMessages);
-      const merged = mergeSinceMessages(messages, result.messages, request.sinceId);
-      if (merged) {
-        messages = merged.messages;
-        if (merged.appended) scrollToBottomIfNear(true);
-      }
+      applySessionUpdate({
+        session: s,
+        sessionSuperseded: statusEventDuringFetch,
+        queuedMessages: queuedReadOrder.admit('queue', queuedTicket) ? result.queuedMessages : null,
+        acpMetadataMessages: result.acpMetadataMessages,
+        mergeMessages: (existing) => mergeSinceMessages(existing, result.messages, request.sinceId),
+      });
 
       // Stop polling when the session is done or gone (`pollShouldStop`). The
       // snapshot that reports a terminal status already holds the rows written
@@ -1736,8 +1782,150 @@
       if (finalPollPending) {
         finalPollPending = false;
         void poll();
+      } else {
+        // The stream may have been established while this tick was out.
+        syncUpdateSource();
       }
     }
+  }
+
+  /** What one update of the session brought: a poll's answer or a stream frame. */
+  interface SessionUpdate {
+    /** The session row, when the update read one. */
+    session: Session | null;
+    /** A status event is newer than `session`, which is then not adopted. */
+    sessionSuperseded: boolean;
+    /** The follow-up queue, when the update read it and no newer read has landed. */
+    queuedMessages: QueuedSessionMessage[] | null;
+    acpMetadataMessages: SessionMessage[];
+    /** The update's visible rows merged into `existing`, or `null` for no change. */
+    mergeMessages: (existing: SessionMessage[]) => MergedSinceMessages | null;
+  }
+
+  /**
+   * Apply one update of the session, from either source. Nothing is assigned
+   * that did not change (see `poll`).
+   */
+  function applySessionUpdate(update: SessionUpdate) {
+    const s = update.session;
+    if (s && !update.sessionSuperseded && JSON.stringify(s) !== JSON.stringify(session)) {
+      session = s;
+    }
+    if (
+      update.queuedMessages &&
+      JSON.stringify(update.queuedMessages) !== JSON.stringify(queuedMessages)
+    ) {
+      queuedMessages = update.queuedMessages;
+    }
+    refreshLiveDelivery(s?.status ?? session?.status);
+
+    applyAcpMetadataUpdates(update.acpMetadataMessages);
+    const merged = update.mergeMessages(messages);
+    if (merged) {
+      messages = merged.messages;
+      if (merged.appended) scrollToBottomIfNear(true);
+    }
+  }
+
+  // ── The session stream ───────────────────────────────────────────────────
+  //
+  // While the window's session stream is established it feeds the pane in
+  // place of the 500 ms tick: the backend sends a snapshot read from this
+  // pane's cursor, then what is written, as it is written
+  // (`sessionStream.svelte.ts`, `session_stream/full.rs`). Whenever it is not
+  // established (the kill switch is off, it could not be opened, its socket
+  // dropped) the pane polls exactly as before.
+
+  const stopWatchingStream = sessionStream.onAvailability(() => syncUpdateSource());
+
+  /** The load is in: start taking the session's updates. */
+  function followSession() {
+    following = session !== null;
+    syncUpdateSource();
+    // On the stream this does nothing.
+    if (session?.status === 'running') startPolling();
+  }
+
+  /** Put the pane on the source its updates should come from now. */
+  function syncUpdateSource() {
+    if (closed || !following) return;
+    if (sessionStream.availability === 'established') {
+      clearPollTimer();
+      // A tick still out read the session before the frames will have; its
+      // end comes back here.
+      if (!chat && !pollInFlight) openChat();
+      return;
+    }
+    if (!chat) return;
+    // The stream went away, and with it whatever it had not delivered. One
+    // read from the cursor catches up, and a running session ticks again.
+    closeChat();
+    void poll();
+    if (session?.status === 'running') startPolling();
+  }
+
+  function openChat() {
+    const id = sessionId;
+    statusHold.reset();
+    chat = sessionStream.openChat(id, {
+      cursor: () => sessionPollRequest(messages, acpMetadataMessages),
+      onFrame: (kind, full) => applyFrame(id, kind, full),
+    });
+  }
+
+  function closeChat() {
+    chat?.release();
+    chat = null;
+    clearStatusHoldTimer();
+    statusHold.reset();
+  }
+
+  /**
+   * Apply a stream frame. A snapshot is the poll for a cursor at least as old
+   * as this pane's, and a delta is the rows and parts that were written;
+   * both merge by id.
+   */
+  function applyFrame(id: string, kind: 'snapshot' | 'delta', full: SessionFull) {
+    if (closed || !chat || sessionId !== id || session?.id !== id) return;
+    const rowsBefore = messages.length;
+    // A snapshot is a catch-up (a window shown again, a stream started
+    // over), not a live update: what it adds must not slide in.
+    const resumeIntros = kind === 'snapshot' ? intro.suspend() : null;
+    const row = full.session ? statusHold.frame(full.session, session) : null;
+    if (!statusHold.holding) clearStatusHoldTimer();
+    // A frame's queue is a read like any other: one sent before it and
+    // answered after must not replace it.
+    const queued = full.queuedMessages ?? null;
+    if (queued) queuedReadOrder.admit('queue', queuedReadOrder.issue());
+    applySessionUpdate({
+      session: row,
+      sessionSuperseded: false,
+      queuedMessages: queued,
+      acpMetadataMessages: full.acpMetadataMessages,
+      mergeMessages: (existing) => mergeFrameMessages(existing, full.messages),
+    });
+    if (resumeIntros) {
+      void boundWindowAfterDelta(rowsBefore).then(tick).finally(resumeIntros);
+    }
+  }
+
+  /**
+   * A status event was applied while the stream feeds the pane: keep its
+   * status over frames that disagree until one agrees, or until it is plain
+   * that none will (see `statusHold.ts`).
+   */
+  function holdEventStatus(status: SessionStatus) {
+    clearStatusHoldTimer();
+    if (!statusHold.event(status)) return;
+    statusHoldTimer = setTimeout(() => {
+      statusHoldTimer = null;
+      if (statusHold.release()) chat?.resync();
+    }, STATUS_HOLD_MS);
+  }
+
+  function clearStatusHoldTimer() {
+    if (statusHoldTimer) clearTimeout(statusHoldTimer);
+    statusHoldTimer = null;
   }
 
   /**
@@ -1810,13 +1998,20 @@
     }
   }
 
+  /**
+   * Tick while the session runs. Not while the session stream is
+   * established: its frames bring what a tick would, as it is written, and
+   * `syncUpdateSource` starts the tick again should the stream go away.
+   */
   function startPolling() {
-    if (pollTimer) return;
+    if (pollTimer || sessionStream.availability === 'established') return;
     pollTimer = setInterval(poll, 500);
   }
 
-  /** Abandon polling: the pane is closing or switching session. */
+  /** Abandon the session's updates: the pane is closing or switching session. */
   function stopPolling() {
+    following = false;
+    closeChat();
     clearPollTimer();
     pollInFlight = false;
     finalPollPending = false;
@@ -1837,6 +2032,9 @@
    */
   function finishPolling() {
     clearPollTimer();
+    // On the stream there is nothing to fetch: the frame that reports the
+    // status that ended the turn holds that text, or it was sent before.
+    if (chat) return;
     if (pollInFlight) {
       finalPollPending = true;
     } else {

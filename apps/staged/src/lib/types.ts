@@ -1032,19 +1032,26 @@ export interface SessionPoll {
 // `store/session_full.rs`.
 
 /**
- * How much of a session a client asks the stream for. The backend also
- * serves a `full` level (what the chat pane polls for, as `SessionFull`),
- * asked for with a `cursor: SessionPollRequest` beside the level. Nothing
- * consumes it yet, so the level and the cursor are left out of the interest
- * types here: the type check then keeps the frontend from asking before the
- * chat pane can take the frames.
+ * How much of a session a client asks the stream for: its status and title;
+ * what its one-line subtitle is derived from as well; or `full`, everything
+ * an open chat shows (`SessionFull`). A session can be asked for at `full`
+ * and at one of the other two together, when it is both an open chat and a
+ * row: the two are served side by side, each with its own snapshot and
+ * deltas.
  */
-export type SessionStreamLevel = 'title' | 'summary';
+export type SessionStreamLevel = 'title' | 'summary' | 'full';
 
 /** One session a client wants, and at which level. */
 export interface SessionStreamSessionInterest {
   sessionId: string;
   level: SessionStreamLevel;
+  /**
+   * At the `full` level: what the client holds of the session, as the cursors
+   * of a poll. Giving one asks for a snapshot read from it, whether or not
+   * the session was already held; leaving it out lets a session already held
+   * carry on with deltas.
+   */
+  cursor?: SessionPollRequest;
 }
 
 /** A client's whole interest. Each one sent replaces the one before. */
@@ -1122,9 +1129,7 @@ export interface SessionStreamFrame {
    * `resync`: another Staged process wrote the database and the backend
    * cannot say which rows changed, so the client declares the session again
    * with the cursor of what it holds and gets a snapshot from it. Only a
-   * session held at the full level is sent one, and nothing asks for that
-   * level yet, so none arrives; it is counted in the sequence and otherwise
-   * ignored.
+   * session held at the full level is sent one.
    */
   kind: 'snapshot' | 'delta' | 'resync';
   /**

@@ -20,6 +20,18 @@
  *   kept per session and root set. Each of these is its own reactive value
  *   (`status`, `title`, `hint`), assigned only when it changes: a row reading
  *   one re-renders for its own session's changes and nobody else's.
+ * - **Open chats take the frames themselves.** A chat pane opens a chat
+ *   (`openChat`) for the session it shows, and the session is declared at the
+ *   full level beside whatever level its rows want. The owner keeps nothing
+ *   of it: each full-level frame is handed to the pane, which merges it into
+ *   its own window with the code it merges a poll with. The pane says what
+ *   it holds as a poll's cursors, and the owner gives the backend that
+ *   cursor whenever a snapshot is wanted: when a pane joins (two panes can
+ *   show one session, and both take the snapshot read for the one that
+ *   joined), when the stream starts over or a hidden window is shown, when
+ *   the backend asks with a `resync` frame, and when a pane asks. Between
+ *   those the cursor is left out and the deltas carry on. A chat does not
+ *   linger: a parked pane catches up from its cursor when it is shown again.
  * - **Frames.** A snapshot replaces what is held for its session; a delta
  *   replaces the session fields and upserts its rows by id. The rows are
  *   trimmed to the newest `HINT_ROW_WINDOW`, which is also the window the
@@ -50,10 +62,9 @@
  * stays and nothing polls, so a dropped socket does not make every row reload
  * its transcript.
  *
- * Only the title and summary levels are asked for; the full level is a later
- * phase. A second Staged process writing the same database is the backend's
- * to notice (`session_stream/watch.rs`): its changes arrive as deltas like
- * any other.
+ * A second Staged process writing the same database is the backend's to
+ * notice (`session_stream/watch.rs`): its changes arrive as deltas like any
+ * other at the title and summary levels, and as a `resync` at the full level.
  */
 
 import { untrack } from 'svelte';
@@ -64,6 +75,7 @@ import {
   resolveDisplayRoots,
   type DisplayRootInput,
 } from '../features/sessions/pathDisplayRoots';
+import { unionSessionPollRequests } from '../features/sessions/messagePoll';
 import {
   deriveHint,
   derivePipelineHint,
@@ -79,19 +91,23 @@ import {
 } from '../transport';
 import type {
   PipelineExecution,
+  SessionFull,
+  SessionPollRequest,
   SessionStatus,
   SessionStreamFrame,
   SessionStreamInterest,
   SessionStreamLevel,
+  SessionStreamSessionInterest,
   SessionSummaryRow,
 } from '../types';
 
 // ── Kill switch ─────────────────────────────────────────────────────────────
 
 /**
- * Whether the titles and subtitles of running sessions come from the session
- * stream. `false` puts them back on polling (`liveSessionHints.ts`), which is
- * kept whole as the fallback.
+ * Whether the titles and subtitles of running sessions, and what an open
+ * chat shows, come from the session stream. `false` puts them back on
+ * polling (`liveSessionHints.ts`, and the chat pane's `poll_session` tick),
+ * which is kept whole as the fallback.
  */
 const SESSION_STREAM_ENABLED = true;
 
@@ -177,6 +193,32 @@ export interface SessionStreamConsumer {
   release(): void;
 }
 
+/** What an open chat gives the owner. */
+export interface SessionChatHandlers {
+  /**
+   * What the pane holds of the session now, as the cursors of a poll
+   * (`sessionPollRequest`). Asked each time a snapshot is to be read.
+   */
+  cursor: () => SessionPollRequest;
+  /**
+   * A full-level frame for the session. A snapshot is read from a cursor at
+   * least as old as this pane's, and a delta holds what was written; either
+   * is merged by id.
+   */
+  onFrame: (kind: 'snapshot' | 'delta', full: SessionFull) => void;
+}
+
+/** One pane's hold on a session at the full level. */
+export interface SessionChat {
+  /**
+   * Ask for a snapshot read from the pane's cursor as it is now: the pane's
+   * own re-read of the session, in order with the frames.
+   */
+  resync(): void;
+  /** Stop taking frames. The chat is not used again. */
+  release(): void;
+}
+
 /** What the owner needs from outside, so tests can stand in for it. */
 export interface SessionStreamDeps {
   open: (handlers: SessionStreamHandlers) => SessionStreamLink;
@@ -192,9 +234,12 @@ export interface SessionStreamDeps {
   } | null;
 }
 
+/** The levels a row is shown at. The full level is an open chat's (`Chat`). */
+type RowLevel = Exclude<SessionStreamLevel, 'full'>;
+
 type Claim = {
   sessionId: string;
-  level: SessionStreamLevel;
+  level: RowLevel;
   /** `displayRootKey` of the consumer's roots. Empty for a title claim. */
   rootsKey: string;
   roots: DisplayRootInput;
@@ -220,9 +265,9 @@ type View = {
 
 type Entry = {
   /** The highest level a claim asks for. */
-  level: SessionStreamLevel;
+  level: RowLevel;
   /** The level the backend was last told. */
-  declared: SessionStreamLevel | null;
+  declared: RowLevel | null;
   /** A frame has been applied. */
   loaded: boolean;
   /** A summary-level frame has been applied since the rows were last dropped. */
@@ -236,8 +281,19 @@ type Entry = {
   views: Map<string, View>;
 };
 
-function claimKey(level: SessionStreamLevel, sessionId: string, rootsKey: string): string {
+/** A session open as a chat, in one pane or more. */
+type Chat = {
+  panes: Set<SessionChatHandlers>;
+  /** The next interest gives the panes' cursor, which asks for a snapshot. */
+  wantsSnapshot: boolean;
+};
+
+function claimKey(level: RowLevel, sessionId: string, rootsKey: string): string {
   return `${level}\n${sessionId}\n${rootsKey}`;
+}
+
+function order(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function hintKey(sessionId: string, rootsKey: string): string {
@@ -305,6 +361,8 @@ export class SessionStreamOwner {
   readonly #hints: Cells<string> = new SvelteMap();
 
   readonly #entries = new Map<string, Entry>();
+  /** The sessions open as chats. Held apart from `#entries`: see `Chat`. */
+  readonly #chats = new Map<string, Chat>();
   readonly #consumers = new Set<ConsumerState>();
   /** Claims nobody holds any more, by `claimKey`, until their timer drops them. */
   readonly #lingering = new Map<string, { claim: Claim; timer: ReturnType<typeof setTimeout> }>();
@@ -353,6 +411,9 @@ export class SessionStreamOwner {
           const paused = visibility.hidden();
           if (this.#paused === paused) return;
           this.#paused = paused;
+          // The backend reads a chat again when a pause ends, from the last
+          // cursor it was given. Give it what the panes hold now.
+          if (!paused) this.#wantSnapshots();
           this.#requestSend();
         })
       );
@@ -505,6 +566,59 @@ export class SessionStreamOwner {
     };
   }
 
+  // ── Chats ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Take a session at the full level for a pane that shows it as a chat.
+   * The pane is sent a snapshot read from its cursor, then deltas, for as
+   * long as the stream is established; it is the pane's to watch
+   * `availability` and poll when it is not.
+   */
+  openChat(sessionId: string, handlers: SessionChatHandlers): SessionChat {
+    let chat = this.#chats.get(sessionId);
+    if (!chat) {
+      chat = { panes: new Set(), wantsSnapshot: true };
+      this.#chats.set(sessionId, chat);
+    }
+    const held = chat;
+    held.panes.add(handlers);
+    // Also for a pane joining one already there: what it holds is its own.
+    held.wantsSnapshot = true;
+    this.#requestSend();
+
+    let released = false;
+    return {
+      resync: () => {
+        if (released) return;
+        held.wantsSnapshot = true;
+        this.#requestSend();
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        held.panes.delete(handlers);
+        if (held.panes.size === 0 && this.#chats.get(sessionId) === held) {
+          this.#chats.delete(sessionId);
+        }
+        this.#requestSend();
+      },
+    };
+  }
+
+  /** Have every chat read again from its panes' cursors. */
+  #wantSnapshots(): void {
+    for (const chat of this.#chats.values()) chat.wantsSnapshot = true;
+  }
+
+  /** Whether a chat is waiting to give its cursor, and the backend would read it. */
+  #snapshotWanted(): boolean {
+    if (this.#paused) return false;
+    for (const chat of this.#chats.values()) {
+      if (chat.wantsSnapshot) return true;
+    }
+    return false;
+  }
+
   #read(consumer: ConsumerState, sessionId: string): SessionStreamState | undefined {
     const entry = this.#entries.get(sessionId);
     const status = this.#statuses.get(sessionId);
@@ -542,10 +656,7 @@ export class SessionStreamOwner {
 
   /** Bring the entries in line with the claims, held and lingering. */
   #reconcile(): void {
-    const wanted = new Map<
-      string,
-      { level: SessionStreamLevel; views: Map<string, DisplayRootInput> }
-    >();
+    const wanted = new Map<string, { level: RowLevel; views: Map<string, DisplayRootInput> }>();
     const want = (claim: Claim) => {
       let session = wanted.get(claim.sessionId);
       if (!session) {
@@ -677,6 +788,23 @@ export class SessionStreamOwner {
 
   #apply(frame: SessionStreamFrame): void {
     const sessionId = frame.sessionId;
+    if (frame.kind === 'resync') {
+      // The backend sends the chat nothing more until it has the cursor. A
+      // chat that has been let go of is dropped by the interest already on
+      // its way, which answers as well.
+      const chat = this.#chats.get(sessionId);
+      if (chat) {
+        chat.wantsSnapshot = true;
+        this.#requestSend();
+      }
+      return;
+    }
+    if (frame.full) {
+      // A frame is about one level, so this one has nothing for the rows.
+      const chat = this.#chats.get(sessionId);
+      if (chat) for (const pane of [...chat.panes]) pane.onFrame(frame.kind, frame.full);
+      return;
+    }
     const entry = this.#entries.get(sessionId);
     const summary = frame.summary;
     if (!entry || !summary) return;
@@ -707,10 +835,15 @@ export class SessionStreamOwner {
 
   // ── Interest ──────────────────────────────────────────────────────────────
 
+  /**
+   * What is wanted, without the chats' cursors: they say what the panes hold
+   * and not what is wanted, and are added by the call that gives them.
+   */
   #interest(): SessionStreamInterest {
-    const sessions = [...this.#entries]
-      .map(([sessionId, entry]) => ({ sessionId, level: entry.level }))
-      .sort((a, b) => (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
+    const sessions: SessionStreamSessionInterest[] = [
+      ...[...this.#entries].map(([sessionId, entry]) => ({ sessionId, level: entry.level })),
+      ...[...this.#chats.keys()].map((sessionId) => ({ sessionId, level: 'full' as const })),
+    ].sort((a, b) => order(a.sessionId, b.sessionId) || order(a.level, b.level));
     return {
       generation: this.#generation,
       paused: this.#paused,
@@ -723,6 +856,7 @@ export class SessionStreamOwner {
   #restart(): void {
     this.#generation += 1;
     this.#lastSeq = 0;
+    this.#wantSnapshots();
     this.#requestSend();
   }
 
@@ -731,11 +865,14 @@ export class SessionStreamOwner {
     this.#sendTimer = null;
   }
 
-  /** Declare the interest soon, if it differs from what the backend has. */
+  /**
+   * Declare the interest soon, if it differs from what the backend has or a
+   * chat has a cursor to give.
+   */
   #requestSend(): void {
     // Closed: `onOpen` sends. Sending: the call's end looks again.
     if (!this.#link || !this.#open || this.#sending) return;
-    if (JSON.stringify(this.#interest()) === this.#sentKey) return;
+    if (JSON.stringify(this.#interest()) === this.#sentKey && !this.#snapshotWanted()) return;
     const now = Date.now();
     const due = Math.max(now + INTEREST_DELAY_MS, this.#notBefore);
     if (this.#sendTimer !== null) {
@@ -756,7 +893,20 @@ export class SessionStreamOwner {
     if (!link || !this.#open || this.#sending) return;
     const interest = this.#interest();
     const key = JSON.stringify(interest);
-    if (key === this.#sentKey) return;
+    if (key === this.#sentKey && !this.#snapshotWanted()) return;
+
+    // The cursors are read now, as late as can be: a frame applied after
+    // this only puts a pane ahead of its cursor, and the snapshot then
+    // repeats rows the pane holds. A paused backend reads nothing, so they
+    // wait for the call that ends the pause.
+    if (!this.#paused) {
+      for (const session of interest.sessions) {
+        const chat = session.level === 'full' ? this.#chats.get(session.sessionId) : undefined;
+        if (!chat?.wantsSnapshot) continue;
+        session.cursor = unionSessionPollRequests([...chat.panes].map((pane) => pane.cursor()));
+        chat.wantsSnapshot = false;
+      }
+    }
 
     // From here the backend is being told these levels. A session lowered
     // to its title gets no more rows, so the ones held would go stale.

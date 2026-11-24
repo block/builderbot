@@ -279,10 +279,16 @@ export class NoteDiffState {
     this.aligns++;
   }
 
-  /** Close the previous version and let go of the selected change. */
+  /**
+   * Close the previous version and let go of the selected change, and of a
+   * hovered one: what was hovered may be going with the pane, and an element
+   * that is removed is never left. A pointer still on a marker lights its
+   * change again when it next moves.
+   */
   close(): void {
     this.split = false;
     this.active = null;
+    this.hovered = null;
     this.follows = false;
   }
 

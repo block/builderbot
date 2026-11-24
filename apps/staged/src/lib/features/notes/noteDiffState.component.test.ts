@@ -206,6 +206,21 @@ describe('NoteDiffState.compare', () => {
     expect(state.open).toBe(true);
   });
 
+  it('lets go of a hovered change when it closes, as of the selected one', () => {
+    const state = compared();
+    state.select(state.hunks[1].id, true);
+    // The pointer is on something the previous version's pane holds, which
+    // goes with the pane: nothing will report it left.
+    state.hover(state.hunks[0].id);
+
+    state.close();
+
+    expect(state.hoveredHunkId).toBeNull();
+    expect(state.pointedHunkId).toBeNull();
+    expect(state.open).toBe(false);
+    expect(state.engaged).toBe(false);
+  });
+
   it('points at nothing once the diff is another', () => {
     const state = compared();
     state.hover(state.hunks[0].id);

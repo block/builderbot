@@ -15,6 +15,7 @@ import {
   CURRENT_NOTE,
   HUNK_KINDS,
   layOut,
+  pointerArrives,
   PREVIOUS_NOTE,
 } from './testStubs/noteDiffFixtures';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
@@ -175,6 +176,7 @@ describe('NoteDiffConnectors', () => {
 
   it('lights the change while its band is hovered', () => {
     const { noteDiff } = render();
+    pointer('pointermove', document.body, 640, 250);
 
     pointer('pointerenter', fill(band('removed')), 700, 250);
     expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
@@ -193,6 +195,7 @@ describe('NoteDiffConnectors', () => {
     flushSync();
     expect(pointed().map((el) => el.dataset.kind)).toEqual(['modified']);
 
+    pointer('pointermove', document.body, 640, 620);
     pointer('pointerenter', fill(band('added')), 700, 620);
     expect(pointed().map((el) => el.dataset.kind)).toEqual(['added']);
 
@@ -217,12 +220,89 @@ describe('NoteDiffConnectors', () => {
     expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
   });
 
+  it('does not light a change whose band appears under a pointer it has not seen move', () => {
+    // The bands are drawn when a key opens the previous version: the
+    // pointer has been at rest since before they were there to watch it.
+    const { noteDiff } = render();
+
+    // The browser reports it, where it is, to the band now under it.
+    pointer('pointerenter', fill(band('removed')), 700, 250);
+    pointer('pointermove', fill(band('removed')), 700, 250);
+    expect(noteDiff.hoveredHunkId).toBeNull();
+    // And again when a pane scrolls.
+    pointer('pointermove', fill(band('removed')), 700, 250);
+    expect(noteDiff.hoveredHunkId).toBeNull();
+
+    pointer('pointermove', fill(band('removed')), 701, 250);
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
+  });
+
+  it('lets go of a hovered change when its band scrolls out of the gutter', () => {
+    const { props, noteDiff } = render();
+    noteDiff.select(noteDiff.hunks[1].id, true);
+    pointer('pointermove', document.body, 640, 250);
+    pointer('pointerenter', fill(band('removed')), 700, 250);
+    pointer('pointermove', fill(band('removed')), 700, 250);
+    expect(noteDiff.pointedHunkId).toBe(noteDiff.hunks[0].id);
+
+    // Both panes scroll past the removal. Its band is no longer drawn, and
+    // an element that is removed is not left: no `pointerleave` comes.
+    props.scrollTops = { previous: 400, current: 300 };
+    flushSync();
+    expect(bands().map((el) => el.dataset.kind)).toEqual(['modified', 'added']);
+
+    expect(noteDiff.hoveredHunkId).toBeNull();
+    // The selected change has its light back.
+    expect(noteDiff.pointedHunkId).toBe(noteDiff.hunks[1].id);
+    expect(pointed().map((el) => el.dataset.kind)).toEqual(['modified']);
+
+    // Scrolled back under the pointer, which has not moved: not a hover.
+    props.scrollTops = { previous: 0, current: 0 };
+    flushSync();
+    pointer('pointerenter', fill(band('removed')), 700, 250);
+    expect(noteDiff.hoveredHunkId).toBeNull();
+  });
+
+  it('keeps a change hovered while its band is redrawn under the pointer', () => {
+    const { props, noteDiff } = render();
+    pointer('pointermove', document.body, 640, 250);
+    pointer('pointerenter', fill(band('removed')), 700, 250);
+
+    // A scroll that leaves the band in the gutter.
+    props.scrollTops = { previous: 40, current: 40 };
+    flushSync();
+
+    expect(bands().map((el) => el.dataset.kind)).toContain('removed');
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
+  });
+
+  it('lets go of a hovered change when the bands are taken down', () => {
+    const { noteDiff } = render();
+    pointer('pointermove', document.body, 640, 250);
+    pointer('pointerenter', fill(band('removed')), 700, 250);
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
+
+    unmount(component!);
+    component = null;
+
+    expect(noteDiff.hoveredHunkId).toBeNull();
+  });
+
+  it('leaves a hover that is not its own when the bands are taken down', () => {
+    const { noteDiff } = render();
+    // A marker is hovered, not a band.
+    noteDiff.hover(noteDiff.hunks[1].id);
+
+    unmount(component!);
+    component = null;
+
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[1].id);
+  });
+
   it('does not light a change for a touch, which has no hover to end', () => {
     const { noteDiff } = render();
 
-    const touch = new MouseEvent('pointerenter');
-    Object.defineProperty(touch, 'pointerType', { value: 'touch' });
-    fill(band('removed')).dispatchEvent(touch);
+    pointerArrives(fill(band('removed')), 'touch');
     flushSync();
 
     expect(noteDiff.hoveredHunkId).toBeNull();

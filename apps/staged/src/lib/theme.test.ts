@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { createAdaptiveTheme, themeToVarMap } from './theme';
+import appCss from '../app.css?raw';
+import { CHROME_BASE_COLORS, createAdaptiveTheme, themeToVarMap } from './theme';
 
 describe('createAdaptiveTheme', () => {
   it('exposes a white Pikchr canvas with a soft themed palette for dark chrome', () => {
@@ -69,22 +70,22 @@ describe('createAdaptiveTheme', () => {
   });
 
   describe('the emphasised diff tints', () => {
-    // The chrome's two themes (DARK_BASE and LIGHT_BASE in preferences).
-    const CHROME = {
-      dark: createAdaptiveTheme('#27212e', '#ffffff', '#91889b', {
-        added: '#3fb950',
-        deleted: '#f85149',
-        modified: '#d29922',
-      }),
-      light: createAdaptiveTheme('#ffffff', '#24292e', '#6e7781', {
-        added: '#28a745',
-        deleted: '#d73a49',
-        modified: '#2188ff',
-      }),
+    // The chrome's two themes, from the base colours the app applies.
+    const chrome = (mode: 'dark' | 'light') => {
+      const { bg, fg, comment, gitColors } = CHROME_BASE_COLORS[mode];
+      return createAdaptiveTheme(bg, fg, comment, gitColors);
     };
-    // The modified tints are not the theme's: app.css sets one amber for all.
-    const MODIFIED_EMPHASIS = 'rgba(227, 179, 65, 0.16)';
-    const MODIFIED_INLINE = 'rgba(227, 179, 65, 0.25)';
+    const CHROME = { dark: chrome('dark'), light: chrome('light') };
+    // The modified tints are not the theme's: app.css sets one amber for all,
+    // and it is read from there.
+    const appToken = (name: string): string => {
+      const values = [...appCss.matchAll(new RegExp(`${name}:\\s*([^;]+);`, 'g'))];
+      // Set once: a second value would be another theme's, and not checked here.
+      if (values.length !== 1) throw new Error(`${name} is set ${values.length} times in app.css`);
+      return values[0][1].trim();
+    };
+    const MODIFIED_EMPHASIS = appToken('--diff-modified-bg-emphasis');
+    const MODIFIED_INLINE = appToken('--diff-modified-inline-bg');
 
     const channels = (color: string): number[] =>
       color.startsWith('#')
@@ -119,6 +120,16 @@ describe('createAdaptiveTheme', () => {
         }
       }
     );
+
+    it('reads the modified tints from app.css, one amber over the other', () => {
+      const [r, g, b, a] = channels(MODIFIED_EMPHASIS);
+      const [ir, ig, ib, ia] = channels(MODIFIED_INLINE);
+      expect(MODIFIED_EMPHASIS).toMatch(/^rgba\(/);
+      expect(MODIFIED_INLINE).toMatch(/^rgba\(/);
+      expect([ir, ig, ib]).toEqual([r, g, b]);
+      // Changed words are painted over the emphasised block, and must show on it.
+      expect(ia).toBeGreaterThan(a);
+    });
 
     it.each(['dark', 'light'] as const)('leave text readable on the %s theme', (mode) => {
       const vars = themeToVarMap(CHROME[mode]);

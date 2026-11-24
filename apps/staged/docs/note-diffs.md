@@ -68,6 +68,20 @@ change once.
 A marker that scrolls under a pointer at rest is not hovered: only a pointer
 that moved onto it lights the change. Otherwise the change a press scrolled
 into the pointer's place would take the light from the one that was pressed.
+A pointer that has not been seen to move at all counts as at rest: the bands
+between the panes appear when a key opens the previous version, possibly
+under a pointer that has been still since before they were drawn. The halo
+of a marker goes with the light, so a marker under a resting pointer has
+none.
+
+A hover ends when the pointer or the focus leaves, and neither is reported
+for an element that is removed. So a hover is also let go of when what was
+hovered is no longer drawn: a band scrolled out of the gutter, the previous
+version's markers and bands when its pane closes, and any marker when its
+markers are taken down (`ChangeHover` in `noteDiffPointer.ts`). Closing the
+previous version, by Escape or otherwise, lets go of the hovered change
+along with the selected one; a pointer still on one of the note's markers
+lights its change again when it next moves.
 
 ## The connectors
 
@@ -123,7 +137,16 @@ hit-tested by the browser and styled from CSS.
   inside that pane, and crosses 21px of the note's left padding to stop
   where the note's blocks are tinted, 3px short of the text. The previous
   version's scrollbar is on its left, the outer edge, as the viewer's old
-  pane has it, so nothing lies between its markers and the bands. The line
+  pane has it, so nothing lies between its markers and the bands. It is
+  there because that scroll area is laid out right to left, which also makes
+  it scroll from its right edge: what runs past that edge cannot be reached,
+  so the area scrolls up and down only. The version is in a box inside it,
+  laid out left to right, and that box scrolls sideways when a table or a
+  string that cannot wrap is wider than the pane, as the note's scroll area
+  does for the note. Text wraps to the pane's width in both, so the two
+  versions are laid out alike. The markers and gap lines are beside the box
+  and do not move with it. Its sideways scrollbar is under the version's
+  last block, where the note's is at the bottom of its pane. The line
   dividing the panes is drawn beside their headers only. The note's own
   markers stay in its right margin, where they are in the one-pane view, so
   opening the previous version moves none of them.
@@ -387,6 +410,8 @@ What to expect:
   scroll to either end of the note: the bands slant to follow both sides,
   and run off the top or bottom of the gutter, never over the pane headers.
   Tab still stops at the note's markers only.
+- With the pointer on a band, or on a marker beside the previous version,
+  press Escape: the pane closes and nothing in the note stays lit.
 
 With the find field open (Cmd+F) and focused, what Escape does depends on
 whether anything of the diff is held open. While the previous version is

@@ -270,7 +270,9 @@
       onclick={onContentClick}
       onkeydown={onContentKeydown}
     >
-      {@render content()}
+      <div class="previous-content">
+        {@render content()}
+      </div>
       <NoteDiffGaps {noteDiff} side="previous" showAll />
       <NoteDiffMarkers
         {noteDiff}
@@ -327,11 +329,15 @@
 
      Its scrollbar is on the left, the pane's outer edge, so that the markers
      at its right edge meet the connectors: a scroll area laid out right to
-     left has it there. What it holds reads left to right as ever. */
+     left has it there. What it holds reads left to right as ever.
+
+     Laid out right to left, it also scrolls from its right edge, and what
+     runs past that edge is out of reach: it scrolls up and down only. */
   .previous-scroll {
     position: relative;
     flex: 1;
     min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
     padding: 24px 24px 60vh;
     background: var(--bg-primary);
@@ -340,6 +346,40 @@
 
   .previous-scroll > :global(*) {
     direction: ltr;
+  }
+
+  /* The version itself, which scrolls sideways when something in it is wider
+     than the pane (a table, a long path or hash that cannot wrap), as the
+     note does in its own scroll area. The text is laid out to the pane's
+     width either way, so both versions wrap alike. Reading left to right,
+     it scrolls from its left edge. The markers and the gap lines are beside
+     it, not in it, and stay where they are.
+
+     A scroll box cuts off what is drawn outside it, as a tinted block's
+     outline is (3px, see noteDiffStyles.css). So the box is larger than the
+     text by that and a pixel all round, and pulled out by as much, which
+     leaves the text where it would be without the box. */
+  .previous-content {
+    margin: -4px;
+    padding: 4px;
+    overflow-x: auto;
+  }
+
+  .previous-content::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .previous-content::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .previous-content::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb-transparent);
+    border-radius: 3px;
+  }
+
+  .previous-content::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover-transparent);
   }
 
   .previous-scroll::-webkit-scrollbar {

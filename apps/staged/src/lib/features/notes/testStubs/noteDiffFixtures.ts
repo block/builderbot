@@ -68,6 +68,18 @@ export function layOut(
   });
 }
 
+/**
+ * Bring the pointer to `el` from somewhere else in the window, as a pointer
+ * that hovers it does. One that has not been seen anywhere else is taken to
+ * be at rest (noteDiffPointer.ts). `type` is `touch` for a finger.
+ */
+export function pointerArrives(el: Element, type = 'mouse'): void {
+  window.dispatchEvent(new MouseEvent('pointermove', { clientX: 1, clientY: 1 }));
+  const enter = new MouseEvent('pointerenter', { clientX: 2, clientY: 2 });
+  Object.defineProperty(enter, 'pointerType', { value: type });
+  el.dispatchEvent(enter);
+}
+
 /** The `Highlight` a test registry holds. */
 export class FakeHighlight {
   ranges: Range[];

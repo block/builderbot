@@ -17,6 +17,7 @@ import {
   HUNK_KINDS,
   layOut,
   paintedText,
+  pointerArrives,
   PREVIOUS_NOTE,
 } from './testStubs/noteDiffFixtures';
 import { renderNoteMarkdown } from './noteMarkdown';
@@ -89,7 +90,7 @@ const active = (el: Element) =>
   [...el.querySelectorAll(`[${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`)].map((block) => block.textContent);
 
 function hover(el: Element) {
-  el.dispatchEvent(new MouseEvent('pointerenter'));
+  pointerArrives(el);
   flushSync();
 }
 
@@ -270,12 +271,49 @@ describe('NoteChangeBar', () => {
     expect(active(contentEl)).toEqual(['A hundred entries go at a time.']);
   });
 
+  it('does not light a change whose marker is under a pointer it has not seen move', () => {
+    const { contentEl } = render(PREVIOUS_NOTE);
+
+    // The first the bar sees of the pointer is a move reported to a marker.
+    pointer('pointerenter', marker('added'), 690, 120);
+    pointer('pointermove', marker('added'), 690, 120);
+    expect(active(contentEl)).toEqual([]);
+
+    pointer('pointermove', marker('added'), 690, 121);
+    expect(active(contentEl)).toEqual(['A hundred entries go at a time.']);
+  });
+
+  it('lets go of a hovered change when its marker is no longer drawn', () => {
+    const { contentEl, noteDiff } = render(PREVIOUS_NOTE);
+    hover(marker('modified'));
+    expect(active(contentEl)).toEqual(['The cache is filled when the app starts.']);
+
+    // The note's blocks are not measured any more, so no marker is placed.
+    // One that is removed is not left: no `pointerleave` comes for it.
+    noteDiff.setBoxes('current', []);
+    flushSync();
+    expect(markers()).toEqual([]);
+
+    expect(noteDiff.hoveredHunkId).toBeNull();
+    expect(active(contentEl)).toEqual([]);
+  });
+
+  it('lets go of a change lit by focus when the markers are taken down', () => {
+    const { noteDiff } = render(PREVIOUS_NOTE);
+    marker('added').focus();
+    flushSync();
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[2].id);
+
+    unmount(component!);
+    component = null;
+
+    expect(noteDiff.hoveredHunkId).toBeNull();
+  });
+
   it('does not light a change for a touch, which has no hover to end', () => {
     const { contentEl } = render(PREVIOUS_NOTE);
 
-    const touch = new MouseEvent('pointerenter');
-    Object.defineProperty(touch, 'pointerType', { value: 'touch' });
-    marker('modified').dispatchEvent(touch);
+    pointerArrives(marker('modified'), 'touch');
     flushSync();
 
     expect(active(contentEl)).toEqual([]);

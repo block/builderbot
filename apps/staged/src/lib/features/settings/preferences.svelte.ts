@@ -21,7 +21,7 @@ import {
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { syncedStoreValue } from '../../shared/syncedStoreValue';
 import { hydrateDialogWidths } from '../../components/ui/dialog/dialogWidth.svelte';
-import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
+import { CHROME_BASE_COLORS, createAdaptiveTheme, themeToVarMap } from '../../theme';
 import { darkMode } from '../../stores/isDark.svelte';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
 import { normalizeAgentEnvVars, type AgentEnvVar, type AgentEnvVars } from './agentEnvVars';
@@ -123,38 +123,6 @@ const DEFAULT_APP_MODE: AppMode = 'system';
 function normalizeSize(size: number): number {
   return Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(size)));
 }
-
-// =============================================================================
-// Fixed chrome base colors
-// =============================================================================
-
-/**
- * Base colors fed into createAdaptiveTheme() for the app chrome. The chrome no
- * longer derives from the user's chosen diff/syntax theme — it has exactly one
- * fixed light and one fixed dark identity, selected by the resolved app mode.
- */
-interface ModeBaseColors {
-  bg: string;
-  fg: string;
-  comment: string;
-  gitColors: ThemeGitColors;
-}
-
-/** Dark chrome — sourced from the previous laserwave-derived app.css :root defaults. */
-const DARK_BASE: ModeBaseColors = {
-  bg: '#27212e',
-  fg: '#ffffff',
-  comment: '#91889b',
-  gitColors: { added: '#3fb950', deleted: '#f85149', modified: '#d29922' },
-};
-
-/** Light chrome — derived from a clean, legible light palette (github-light). */
-const LIGHT_BASE: ModeBaseColors = {
-  bg: '#ffffff',
-  fg: '#24292e',
-  comment: '#6e7781',
-  gitColors: { added: '#28a745', deleted: '#d73a49', modified: '#2188ff' },
-};
 
 // =============================================================================
 // Reactive State
@@ -269,7 +237,7 @@ function resolveMode(mode: AppMode): 'light' | 'dark' {
  * independent of the user's diff theme.
  */
 function applyChromeTheme() {
-  const base = resolveMode(preferences.mode) === 'dark' ? DARK_BASE : LIGHT_BASE;
+  const base = CHROME_BASE_COLORS[resolveMode(preferences.mode)];
   const adaptiveTheme = createAdaptiveTheme(base.bg, base.fg, base.comment, base.gitColors);
   const varMap = themeToVarMap(adaptiveTheme);
   const style = document.documentElement.style;

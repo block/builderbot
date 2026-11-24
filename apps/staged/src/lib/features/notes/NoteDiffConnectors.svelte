@@ -31,7 +31,8 @@
     layoutNoteDiffConnectors,
   } from './noteDiffConnectors';
   import type { NoteDiffSide } from './noteDiff';
-  import { RestingPointer } from './noteDiffPointer';
+  import { untrack } from 'svelte';
+  import { ChangeHover, RestingPointer } from './noteDiffPointer';
   import type { NoteDiffState } from './noteDiffState.svelte';
 
   interface Props {
@@ -50,6 +51,7 @@
 
   let svgEl = $state<SVGSVGElement>();
   const pointer = new RestingPointer();
+  const hover = new ChangeHover();
 
   let connectors = $derived(
     layoutNoteDiffConnectors(noteDiff.hunks, noteDiff.boxes, {
@@ -69,16 +71,30 @@
     if (svgEl) return noteDiff.watchReaderScroll(svgEl);
   });
 
+  // A band that is no longer drawn was not left by the pointer: one scrolled
+  // out of the gutter while hovered, or every band when the pane closes. No
+  // `pointerleave` comes for an element that is removed, so the hover it
+  // had is ended here.
+  $effect(() => {
+    const drawn = new Set(connectors.map((connector) => connector.hunkId));
+    untrack(() => hover.keep(noteDiff, (hunkId) => drawn.has(hunkId)));
+  });
+
+  $effect(() => {
+    const state = noteDiff;
+    return () => hover.release(state);
+  });
+
   /**
    * The pointer is over a band. Only one that moved there counts, not one
    * at rest that a pane scrolled a band under (noteDiffPointer.ts).
    */
   function pointerOver(event: PointerEvent, hunkId: string) {
-    if (pointer.hovers(event)) noteDiff.hover(hunkId);
+    if (pointer.hovers(event)) hover.enter(noteDiff, hunkId);
   }
 
   function unhover(hunkId: string) {
-    if (noteDiff.hoveredHunkId === hunkId) noteDiff.hover(null);
+    hover.leave(noteDiff, hunkId);
   }
 
   function wheel(event: WheelEvent) {

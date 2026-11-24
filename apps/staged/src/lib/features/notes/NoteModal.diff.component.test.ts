@@ -85,6 +85,7 @@ import {
   fakeResizeObserver,
   HUNK_KINDS,
   layOut,
+  pointerArrives,
   PREVIOUS_NOTE,
 } from './testStubs/noteDiffFixtures';
 import { runSearchShortcut } from '../keyboard/searchTargets';
@@ -238,7 +239,7 @@ describe('NoteModal change bar', () => {
   it('lights a change in the note while its marker is hovered', async () => {
     await open();
 
-    marker('modified').dispatchEvent(new MouseEvent('pointerenter'));
+    pointerArrives(marker('modified'));
     flushSync();
     expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
 
@@ -252,7 +253,7 @@ describe('NoteModal change bar', () => {
     const gaps = () => [...notePane().querySelectorAll<HTMLElement>('.note-diff-gap')];
     expect(gaps()).toEqual([]);
 
-    marker('removed').dispatchEvent(new MouseEvent('pointerenter'));
+    pointerArrives(marker('removed'));
     flushSync();
     expect(gaps().map((gap) => gap.dataset.kind)).toEqual(['removed']);
     expect(gaps()[0].classList.contains('is-active')).toBe(true);
@@ -507,6 +508,56 @@ describe('NoteModal previous version', () => {
     await pressEscape();
 
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('leaves nothing lit after Escape with the pointer on a marker of the previous version', async () => {
+    await open();
+    await press(marker('modified'));
+    const gaps = () => [...notePane().querySelectorAll<HTMLElement>('.note-diff-gap')];
+
+    // The removed paragraph's marker, beside the previous version.
+    pointerArrives(markersIn(previousPane()!)[0]);
+    flushSync();
+    expect(lit(previousPane()!)).toEqual(['Logs are kept for a week.']);
+
+    // The pane closes under the pointer, which never leaves the marker.
+    await pressEscape();
+
+    expect(previousPane()).toBeNull();
+    expect(lit(note())).toEqual([]);
+    expect(gaps()).toEqual([]);
+    expect(markers().filter((el) => el.classList.contains('is-pointed'))).toEqual([]);
+    expect(markers().map((el) => el.getAttribute('aria-pressed'))).toEqual([
+      'false',
+      'false',
+      'false',
+    ]);
+  });
+
+  it('leaves nothing lit after Escape with the pointer on a band between the versions', async () => {
+    await open();
+    await press(marker('modified'));
+    const pane = previousPane()!;
+    layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, 700);
+    layOut(
+      pane.querySelector('.markdown-content')!,
+      pane.querySelector<HTMLElement>('.previous-scroll')!,
+      700
+    );
+    resize();
+    await settle();
+    const gaps = () => [...notePane().querySelectorAll<HTMLElement>('.note-diff-gap')];
+
+    pointerArrives(connectors()[0].querySelector('.connector-fill')!);
+    flushSync();
+    expect(lit(pane)).toEqual(['Logs are kept for a week.']);
+
+    await pressEscape();
+
+    expect(previousPane()).toBeNull();
+    expect(lit(note())).toEqual([]);
+    expect(gaps()).toEqual([]);
+    expect(markers().filter((el) => el.classList.contains('is-pointed'))).toEqual([]);
   });
 
   it('closes only the search on Escape in the find field, and keeps the previous version', async () => {

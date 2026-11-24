@@ -377,6 +377,39 @@ export interface ThemeGitColors {
   modified: string | null;
 }
 
+/** The colors createAdaptiveTheme() is given for one mode of the app chrome. */
+export interface ChromeBaseColors {
+  bg: string;
+  fg: string;
+  comment: string;
+  gitColors: ThemeGitColors;
+}
+
+/**
+ * Base colors fed into createAdaptiveTheme() for the app chrome. The chrome
+ * does not derive from the user's chosen diff/syntax theme: it has exactly
+ * one fixed light and one fixed dark identity, selected by the resolved app
+ * mode (see `applyChromeTheme` in preferences.svelte.ts). They are here,
+ * beside the function they feed, so a test of the chrome's colours can use
+ * the real ones.
+ */
+export const CHROME_BASE_COLORS: Record<'dark' | 'light', ChromeBaseColors> = {
+  /** Dark chrome — sourced from the previous laserwave-derived app.css :root defaults. */
+  dark: {
+    bg: '#27212e',
+    fg: '#ffffff',
+    comment: '#91889b',
+    gitColors: { added: '#3fb950', deleted: '#f85149', modified: '#d29922' },
+  },
+  /** Light chrome — derived from a clean, legible light palette (github-light). */
+  light: {
+    bg: '#ffffff',
+    fg: '#24292e',
+    comment: '#6e7781',
+    gitColors: { added: '#28a745', deleted: '#d73a49', modified: '#2188ff' },
+  },
+};
+
 /**
  * Create an adaptive theme based on syntax theme colors.
  *

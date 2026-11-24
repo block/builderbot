@@ -164,6 +164,16 @@ describe('a note diff’s solid colours', () => {
     );
   });
 
+  it('give the halo to the marker whose change is lit, not to one the pointer is merely over', () => {
+    // A marker the text scrolled under a pointer at rest matches `:hover`,
+    // and its change is not lit (noteDiffPointer.ts).
+    const haloed = [...markers]
+      .filter(([, declarations]) => declarations.has('box-shadow'))
+      .map(([selector]) => selector);
+    expect(haloed).toEqual(['.note-change-marker.is-pointed']);
+    expect([...markers.keys()].filter((selector) => selector.includes(':hover'))).toEqual([]);
+  });
+
   it.each(ACCENTS.slice(0, 2))(
     'draw the gap line of text that was %s solid when pointed at, and in the tint otherwise',
     (kind, accent, faint) => {

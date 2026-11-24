@@ -2,6 +2,7 @@ import { createRawSnippet, flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import NotePreviousPane from './NotePreviousPane.svelte';
+import paneSource from './NotePreviousPane.svelte?raw';
 import {
   NOTE_DIFF_ACTIVE_ATTRIBUTE,
   NOTE_DIFF_ATTRIBUTE,
@@ -19,6 +20,7 @@ import {
   fakeResizeObserver,
   layOut,
   paintedText,
+  pointerArrives,
   PREVIOUS_NOTE,
 } from './testStubs/noteDiffFixtures';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
@@ -204,7 +206,7 @@ describe('NotePreviousPane', () => {
   it('lights a change from its marker here, and reports a press on it', () => {
     const { noteDiff, contentEl, onSelect } = render();
 
-    markers()[0].dispatchEvent(new MouseEvent('pointerenter'));
+    pointerArrives(markers()[0]);
     flushSync();
     expect(active(contentEl)).toEqual(['Logs are kept for a week.']);
 
@@ -496,10 +498,63 @@ describe('NotePreviousPane', () => {
     });
   });
 
+  it('holds the version in a box that scrolls sideways, with the markers and gap lines beside it', () => {
+    const { scrollEl, contentEl } = render();
+
+    const box = scrollEl.querySelector<HTMLElement>(':scope > .previous-content')!;
+    expect(box.contains(contentEl)).toBe(true);
+    // What marks the changes is placed in the scroll area, from its right
+    // edge: it is not in the box, and stays put when the version is scrolled
+    // sideways.
+    expect(box.querySelector('.note-change-bar, .note-diff-gap')).toBeNull();
+    expect(scrollEl.querySelectorAll(':scope > .note-change-bar')).toHaveLength(1);
+    expect(scrollEl.querySelectorAll(':scope > .note-diff-gap')).toHaveLength(1);
+
+    // jsdom lays nothing out, so the rules are read. The scroll area keeps
+    // its scrollbar on the left by being laid out right to left, which puts
+    // what runs past its right edge out of reach: it does not scroll
+    // sideways, and the box inside it, laid out left to right, does.
+    const css = /<style[^>]*>([\s\S]*)<\/style>/
+      .exec(paneSource)![1]
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    const rule = (selector: string) =>
+      new RegExp(`(?:^|})\\s*${selector.replace(/[.*>()]/g, '\\$&')}\\s*\\{([^}]*)\\}`).exec(
+        css
+      )?.[1] ?? '';
+    expect(rule('.previous-scroll')).toMatch(/direction:\s*rtl/);
+    expect(rule('.previous-scroll')).toMatch(/overflow-y:\s*auto/);
+    expect(rule('.previous-scroll')).toMatch(/overflow-x:\s*hidden/);
+    expect(rule('.previous-scroll > :global(*)')).toMatch(/direction:\s*ltr/);
+    expect(rule('.previous-content')).toMatch(/overflow-x:\s*auto/);
+  });
+
+  it('lets go of a change hovered at its marker here when the pane closes', () => {
+    const { noteDiff } = render();
+
+    pointerArrives(markers()[0]);
+    flushSync();
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
+    // The pane is taken down under the pointer: its marker is never left.
+    unmount(component!);
+    component = null;
+    expect(noteDiff.hoveredHunkId).toBeNull();
+  });
+
+  it('lets go of a change hovered at its band when the pane closes', () => {
+    const { noteDiff } = render();
+
+    pointerArrives(band(connector('removed')));
+    flushSync();
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
+    unmount(component!);
+    component = null;
+    expect(noteDiff.hoveredHunkId).toBeNull();
+  });
+
   it('lights a change in both panes from its band, and reports a press on it', () => {
     const { noteDiff, contentEl, onSelect } = render();
 
-    band(connector('removed')).dispatchEvent(new MouseEvent('pointerenter'));
+    pointerArrives(band(connector('removed')));
     flushSync();
     expect(noteDiff.pointedHunkId).toBe(noteDiff.hunks[0].id);
     expect(active(contentEl)).toEqual(['Logs are kept for a week.']);

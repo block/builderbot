@@ -24,8 +24,9 @@
   one that was pressed.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { NoteDiffHunk, NoteDiffSide } from './noteDiff';
-  import { RestingPointer } from './noteDiffPointer';
+  import { ChangeHover, RestingPointer } from './noteDiffPointer';
   import { hunkMarkerBox } from './noteDiffScroll';
   import type { NoteDiffState } from './noteDiffState.svelte';
 
@@ -51,6 +52,7 @@
   /** The width a scrollbar takes from the right of the scroll area's content, if one does. */
   let scrollbarWidth = $state(0);
   const pointer = new RestingPointer();
+  const hover = new ChangeHover();
 
   function markerLabel(hunk: NoteDiffHunk): string {
     const blocks = Math.max(hunk.previousIndices.length, hunk.currentIndices.length);
@@ -96,16 +98,30 @@
     if (markers.length > 0) return pointer.watch();
   });
 
+  // A marker that is no longer drawn was not left by the pointer or by
+  // focus: the previous version's, when its pane closes with the pointer on
+  // one. No `pointerleave` or `blur` comes for an element that is removed,
+  // so the hover it had is ended here.
+  $effect(() => {
+    const drawn = new Set(markers.map(({ hunk }) => hunk.id));
+    untrack(() => hover.keep(noteDiff, (hunkId) => drawn.has(hunkId)));
+  });
+
+  $effect(() => {
+    const state = noteDiff;
+    return () => hover.release(state);
+  });
+
   /**
    * The pointer is over a marker. Only one that moved there counts, not one
    * at rest that the text scrolled a marker under (noteDiffPointer.ts).
    */
   function pointerOver(event: PointerEvent, hunkId: string) {
-    if (pointer.hovers(event)) noteDiff.hover(hunkId);
+    if (pointer.hovers(event)) hover.enter(noteDiff, hunkId);
   }
 
   function unhover(hunkId: string) {
-    if (noteDiff.hoveredHunkId === hunkId) noteDiff.hover(null);
+    hover.leave(noteDiff, hunkId);
   }
 </script>
 
@@ -134,7 +150,7 @@
         onpointerenter={(event) => pointerOver(event, hunk.id)}
         onpointermove={(event) => pointerOver(event, hunk.id)}
         onpointerleave={() => unhover(hunk.id)}
-        onfocus={() => noteDiff.hover(hunk.id)}
+        onfocus={() => hover.enter(noteDiff, hunk.id)}
         onblur={() => unhover(hunk.id)}
         onclick={() => onSelect(hunk.id)}
       ></button>
@@ -185,7 +201,10 @@
      out over the page it muddies. The marker being pointed at gains a halo
      in a tint of the same colour, the one its blocks are lit with (for a
      modified change, the one its changed words are), kept to the 2px
-     between the marker and the scrollbar. */
+     between the marker and the scrollbar. The halo goes with the light: it
+     is not keyed on the pointer being over the marker, which is also true of
+     one the text scrolled under a pointer at rest, whose change is not
+     lit. */
   .note-change-marker[data-kind='added'] {
     --marker-color: var(--status-added);
     --marker-halo: var(--diff-added-bg-emphasis);
@@ -201,7 +220,6 @@
     --marker-halo: var(--diff-modified-inline-bg);
   }
 
-  .note-change-marker:hover,
   .note-change-marker.is-pointed {
     box-shadow: 0 0 0 2px var(--marker-halo);
   }

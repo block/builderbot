@@ -4131,11 +4131,16 @@
 
   /* ----- Content area (scrollable) --------------------------------------- */
 
+  /* A size container: rendered media is capped at a share of the
+     transcript's height (`cqh`, see mediaStyles.css), so it shrinks as the
+     composer or a short window takes room. Its height comes from the pane,
+     never from its content, so the containment changes nothing else. */
   .modal-content {
     order: -1;
     flex: 1;
     overflow-x: hidden;
     overflow-y: auto;
+    container-type: size;
     /* Keep scroll momentum inside the transcript so it doesn't chain to the
        page behind the keyboard-shrunk full-screen dialog. */
     overscroll-behavior: contain;

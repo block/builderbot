@@ -65,18 +65,29 @@
  * proportionally. A capped portrait recording would then be a narrow box, and
  * WebKit's inline controls drop the scrubber and time display as the box
  * narrows (on iOS, down to a lone play button). So the video's box, not its
- * picture, stays at least 320px wide, or the scroll area's width (`cqw`) if
- * that is narrower; a percentage here would be ignored while the fit-content
- * figure sizes itself. The picture is letterboxed inside with `scale-down`,
+ * picture, stays at least 320px wide, or as wide as the figure's container
+ * if that is narrower. The picture is letterboxed inside with `scale-down`,
  * which also keeps a clip smaller than that box at its own size rather than
  * stretching it.
+ *
+ * The floor sits on the figure, whose percentages resolve against its own
+ * container: the note's column, or a list item, blockquote or table cell
+ * that indents it. The video then fills the figure through `min-width:
+ * 100%`. A floor on the video itself can't see that container: a percentage
+ * there is ignored while the fit-content figure sizes itself (the figure
+ * would hug the narrow picture), and `cqw` measures the whole scroll area, so
+ * an indented video would overflow the figure and lose the right end of its
+ * controls to the clip.
  *
  * Full screen is uncapped already: the browser's own `:fullscreen` rules
  * override the sizes above with `!important`. They don't override
  * `object-fit`, so that goes back to filling the screen here.
  */
+.markdown-content .markdown-media-video {
+  min-width: min(320px, 100%);
+}
 .markdown-content .markdown-media video {
-  min-width: min(320px, 100cqw);
+  min-width: 100%;
   object-fit: scale-down;
 }
 .markdown-content .markdown-media video:fullscreen {

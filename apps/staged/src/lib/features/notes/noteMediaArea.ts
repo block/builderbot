@@ -13,11 +13,15 @@
  * reaches its maximum: the area now plus whatever the dialog can still grow.
  * That stays put as the media inside resizes, and still follows the window,
  * the header and bottom bar, and the chat pane pinning the dialog's height.
- * It is written to the scroll box as `--media-area-height`.
+ * It is measured inside the scroll box's padding, like `cqh`, and written to
+ * the scroll box as `--media-area-height`.
  */
 
 /** The custom property mediaStyles.css reads in place of `100cqh`. */
 export const MEDIA_AREA_PROPERTY = '--media-area-height';
+
+/** The selection dock's overlap NoteModal pads the scroll area's bottom by. */
+const DOCK_OVERLAP_PROPERTY = '--selection-dock-overlap';
 
 /**
  * The scroll area's height at the dialog's full height: its height now plus
@@ -34,12 +38,31 @@ export function noteMediaAreaHeight(
 }
 
 /**
+ * The scroll area's content height: `clientHeight` less its vertical
+ * padding, since `100cqh` in the other hosts measures the container's content
+ * box too and the same area should give the same cap in every host. `null`
+ * while the area is hidden (no height to measure) or while the selection
+ * dock pads its bottom (`--selection-dock-overlap`, see NoteModal): that
+ * padding comes and goes with a text selection, and following it would
+ * resize the note's media under the selection.
+ */
+function scrollAreaContentHeight(scrollArea: HTMLElement): number | null {
+  const height = scrollArea.clientHeight;
+  if (height === 0) return null;
+  const style = getComputedStyle(scrollArea);
+  if ((Number.parseFloat(style.getPropertyValue(DOCK_OVERLAP_PROPERTY)) || 0) > 0) return null;
+  const padding = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+  return Math.max(0, height - (Number.isFinite(padding) ? padding : 0));
+}
+
+/**
  * Keep `scrollArea`'s `--media-area-height` current while it is mounted in
  * `dialog`. Written once straight away, so the first paint is capped, then
  * on the next frame after either box or the window resizes (a write inside
  * the observer's own callback would resize what it observes in the same
  * frame). A hidden area (the phone's chat-only view) keeps its last value
- * rather than capping its media to nothing.
+ * rather than capping its media to nothing, and so does an area padded for
+ * the selection dock (see `scrollAreaContentHeight`).
  */
 export function trackNoteMediaArea(
   scrollArea: HTMLElement | null | undefined,
@@ -47,8 +70,8 @@ export function trackNoteMediaArea(
 ): (() => void) | undefined {
   if (!scrollArea || !dialog || typeof ResizeObserver === 'undefined') return;
   const update = () => {
-    const height = scrollArea.clientHeight;
-    if (height === 0) return;
+    const height = scrollAreaContentHeight(scrollArea);
+    if (height === null) return;
     const maxHeight = Number.parseFloat(getComputedStyle(dialog).maxHeight);
     const area = noteMediaAreaHeight(
       height,

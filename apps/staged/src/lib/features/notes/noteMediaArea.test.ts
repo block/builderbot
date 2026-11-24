@@ -26,7 +26,14 @@ describe('noteMediaAreaHeight', () => {
 });
 
 describe('trackNoteMediaArea', () => {
-  type Box = { clientHeight: number; offsetHeight: number; maxHeight: string };
+  type Box = {
+    clientHeight: number;
+    offsetHeight: number;
+    maxHeight: string;
+    paddingTop: string;
+    paddingBottom: string;
+    dockOverlap: string;
+  };
   let observers: { callback: () => void; targets: unknown[]; disconnected: boolean }[];
   let frames: (() => void)[];
   let resizeListeners: Set<() => void>;
@@ -37,6 +44,9 @@ describe('trackNoteMediaArea', () => {
       clientHeight: 0,
       offsetHeight: 0,
       maxHeight: 'none',
+      paddingTop: '0px',
+      paddingBottom: '0px',
+      dockOverlap: '',
       ...box,
       style: {
         setProperty: (name: string, value: string) => properties.set(name, value),
@@ -75,7 +85,13 @@ describe('trackNoteMediaArea', () => {
     );
     vi.stubGlobal('requestAnimationFrame', (frame: () => void) => frames.push(frame));
     vi.stubGlobal('cancelAnimationFrame', () => (frames = []));
-    vi.stubGlobal('getComputedStyle', (el: Fake) => ({ maxHeight: el.maxHeight }));
+    vi.stubGlobal('getComputedStyle', (el: Fake) => ({
+      maxHeight: el.maxHeight,
+      paddingTop: el.paddingTop,
+      paddingBottom: el.paddingBottom,
+      getPropertyValue: (name: string) =>
+        name === '--selection-dock-overlap' ? el.dockOverlap : '',
+    }));
     vi.stubGlobal('window', {
       addEventListener: (_: string, listener: () => void) => resizeListeners.add(listener),
       removeEventListener: (_: string, listener: () => void) => resizeListeners.delete(listener),
@@ -116,6 +132,36 @@ describe('trackNoteMediaArea', () => {
     observers[0].callback();
     runFrames();
     expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('480px');
+  });
+
+  it('measures inside the area padding, as cqh does', () => {
+    // 24px of padding each side, 34px more at the bottom for a safe area.
+    const area = element({ clientHeight: 400, paddingTop: '24px', paddingBottom: '58px' });
+    const dialog = element({ offsetHeight: 600 });
+    track(area, dialog);
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('318px');
+  });
+
+  it('keeps the last height while the selection dock pads the area', () => {
+    const area = element({ clientHeight: 400, paddingTop: '24px', paddingBottom: '24px' });
+    const dialog = element({ offsetHeight: 600 });
+    track(area, dialog);
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('352px');
+
+    // A selection brings up the dock and 40px more padding: media keeps its size.
+    area.paddingBottom = '64px';
+    area.dockOverlap = '40px';
+    observers[0].callback();
+    runFrames();
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('352px');
+
+    // The window shrinks once the dock is gone again.
+    area.paddingBottom = '24px';
+    area.dockOverlap = '0px';
+    area.clientHeight = 300;
+    observers[0].callback();
+    runFrames();
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('252px');
   });
 
   it('keeps the last height while the area is hidden', () => {

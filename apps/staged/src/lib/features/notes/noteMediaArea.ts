@@ -23,6 +23,14 @@ export const MEDIA_AREA_PROPERTY = '--media-area-height';
 /** The selection dock's overlap NoteModal pads the scroll area's bottom by. */
 const DOCK_OVERLAP_PROPERTY = '--selection-dock-overlap';
 
+/** A running `trackNoteMediaArea`. */
+export interface NoteMediaAreaTracker {
+  /** Measure again on the next frame if a measurement was skipped. */
+  refresh: () => void;
+  /** Stop tracking and clear `--media-area-height`. */
+  stop: () => void;
+}
+
 /**
  * The scroll area's height at the dialog's full height: its height now plus
  * the room the dialog still has under its `max-height` (`null` for none, as
@@ -63,14 +71,23 @@ function scrollAreaContentHeight(scrollArea: HTMLElement): number | null {
  * frame). A hidden area (the phone's chat-only view) keeps its last value
  * rather than capping its media to nothing, and so does an area padded for
  * the selection dock (see `scrollAreaContentHeight`).
+ *
+ * A measurement skipped that way is owed, not dropped: `refresh()` takes it
+ * on the next frame. Call it once the dock's overlap is back to 0. The dock
+ * leaving doesn't always resize a box (in a full-screen dialog its overlap
+ * can sit inside the safe-area padding), so a resize of the window or the
+ * dialog while it showed would otherwise go unmeasured until the next one.
+ * `refresh()` does nothing while no measurement is owed.
  */
 export function trackNoteMediaArea(
   scrollArea: HTMLElement | null | undefined,
   dialog: HTMLElement | null | undefined
-): (() => void) | undefined {
+): NoteMediaAreaTracker | undefined {
   if (!scrollArea || !dialog || typeof ResizeObserver === 'undefined') return;
+  let skipped = false;
   const update = () => {
     const height = scrollAreaContentHeight(scrollArea);
+    skipped = height === null;
     if (height === null) return;
     const maxHeight = Number.parseFloat(getComputedStyle(dialog).maxHeight);
     const area = noteMediaAreaHeight(
@@ -93,10 +110,15 @@ export function trackNoteMediaArea(
   observer.observe(scrollArea);
   observer.observe(dialog);
   window.addEventListener('resize', schedule);
-  return () => {
-    if (frame) cancelAnimationFrame(frame);
-    observer.disconnect();
-    window.removeEventListener('resize', schedule);
-    scrollArea.style.removeProperty(MEDIA_AREA_PROPERTY);
+  return {
+    refresh: () => {
+      if (skipped) schedule();
+    },
+    stop: () => {
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener('resize', schedule);
+      scrollArea.style.removeProperty(MEDIA_AREA_PROPERTY);
+    },
   };
 }

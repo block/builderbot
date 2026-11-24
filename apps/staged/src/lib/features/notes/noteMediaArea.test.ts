@@ -164,6 +164,38 @@ describe('trackNoteMediaArea', () => {
     expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('252px');
   });
 
+  it('measures once the dock leaves, even if no box resizes', () => {
+    // A full-screen dialog: the dock's overlap fits inside the 34px safe-area
+    // padding, so the dock coming and going changes no box.
+    const area = element({ clientHeight: 400, paddingTop: '24px', paddingBottom: '58px' });
+    const dialog = element({ offsetHeight: 600 });
+    const tracker = track(area, dialog);
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('318px');
+
+    // Nothing is owed yet, so a refresh measures nothing.
+    tracker?.refresh();
+    expect(frames).toHaveLength(0);
+
+    // The window shrinks while the dock shows: that measurement is skipped.
+    area.dockOverlap = '20px';
+    area.clientHeight = 300;
+    for (const listener of resizeListeners) listener();
+    runFrames();
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('318px');
+
+    // The dock leaves without resizing anything; the refresh takes the
+    // skipped measurement on the next frame.
+    area.dockOverlap = '0px';
+    tracker?.refresh();
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('318px');
+    runFrames();
+    expect(area.properties.get(MEDIA_AREA_PROPERTY)).toBe('218px');
+
+    // Then it is up to date again.
+    tracker?.refresh();
+    expect(frames).toHaveLength(0);
+  });
+
   it('keeps the last height while the area is hidden', () => {
     const area = element({ clientHeight: 500 });
     const dialog = element({ offsetHeight: 600 });
@@ -177,8 +209,7 @@ describe('trackNoteMediaArea', () => {
   it('stops and clears the height on cleanup', () => {
     const area = element({ clientHeight: 500 });
     const dialog = element({ offsetHeight: 600 });
-    const stop = track(area, dialog);
-    stop?.();
+    track(area, dialog)?.stop();
     expect(observers[0].disconnected).toBe(true);
     expect(resizeListeners.size).toBe(0);
     expect(area.properties.has(MEDIA_AREA_PROPERTY)).toBe(false);

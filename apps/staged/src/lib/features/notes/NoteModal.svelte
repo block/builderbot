@@ -76,7 +76,7 @@
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
   import { scrollRangeEndIntoView } from './noteSelection';
-  import { trackNoteMediaArea } from './noteMediaArea';
+  import { trackNoteMediaArea, type NoteMediaAreaTracker } from './noteMediaArea';
   import '../../shared/markdown/diagramStyles.css';
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
   import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
@@ -437,8 +437,23 @@
   });
   // The note's media is capped at a share of its scroll area's height
   // (mediaStyles.css), which this dialog's content-sized layout can't offer
-  // as a size container; see noteMediaArea.ts.
-  $effect(() => trackNoteMediaArea(contentEl, dialogEl));
+  // as a size container; see noteMediaArea.ts. The tracker skips measuring
+  // while the selection dock pads the area, so it is told when the dock's
+  // overlap is back to 0 to take any measurement it owes. That is a separate
+  // effect: re-creating the tracker on `dockOverlap` would clear the height
+  // and leave the media on the fallback cap while the dock shows.
+  let mediaArea: NoteMediaAreaTracker | undefined;
+  $effect(() => {
+    const tracker = trackNoteMediaArea(contentEl, dialogEl);
+    mediaArea = tracker;
+    return () => {
+      tracker?.stop();
+      if (mediaArea === tracker) mediaArea = undefined;
+    };
+  });
+  $effect(() => {
+    if (dockOverlap === 0) mediaArea?.refresh();
+  });
   let unregisterSearchTarget: (() => void) | null = null;
 
   // Register the global search-shortcut target only while the visible note pane can be searched.

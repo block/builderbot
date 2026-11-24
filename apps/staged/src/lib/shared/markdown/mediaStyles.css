@@ -81,7 +81,10 @@
  *
  * Full screen is uncapped already: the browser's own `:fullscreen` rules
  * override the sizes above with `!important`. They don't override
- * `object-fit`, so that goes back to filling the screen here.
+ * `object-fit`, so that goes back to filling the screen here. This only
+ * concerns element full screen: iOS's native player (`webkitEnterFullscreen`)
+ * never matches `:fullscreen` and ignores page CSS, so there is nothing to
+ * fix for it here.
  */
 .markdown-content .markdown-media-video {
   min-width: min(320px, 100%);

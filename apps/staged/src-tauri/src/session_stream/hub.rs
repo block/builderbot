@@ -1,5 +1,12 @@
-//! The hub: who is subscribed to what, what each of them is still owed, and
-//! the loop that turns marks on the session feed into frames.
+//! The hub: who is subscribed to what, and the loop that turns marks on the
+//! session feed into frames.
+//!
+//! What a client is owed of one session, and what goes in the frame that
+//! pays it, is each level's own business: `summary.rs` for the title and
+//! summary levels, `full.rs` for the full level. A session a client holds
+//! both ways has an entry in each, served side by side. The hub hands both
+//! the marks, asks them when a frame is due, does the reads and the sends,
+//! and numbers the frames.
 //!
 //! All of it is in memory. The hub task is the only reader of the feed and
 //! the only sender on any sink, so for one client a frame is always built
@@ -10,7 +17,7 @@
 //! The feed holds this process's writes only. What the hub does about
 //! another process's is in `watch.rs`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -19,19 +26,23 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::store::{SessionDirty, SessionFeed, SessionSummary, Store, SummaryRowsQuery};
+use crate::store::{
+    SessionDirty, SessionFeed, SessionFull, SessionPollRequest, SessionSummary, Store,
+};
 
 use super::frames::{
     SessionStreamFrame, SessionStreamFrameKind, SessionStreamInterest, SessionStreamLevel,
 };
-use super::watch::{self, Watch, FOREIGN_CHECK};
+use super::watch::FOREIGN_CHECK;
+use super::{full, summary};
 
 /// How long a change waits before it is read, so the rest of its burst is
 /// read with it.
 pub(super) const GATHER: Duration = Duration::from_millis(30);
 
 /// The least time between a frame and the next delta for one session to one
-/// client, at either level.
+/// client, at the title and summary levels. The full level has its own
+/// (`full::FULL_INTERVAL`).
 pub(super) const SUMMARY_INTERVAL: Duration = Duration::from_millis(300);
 
 /// How soon a client whose sink had no room is tried again.
@@ -106,113 +117,57 @@ struct Client {
     summary_window: u32,
     /// The sequence number of the last frame sent in this generation.
     seq: u64,
-    sessions: HashMap<String, Tracked>,
+    /// The sessions wanted at the title or summary level.
+    sessions: HashMap<String, summary::Tracked>,
+    /// The sessions wanted at the full level. One can be in both maps.
+    full: HashMap<String, full::Tracked>,
 }
 
-/// One session one client wants, and what it is still owed.
-struct Tracked {
-    /// `Title` or `Summary`.
-    level: SessionStreamLevel,
-    /// Changes whenever an interest call makes or alters this entry, so a
-    /// frame planned for the entry as it was is not sent for what it became.
-    revision: u64,
-    /// The next frame is a snapshot: none has been sent yet, or the one that
-    /// was due found no row to read.
-    needs_snapshot: bool,
-    /// From when what is owed may be sent, before the cadence is applied.
-    /// `None` when nothing is owed.
-    ready_at: Option<Instant>,
-    /// Rows written since the last frame. Not kept while a snapshot is owed:
-    /// the snapshot reads the newest rows whichever they are.
-    rows: BTreeSet<i64>,
-    last_sent: Option<Instant>,
-    /// The session fields of the last frame, as a fingerprint. A delta that
-    /// would repeat them and carry no row is not sent: most writes to a
-    /// session row touch fields this level does not carry.
-    sent_fields: Option<u64>,
-    /// The opening prompt's id once a read has found it, so later reads skip
-    /// the lookup.
-    opening_prompt_id: Option<i64>,
-    /// Whether another process may write the session, and the rows the
-    /// client holds, for finding what such a write changed.
-    watch: Watch,
-}
-
-impl Tracked {
-    fn new(level: SessionStreamLevel, revision: u64, ready_at: Option<Instant>) -> Self {
-        Self {
-            level,
-            revision,
-            needs_snapshot: true,
-            ready_at,
-            rows: BTreeSet::new(),
-            last_sent: None,
-            sent_fields: None,
-            opening_prompt_id: None,
-            watch: Watch::default(),
-        }
+impl Client {
+    fn wants_nothing(&self) -> bool {
+        self.sessions.is_empty() && self.full.is_empty()
     }
 
-    /// Take a drained mark. Queue and metadata marks belong to the full
-    /// level, and row marks do not reach the title level.
-    fn mark(&mut self, dirty: &SessionDirty, now: Instant) {
-        let rows_matter = self.level == SessionStreamLevel::Summary && !dirty.rows.is_empty();
-        if !dirty.session && !rows_matter {
-            return;
+    /// Number the next frame and address it.
+    fn frame(
+        &mut self,
+        client_id: &str,
+        session_id: &str,
+        kind: SessionStreamFrameKind,
+        summary: Option<SessionSummary>,
+        full: Option<SessionFull>,
+    ) -> Outgoing {
+        self.seq += 1;
+        Outgoing {
+            sink: Arc::clone(&self.sink),
+            client_id: client_id.to_owned(),
+            connection: self.connection,
+            frame: SessionStreamFrame {
+                // Set by the interest call that made the entry.
+                generation: self.generation.unwrap_or_default(),
+                seq: self.seq,
+                session_id: session_id.to_owned(),
+                kind,
+                summary,
+                full,
+            },
         }
-        if self.needs_snapshot {
-            // A snapshot that found no row waits for a write like this one.
-            self.ready_at.get_or_insert(now);
-            return;
-        }
-        if rows_matter {
-            self.rows.extend(&dirty.rows);
-        }
-        self.ready_at.get_or_insert(now + GATHER);
-    }
-
-    /// Another process has committed since the session was read: read it
-    /// again. `data_version` cannot say which rows, so the read is of the
-    /// newest ones, as for a snapshot.
-    fn written_elsewhere(&mut self, now: Instant) {
-        if !self.needs_snapshot {
-            self.watch.ask_refresh();
-        }
-        self.ready_at.get_or_insert(now);
-    }
-
-    fn due_at(&self) -> Option<Instant> {
-        let ready = self.ready_at?;
-        Some(match self.last_sent {
-            Some(sent) if !self.needs_snapshot => ready.max(sent + SUMMARY_INTERVAL),
-            _ => ready,
-        })
     }
 }
 
-/// A frame the task has decided to build, with what it took out of the
-/// client's state to do so.
-struct Delivery {
+/// A frame on its way to a sink.
+struct Outgoing {
+    sink: Arc<dyn FrameSink>,
     client_id: String,
-    session_id: String,
-    revision: u64,
-    level: SessionStreamLevel,
-    snapshot: bool,
-    /// Not a snapshot, and still a read of the newest rows: another process
-    /// wrote the database, and the rows that differ from what the client
-    /// holds are sent.
-    refresh: bool,
-    /// Whether the session was this process's when the frame was planned.
-    ours: bool,
-    window: u32,
-    rows: BTreeSet<i64>,
-    opening_prompt_id: Option<i64>,
+    connection: u64,
+    frame: SessionStreamFrame,
 }
 
 /// What the task does next.
 struct Plan {
-    /// The frames that are due and have room in their sinks.
-    deliveries: Vec<Delivery>,
+    /// The frames that are due and have room in their sinks, by level.
+    summaries: Vec<summary::Delivery>,
+    fulls: Vec<full::Delivery>,
     /// The database's `data_version` is due a read.
     check_version: bool,
     /// When the next frame or version read falls due.
@@ -220,40 +175,33 @@ struct Plan {
 }
 
 impl Plan {
+    fn has_deliveries(&self) -> bool {
+        !self.summaries.is_empty() || !self.fulls.is_empty()
+    }
+
     /// Whether this round takes the database's `data_version`: a check is
-    /// due, or it reads a session another process may write, whose read is
-    /// tagged with the value. A round of this process's own sessions, which
-    /// is every round with one Staged running, does not.
+    /// due, or it does a read that is tagged with the value. Those are the
+    /// reads of a session another process may write, and every read at the
+    /// full level, where the session row of a session running here is
+    /// watched too. A round of this process's own sessions with no chat
+    /// open on them, which is most rounds with one Staged running, does not.
     fn wants_version(&self) -> bool {
-        self.check_version || self.deliveries.iter().any(|delivery| !delivery.ours)
+        self.check_version
+            || self.summaries.iter().any(|delivery| !delivery.ours)
+            || self.fulls.iter().any(full::Delivery::reads)
     }
 }
 
-/// One session's read for a round of deliveries, shared by every client that
-/// is owed a frame for it.
-struct SummaryRead {
-    session_id: String,
-    /// `None` when no delivery reads the transcript.
-    rows: Option<SummaryRowsQuery>,
-}
-
-enum Loaded {
-    Summary(Box<LoadedSummary>),
-    /// The session row does not exist, or there is no store to read.
-    Gone,
-    Failed,
-}
-
-/// A session that was read, with what the hub works out from it once for
-/// every client.
-struct LoadedSummary {
-    summary: SessionSummary,
-    title_fields: u64,
-    summary_fields: u64,
-    /// The fingerprint of each of `summary.rows`, in their order.
-    row_prints: Vec<u64>,
-    /// Whether this process is the one writing the session.
-    ours: bool,
+/// What one round read.
+#[derive(Default)]
+struct Round {
+    /// The database's `data_version` from before the reads, when the round
+    /// took it.
+    version: Option<i64>,
+    /// By session id.
+    summaries: HashMap<String, summary::Loaded>,
+    /// In the order of the reads, which each full delivery indexes.
+    fulls: Vec<full::Loaded>,
 }
 
 impl SessionStreamHub {
@@ -289,6 +237,7 @@ impl SessionStreamHub {
                 summary_window: 0,
                 seq: 0,
                 sessions: HashMap::new(),
+                full: HashMap::new(),
             },
         );
         self.sync_feed(&state);
@@ -307,19 +256,22 @@ impl SessionStreamHub {
 
     /// Replace a client's interest. Sessions it adds get a snapshot; a new
     /// generation, a new window or the end of a pause gives every session
-    /// one.
+    /// one, and so does a cursor at the full level.
     pub fn set_interest(
         &self,
         client_id: &str,
         interest: SessionStreamInterest,
     ) -> Result<(), String> {
         let mut wanted: BTreeMap<String, SessionStreamLevel> = BTreeMap::new();
+        let mut wanted_full: BTreeMap<String, Option<SessionPollRequest>> = BTreeMap::new();
         for session in interest.sessions {
             if session.level == SessionStreamLevel::Full {
-                return Err("The full level of the session stream is not served yet".to_string());
+                let cursor = wanted_full.entry(session.session_id).or_default();
+                *cursor = session.cursor.or(cursor.take());
+            } else {
+                let level = wanted.entry(session.session_id).or_insert(session.level);
+                *level = (*level).max(session.level);
             }
-            let level = wanted.entry(session.session_id).or_insert(session.level);
-            *level = (*level).max(session.level);
         }
         let now = Instant::now();
         {
@@ -338,14 +290,17 @@ impl SessionStreamHub {
                 .ok_or_else(|| format!("No session stream is open for client {client_id}"))?;
             let window = interest.summary_window.min(MAX_SUMMARY_WINDOW);
             let new_generation = client.generation != Some(interest.generation);
-            let restart = new_generation
-                || (client.paused && !interest.paused)
-                || client.summary_window != window;
+            let resumed = client.paused && !interest.paused;
             if new_generation {
                 client.seq = 0;
             }
             // A paused client is owed nothing until it asks again.
             let ready_at = (!interest.paused).then_some(now);
+            let mut revision = || {
+                *counter += 1;
+                *counter
+            };
+            let restart = new_generation || resumed || client.summary_window != window;
             let mut previous = std::mem::take(&mut client.sessions);
             for (session_id, level) in wanted {
                 let kept = if restart {
@@ -353,34 +308,46 @@ impl SessionStreamHub {
                 } else {
                     previous.remove(&session_id)
                 };
-                let mut revision = || {
-                    *counter += 1;
-                    *counter
-                };
                 let tracked = match kept {
-                    Some(tracked) if tracked.level == level => tracked,
-                    // Lowered to the title level: the rows are no longer
-                    // wanted, and whatever else is owed still is.
-                    Some(mut tracked) if tracked.level > level => {
-                        tracked.watch.forget_rows();
-                        Tracked {
-                            level,
-                            revision: revision(),
-                            rows: BTreeSet::new(),
-                            sent_fields: None,
-                            ..tracked
-                        }
-                    }
-                    _ => Tracked::new(level, revision(), ready_at),
+                    Some(tracked) if tracked.level() == level => tracked,
+                    // Lowered to the title level: the client already holds
+                    // more than that level sends.
+                    Some(tracked) if tracked.level() > level => tracked.lowered(level, revision()),
+                    _ => summary::Tracked::new(level, revision(), ready_at),
                 };
                 client.sessions.insert(session_id, tracked);
             }
+            // The summary window is not the full level's: only a new
+            // generation and the end of a pause start it over.
+            let restart = new_generation || resumed;
+            let mut previous = std::mem::take(&mut client.full);
+            for (session_id, cursor) in wanted_full {
+                let tracked = match (previous.remove(&session_id), cursor) {
+                    // Held already, and the client did not ask to be read
+                    // again: carry on with deltas.
+                    (Some(tracked), None) if !restart => tracked,
+                    // Held already, and read again from what the client
+                    // says it holds now.
+                    (Some(tracked), Some(cursor)) if !restart => {
+                        tracked.renewed(cursor, revision(), ready_at)
+                    }
+                    // A snapshot is owed, from the cursor given now or else
+                    // from the last one given.
+                    (kept, cursor) => {
+                        let cursor = cursor
+                            .or(kept.map(full::Tracked::into_cursor))
+                            .unwrap_or_default();
+                        full::Tracked::new(cursor, revision(), ready_at)
+                    }
+                };
+                client.full.insert(session_id, tracked);
+            }
             if interest.paused {
-                for tracked in client.sessions.values_mut() {
-                    tracked.ready_at = None;
-                    tracked.rows.clear();
-                    tracked.watch.cancel_refresh();
-                }
+                client
+                    .sessions
+                    .values_mut()
+                    .for_each(summary::Tracked::pause);
+                client.full.values_mut().for_each(full::Tracked::pause);
             }
             client.generation = Some(interest.generation);
             client.paused = interest.paused;
@@ -409,7 +376,7 @@ impl SessionStreamHub {
         let wanted = state
             .clients
             .values()
-            .any(|client| !client.paused && !client.sessions.is_empty());
+            .any(|client| !client.paused && !client.wants_nothing());
         if self.feed.is_active() != wanted {
             self.feed.set_active(wanted);
         }
@@ -436,64 +403,77 @@ impl SessionStreamHub {
     /// the database's `data_version` is due a read, and when the next thing
     /// falls due.
     fn plan(&self, marks: &HashMap<String, SessionDirty>, now: Instant) -> Plan {
+        /// One client's entry for a session, at one level or the other.
+        enum Due<'a> {
+            Summary(&'a mut summary::Tracked),
+            Full(&'a mut full::Tracked),
+        }
         let mut state = self.lock();
         let HubState {
             clients, watch_at, ..
         } = &mut *state;
-        let mut deliveries = Vec::new();
-        let mut next: Option<Instant> = None;
+        let mut plan = Plan {
+            summaries: Vec::new(),
+            fulls: Vec::new(),
+            check_version: false,
+            next: None,
+        };
         let mut watching = false;
         for (client_id, client) in clients.iter_mut() {
             if client.paused {
                 continue;
             }
-            watching |= client
-                .sessions
-                .values()
-                .any(|tracked| !tracked.watch.is_ours());
+            // At the full level every session is watched, whoever runs it.
+            watching |= !client.full.is_empty()
+                || client.sessions.values().any(|tracked| !tracked.is_ours());
             for (session_id, dirty) in marks {
                 if let Some(tracked) = client.sessions.get_mut(session_id) {
                     tracked.mark(dirty, now);
                 }
+                if let Some(tracked) = client.full.get_mut(session_id) {
+                    tracked.mark(dirty, now);
+                }
             }
+            let summaries = client
+                .sessions
+                .iter_mut()
+                .map(|(id, tracked)| (tracked.due_at(), id, Due::Summary(tracked)));
+            let fulls = client
+                .full
+                .iter_mut()
+                .map(|(id, tracked)| (tracked.due_at(), id, Due::Full(tracked)));
             let mut due = Vec::new();
-            for (session_id, tracked) in client.sessions.iter_mut() {
-                match tracked.due_at() {
-                    Some(at) if at <= now => due.push((at, session_id, tracked)),
-                    Some(at) => earliest(&mut next, at),
+            for (at, session_id, entry) in summaries.chain(fulls) {
+                match at {
+                    Some(at) if at <= now => due.push((at, session_id, entry)),
+                    Some(at) => earliest(&mut plan.next, at),
                     None => {}
                 }
             }
             // Longest owed first, so a sink short of room starves nobody.
             due.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
             let mut room = client.sink.room();
-            for (_, session_id, tracked) in due {
+            for (_, session_id, entry) in due {
                 if room == 0 {
                     // What is owed stays owed and keeps coalescing.
-                    earliest(&mut next, now + SINK_RETRY);
+                    earliest(&mut plan.next, now + SINK_RETRY);
                     break;
                 }
                 room -= 1;
-                tracked.ready_at = None;
-                let refresh = tracked.watch.take_refresh();
-                deliveries.push(Delivery {
-                    client_id: client_id.clone(),
-                    session_id: session_id.clone(),
-                    revision: tracked.revision,
-                    level: tracked.level,
-                    snapshot: tracked.needs_snapshot,
-                    refresh: refresh && !tracked.needs_snapshot,
-                    ours: tracked.watch.is_ours(),
-                    window: client.summary_window,
-                    rows: std::mem::take(&mut tracked.rows),
-                    opening_prompt_id: tracked.opening_prompt_id,
-                });
+                match entry {
+                    Due::Summary(tracked) => plan.summaries.push(tracked.take(
+                        client_id,
+                        session_id,
+                        client.summary_window,
+                    )),
+                    Due::Full(tracked) => plan.fulls.push(tracked.take(client_id, session_id, now)),
+                }
             }
         }
         // The first read of the version comes a whole interval after the
         // watch starts: the read that made a session watched took the value
         // itself.
-        let check_version = match *watch_at {
+        plan.check_version = match *watch_at {
             _ if !watching => {
                 *watch_at = None;
                 false
@@ -503,168 +483,86 @@ impl SessionStreamHub {
                 true
             }
             Some(at) => {
-                earliest(&mut next, at);
+                earliest(&mut plan.next, at);
                 false
             }
             None => {
                 *watch_at = Some(now + FOREIGN_CHECK);
-                earliest(&mut next, now + FOREIGN_CHECK);
+                earliest(&mut plan.next, now + FOREIGN_CHECK);
                 false
             }
         };
-        Plan {
-            deliveries,
-            check_version,
-            next,
-        }
+        plan
     }
 
     /// Build the planned frames from what was read and send them.
     ///
-    /// `version` is the database's `data_version` from before the reads,
-    /// when the round took it. Every session another process may have
-    /// written since its own last read is then put down for a re-read.
-    fn deliver(
-        &self,
-        deliveries: Vec<Delivery>,
-        loaded: &HashMap<String, Loaded>,
-        version: Option<i64>,
-        now: Instant,
-    ) {
+    /// When the round took the database's `data_version`, every session
+    /// another process may have written since its own last read is then put
+    /// down for a re-read.
+    fn deliver(&self, plan: Plan, round: &Round, now: Instant) {
+        let version = round.version;
         let mut outbox = Vec::new();
         {
             let mut state = self.lock();
-            for delivery in deliveries {
-                let Some(client) = state.clients.get_mut(&delivery.client_id) else {
+            for delivery in &plan.summaries {
+                let client = state.clients.get_mut(&delivery.client_id);
+                let Some(client) = client.filter(|client| !client.paused) else {
                     continue;
                 };
-                if client.paused {
-                    continue;
-                }
                 let Some(tracked) = client.sessions.get_mut(&delivery.session_id) else {
                     continue;
                 };
-                if tracked.revision != delivery.revision {
-                    // The interest changed this entry while the read ran.
-                    // What was taken out for the frame is covered by a
-                    // snapshot of the entry as it is now.
-                    tracked.needs_snapshot = true;
-                    tracked.ready_at.get_or_insert(now);
-                    continue;
+                let loaded = round.summaries.get(&delivery.session_id);
+                if let Some((kind, summary)) = tracked.deliver(delivery, loaded, version, now) {
+                    outbox.push(client.frame(
+                        &delivery.client_id,
+                        &delivery.session_id,
+                        kind,
+                        Some(summary),
+                        None,
+                    ));
                 }
-                let Some(Loaded::Summary(read)) = loaded.get(&delivery.session_id) else {
-                    // No row: a deleted session, or one not written yet.
-                    // Nothing is sent and nothing is retried; if the row is
-                    // ever written, that write brings a snapshot, whichever
-                    // process makes it. A read that failed is tried again.
-                    tracked.needs_snapshot = true;
-                    tracked.ready_at = match loaded.get(&delivery.session_id) {
-                        Some(Loaded::Failed) => Some(now + READ_RETRY),
-                        _ => None,
-                    };
-                    if let Some(Loaded::Gone) = loaded.get(&delivery.session_id) {
-                        tracked.watch.read(false, version);
-                    }
+            }
+            for delivery in &plan.fulls {
+                let client = state.clients.get_mut(&delivery.client_id);
+                let Some(client) = client.filter(|client| !client.paused) else {
                     continue;
                 };
-                let LoadedSummary {
-                    summary,
-                    title_fields,
-                    summary_fields,
-                    row_prints,
-                    ours,
-                } = &**read;
-                tracked.watch.read(*ours, version);
-                let opening_prompt_id = summary.opening_prompt_id.or(tracked.opening_prompt_id);
-                tracked.opening_prompt_id = opening_prompt_id;
-                let title_only = delivery.level == SessionStreamLevel::Title;
-                let fields = if title_only {
-                    *title_fields
-                } else {
-                    *summary_fields
-                };
-                // A read of the newest rows holds at least this client's
-                // window of them, and anything else it holds is older.
-                let window = delivery.window as usize;
-                let newest = summary.rows.len().saturating_sub(window);
-                let picked: Vec<usize> = if title_only {
-                    Vec::new()
-                } else if delivery.snapshot {
-                    (newest..summary.rows.len()).collect()
-                } else {
-                    // The rows this process marked, and after another
-                    // process's write the newest rows the client does not
-                    // hold as they are now.
-                    (0..summary.rows.len())
-                        .filter(|&index| {
-                            let id = summary.rows[index].id;
-                            delivery.rows.contains(&id)
-                                || (delivery.refresh
-                                    && index >= newest
-                                    && !tracked.watch.holds(id, row_prints[index]))
-                        })
-                        .collect()
-                };
-                if !delivery.snapshot && picked.is_empty() && tracked.sent_fields == Some(fields) {
+                let Some(tracked) = client.full.get_mut(&delivery.session_id) else {
                     continue;
-                }
-                if !title_only {
-                    tracked.watch.sent(
-                        delivery.snapshot,
-                        picked
-                            .iter()
-                            .map(|&index| (summary.rows[index].id, row_prints[index])),
-                        window,
-                    );
-                }
-                let rows = picked
-                    .into_iter()
-                    .map(|index| summary.rows[index].clone())
-                    .collect();
-                let frame_summary = SessionSummary {
-                    status: summary.status.clone(),
-                    acp_title: summary.acp_title.clone(),
-                    owner_pid: summary.owner_pid,
-                    working_dir: summary.working_dir.clone().filter(|_| !title_only),
-                    pipeline: summary.pipeline.clone().filter(|_| !title_only),
-                    opening_prompt_id: opening_prompt_id.filter(|_| !title_only),
-                    rows,
                 };
-                client.seq += 1;
-                tracked.needs_snapshot = false;
-                tracked.last_sent = Some(now);
-                tracked.sent_fields = Some(fields);
-                outbox.push((
-                    Arc::clone(&client.sink),
-                    delivery.client_id,
-                    client.connection,
-                    SessionStreamFrame {
-                        // Set by the interest call that made this entry.
-                        generation: client.generation.unwrap_or_default(),
-                        seq: client.seq,
-                        session_id: delivery.session_id,
-                        kind: if delivery.snapshot {
-                            SessionStreamFrameKind::Snapshot
-                        } else {
-                            SessionStreamFrameKind::Delta
-                        },
-                        summary: Some(frame_summary),
-                    },
-                ));
+                let loaded = delivery.read().and_then(|read| round.fulls.get(read));
+                if let Some((kind, full)) = tracked.deliver(delivery, loaded, version, now) {
+                    outbox.push(client.frame(
+                        &delivery.client_id,
+                        &delivery.session_id,
+                        kind,
+                        None,
+                        full,
+                    ));
+                }
             }
             if let Some(version) = version {
                 for client in state.clients.values_mut().filter(|client| !client.paused) {
                     for tracked in client.sessions.values_mut() {
-                        if tracked.watch.missed(version) {
-                            tracked.written_elsewhere(now);
-                        }
+                        tracked.check_version(version, now);
+                    }
+                    for tracked in client.full.values_mut() {
+                        tracked.check_version(version, now);
                     }
                 }
             }
         }
         // Sent without the lock: a frame can be large, and an interest call
         // must not wait behind its serialization.
-        for (sink, client_id, connection, frame) in outbox {
+        for Outgoing {
+            sink,
+            client_id,
+            connection,
+            frame,
+        } in outbox
+        {
             match sink.send(frame) {
                 Ok(()) => {}
                 Err(SinkError::Closed) => self.disconnect(&client_id, Some(connection)),
@@ -676,7 +574,7 @@ impl SessionStreamHub {
     }
 }
 
-fn earliest(next: &mut Option<Instant>, at: Instant) {
+pub(super) fn earliest(next: &mut Option<Instant>, at: Instant) {
     *next = Some(next.map_or(at, |current| current.min(at)));
 }
 
@@ -686,104 +584,37 @@ pub(super) fn fingerprint(fields: impl Hash) -> u64 {
     hasher.finish()
 }
 
-impl Loaded {
-    fn summary(summary: SessionSummary) -> Self {
-        let status = summary.status.as_str();
-        let pipeline = summary
-            .pipeline
-            .as_ref()
-            .and_then(|pipeline| serde_json::to_string(pipeline).ok());
-        Self::Summary(Box::new(LoadedSummary {
-            title_fields: fingerprint((status, &summary.acp_title)),
-            summary_fields: fingerprint((
-                status,
-                &summary.acp_title,
-                &summary.working_dir,
-                &pipeline,
-            )),
-            row_prints: summary.rows.iter().map(watch::row_print).collect(),
-            ours: watch::is_ours(&summary),
-            summary,
-        }))
-    }
-}
-
-/// One read per session for a round of deliveries: the widest snapshot
-/// window any client is owed, and every row any client is owed a delta of.
-fn reads_for(deliveries: &[Delivery]) -> Vec<SummaryRead> {
-    let mut reads: BTreeMap<&str, Option<SummaryRowsQuery>> = BTreeMap::new();
-    for delivery in deliveries {
-        let rows = reads.entry(delivery.session_id.as_str()).or_default();
-        let newest = delivery.snapshot || delivery.refresh;
-        if delivery.level != SessionStreamLevel::Summary || (!newest && delivery.rows.is_empty()) {
-            continue;
-        }
-        let query = rows.get_or_insert_with(SummaryRowsQuery::default);
-        if newest {
-            query.newest = query.newest.max(delivery.window);
-        }
-        if !delivery.snapshot {
-            query.ids.extend(&delivery.rows);
-        }
-        query.opening_prompt_id = query.opening_prompt_id.or(delivery.opening_prompt_id);
-    }
-    reads
-        .into_iter()
-        .map(|(session_id, rows)| SummaryRead {
-            session_id: session_id.to_owned(),
-            rows,
-        })
-        .collect()
-}
-
-/// Read the sessions on the blocking pool, each under its own hold of the
-/// store's connection, so a writer waits for one session's read at most.
+/// Do a round's reads on the blocking pool.
 ///
-/// With `version`, the database's `data_version` is taken first and
-/// returned. Taken before the reads, it can only be older than what they
-/// saw, so a commit that lands in between is caught by the next check and
-/// costs a repeated read, where the other order would lose it.
+/// With `version`, the database's `data_version` is taken first. Taken
+/// before the reads, it can only be older than what they saw, so a commit
+/// that lands in between is caught by the next check and costs a repeated
+/// read, where the other order would lose it.
 async fn load(
     store: Option<Arc<Store>>,
-    reads: Vec<SummaryRead>,
+    summaries: Vec<summary::SummaryRead>,
+    fulls: Vec<full::Read>,
     version: bool,
-) -> (Option<i64>, HashMap<String, Loaded>) {
+) -> Round {
     let Some(store) = store else {
-        return (None, HashMap::new());
+        return Round::default();
     };
-    let loaded = tokio::task::spawn_blocking(move || {
-        let version = version
+    let round = tokio::task::spawn_blocking(move || Round {
+        version: version
             .then(|| {
                 store
                     .data_version()
                     .map_err(|e| log::warn!("Session stream could not read the data version: {e}"))
                     .ok()
             })
-            .flatten();
-        let loaded = reads
-            .into_iter()
-            .map(|read| {
-                let loaded = match store.read_session_summary(&read.session_id, read.rows.as_ref())
-                {
-                    Ok(Some(summary)) => Loaded::summary(summary),
-                    Ok(None) => Loaded::Gone,
-                    Err(e) => {
-                        log::warn!(
-                            "Session stream could not read session {}: {e}",
-                            read.session_id
-                        );
-                        Loaded::Failed
-                    }
-                };
-                (read.session_id, loaded)
-            })
-            .collect();
-        (version, loaded)
+            .flatten(),
+        summaries: summary::load(&store, summaries),
+        fulls: full::load(&store, fulls),
     })
     .await;
-    loaded.unwrap_or_else(|e| {
+    round.unwrap_or_else(|e| {
         log::warn!("Session stream read did not finish: {e}");
-        (None, HashMap::new())
+        Round::default()
     })
 }
 
@@ -810,11 +641,16 @@ pub(super) async fn run(hub: Arc<SessionStreamHub>, store: impl Fn() -> Option<A
         // stand for. A write that lands in between is in the read too and
         // marks again, which costs one repeated row.
         let marks = hub.feed.drain();
-        let plan = hub.plan(&marks, Instant::now());
-        if !plan.deliveries.is_empty() || plan.check_version {
-            let version = plan.wants_version();
-            let (version, loaded) = load(store(), reads_for(&plan.deliveries), version).await;
-            hub.deliver(plan.deliveries, &loaded, version, Instant::now());
+        let mut plan = hub.plan(&marks, Instant::now());
+        if plan.has_deliveries() || plan.check_version {
+            let round = load(
+                store(),
+                summary::reads_for(&plan.summaries),
+                full::reads_for(&mut plan.fulls),
+                plan.wants_version(),
+            )
+            .await;
+            hub.deliver(plan, &round, Instant::now());
             continue;
         }
         let next = plan.next;

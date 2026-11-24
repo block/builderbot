@@ -8,6 +8,9 @@
 mod cadence;
 mod clients;
 mod foreign;
+mod full;
+mod full_cadence;
+mod full_foreign;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -16,7 +19,9 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::store::{MessageRole, Session, SessionFeed, SessionSummary, Store};
+use crate::store::{
+    MessageRole, Session, SessionFeed, SessionFull, SessionPollRequest, SessionSummary, Store,
+};
 
 use super::hub::{self, GATHER, SUMMARY_INTERVAL};
 use super::{
@@ -111,6 +116,14 @@ impl Harness {
         recorder
     }
 
+    /// Declare `sessions`, some of them at the full level, for `client_id`
+    /// in `generation`.
+    fn want_chats(&self, client_id: &str, generation: u64, sessions: Vec<SessionInterest>) {
+        self.hub
+            .set_interest(client_id, chats(generation, sessions))
+            .unwrap();
+    }
+
     /// Declare `sessions` for `client_id` in `generation`, unpaused, with
     /// the default window.
     fn want(&self, client_id: &str, generation: u64, sessions: &[(&Session, SessionStreamLevel)]) {
@@ -136,6 +149,7 @@ fn interest(generation: u64, sessions: &[(&Session, SessionStreamLevel)]) -> Ses
             .map(|(session, level)| SessionInterest {
                 session_id: session.id.clone(),
                 level: *level,
+                cursor: None,
             })
             .collect(),
     }
@@ -235,6 +249,47 @@ fn delta(seq: u64, session: &Session) -> Shape {
 
 fn summary(frame: &SessionStreamFrame) -> &SessionSummary {
     frame.summary.as_ref().expect("a frame carries a summary")
+}
+
+/// A session at the full level, with the cursor of what the client holds.
+fn chat(session: &Session, cursor: Option<SessionPollRequest>) -> SessionInterest {
+    SessionInterest {
+        session_id: session.id.clone(),
+        level: SessionStreamLevel::Full,
+        cursor,
+    }
+}
+
+/// The cursor of a client that holds nothing of a session.
+fn from_the_start() -> Option<SessionPollRequest> {
+    Some(SessionPollRequest::default())
+}
+
+/// An unpaused interest in exactly `sessions`.
+fn chats(generation: u64, sessions: Vec<SessionInterest>) -> SessionStreamInterest {
+    SessionStreamInterest {
+        generation,
+        paused: false,
+        summary_window: WINDOW,
+        sessions,
+    }
+}
+
+fn full(frame: &SessionStreamFrame) -> &SessionFull {
+    frame.full.as_ref().expect("a frame carries a full part")
+}
+
+/// The ids of a full frame's visible rows and of its metadata rows.
+fn full_ids(frame: &SessionStreamFrame) -> (Vec<i64>, Vec<i64>) {
+    let ids = |rows: &[crate::store::SessionMessage]| rows.iter().map(|row| row.id).collect();
+    (
+        ids(&full(frame).messages),
+        ids(&full(frame).acp_metadata_messages),
+    )
+}
+
+fn wire(value: &impl serde::Serialize) -> serde_json::Value {
+    serde_json::to_value(value).unwrap()
 }
 
 fn row_ids(frame: &SessionStreamFrame) -> Vec<i64> {

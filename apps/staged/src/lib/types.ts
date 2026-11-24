@@ -1028,13 +1028,16 @@ export interface SessionPoll {
 
 // ── Session stream ──────────────────────────────────────────────────────
 // What the backend pushes instead of being polled for it. These mirror
-// `session_stream/frames.rs` and `store/session_summary.rs`.
+// `session_stream/frames.rs`, `store/session_summary.rs` and
+// `store/session_full.rs`.
 
 /**
- * How much of a session a client asks the stream for. The backend also has a
- * `full` level (everything the chat view shows) and refuses an interest that
- * names it until it is served, so it is left out here: the type check then
- * keeps the frontend from asking.
+ * How much of a session a client asks the stream for. The backend also
+ * serves a `full` level (what the chat pane polls for, as `SessionFull`),
+ * asked for with a `cursor: SessionPollRequest` beside the level. Nothing
+ * consumes it yet, so the level and the cursor are left out of the interest
+ * types here: the type check then keeps the frontend from asking before the
+ * chat pane can take the frames.
  */
 export type SessionStreamLevel = 'title' | 'summary';
 
@@ -1085,6 +1088,26 @@ export interface SessionSummary {
   rows: SessionSummaryRow[];
 }
 
+/**
+ * What an open chat needs of a session: the parts of a `SessionPoll`, sent
+ * when they change. A snapshot holds all four, read from the cursor the
+ * client gave, and is merged as the poll with that cursor would be. A delta
+ * holds the parts that were written.
+ */
+export interface SessionFull {
+  /** Left out of a delta unless the session row changed. */
+  session?: Session;
+  /** The whole queue. Left out of a delta unless the queue was written. */
+  queuedMessages?: QueuedSessionMessage[];
+  /** Visible rows, in id order, to upsert by id. */
+  messages: SessionMessage[];
+  /**
+   * Metadata rows, in id order, to upsert by id. A delta includes the update
+   * that settles a tool call, which the poll's cursor would have filtered.
+   */
+  acpMetadataMessages: SessionMessage[];
+}
+
 /** One session's update for this client. */
 export interface SessionStreamFrame {
   generation: number;
@@ -1092,17 +1115,24 @@ export interface SessionStreamFrame {
   seq: number;
   sessionId: string;
   /**
-   * `snapshot`: the session's state, which replaces what the client holds.
+   * `snapshot`: the session's state, which replaces what the client holds
+   * (at the full level it is merged; see `SessionFull`).
    * `delta`: the current session fields and the current version of each
    * changed row, to upsert by id.
    * `resync`: another Staged process wrote the database and the backend
-   * cannot say which rows changed, so the client reads the session again.
-   * Only the full level is sent one, and that level is not served yet, so
-   * none arrives; it is counted in the sequence and otherwise ignored.
+   * cannot say which rows changed, so the client declares the session again
+   * with the cursor of what it holds and gets a snapshot from it. Only a
+   * session held at the full level is sent one, and nothing asks for that
+   * level yet, so none arrives; it is counted in the sequence and otherwise
+   * ignored.
    */
   kind: 'snapshot' | 'delta' | 'resync';
-  /** Left out of a `resync`. */
+  /**
+   * A frame is about one level: a snapshot or a delta carries `summary` (the
+   * title and summary levels) or `full`, never both, and a `resync` neither.
+   */
   summary?: SessionSummary;
+  full?: SessionFull;
 }
 
 /**

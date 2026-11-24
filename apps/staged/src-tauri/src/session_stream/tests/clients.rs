@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::store::{MessageRole, Session};
+use crate::store::{MessageRole, Session, SessionPollRequest};
 
 use super::super::hub::SINK_RETRY;
 use super::super::web::{web_queue, WEB_QUEUE_FRAMES};
@@ -243,7 +243,7 @@ async fn check_compares_the_last_sequence_number_sent() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn interest_is_refused_without_a_stream_and_at_the_full_level() {
+async fn interest_is_refused_without_a_stream() {
     let h = Harness::new();
     let session = h.session();
 
@@ -254,23 +254,16 @@ async fn interest_is_refused_without_a_stream_and_at_the_full_level() {
     assert!(err.contains("No session stream is open"), "{err}");
     assert!(!h.feed.is_active());
 
+    // And once it has one, at any level.
     let client = h.client("a");
-    h.want("a", 1, &[(&session, Summary)]);
+    h.want(
+        "a",
+        1,
+        &[(&session, Title), (&session, Summary), (&session, Full)],
+    );
     settle().await;
-    client.take();
-
-    let err = h
-        .hub
-        .set_interest("a", interest(2, &[(&session, Full)]))
-        .unwrap_err();
-    assert!(err.contains("full level"), "{err}");
-
-    // The refused call changed nothing: the interest before it still holds.
-    assert!(h.hub.check("a", 1, 1));
-    past_the_interval().await;
-    h.say(&session, MessageRole::Assistant, "still heard");
-    past_the_gather().await;
-    assert_eq!(shape(&client.take()), vec![delta(2, &session)]);
+    assert_eq!(client.take().len(), 2);
+    assert!(h.feed.is_active());
 }
 
 #[tokio::test(start_paused = true)]
@@ -456,6 +449,18 @@ fn an_interest_reads_from_the_wire_names_the_frontend_sends() {
             { "sessionId": "s-1", "level": "title" },
             { "sessionId": "s-2", "level": "summary" },
             { "sessionId": "s-3", "level": "full" },
+            {
+                "sessionId": "s-4",
+                "level": "full",
+                "cursor": {
+                    "sinceId": 41,
+                    "refetchIds": [38],
+                    "metadataSinceId": 40,
+                    "metadataRefetchIds": [39, 40],
+                },
+            },
+            // The lists of a cursor may be left out, as in a poll request.
+            { "sessionId": "s-5", "level": "full", "cursor": { "sinceId": 0, "metadataSinceId": 0 } },
         ],
     }))
     .unwrap();
@@ -470,6 +475,32 @@ fn an_interest_reads_from_the_wire_names_the_frontend_sends() {
         .collect();
     assert_eq!(
         levels,
-        vec![("s-1", Title), ("s-2", Summary), ("s-3", Full)]
+        vec![
+            ("s-1", Title),
+            ("s-2", Summary),
+            ("s-3", Full),
+            ("s-4", Full),
+            ("s-5", Full)
+        ]
+    );
+    let cursors: Vec<Option<&SessionPollRequest>> = interest
+        .sessions
+        .iter()
+        .map(|session| session.cursor.as_ref())
+        .collect();
+    assert_eq!(
+        cursors,
+        vec![
+            None,
+            None,
+            None,
+            Some(&SessionPollRequest {
+                since_id: 41,
+                refetch_ids: vec![38],
+                metadata_since_id: 40,
+                metadata_refetch_ids: vec![39, 40],
+            }),
+            Some(&SessionPollRequest::default()),
+        ]
     );
 }

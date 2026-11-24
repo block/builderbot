@@ -150,8 +150,20 @@ fn defer_body(body: &mut Option<Value>, message_id: i64, field: ToolBodyField, m
     *body = Some(Value::Object(wrapper));
 }
 
+/// The serialized size of a tool row the message writer may still rewrite in
+/// place, and `None` for any other row. Such a row ships whole each time it
+/// is read, bodies included, until its status is terminal; the session
+/// stream spaces out the copies of a large one.
+pub fn in_flight_tool_row_len(message: &SessionMessage) -> Option<usize> {
+    let in_flight = matches!(
+        message.acp.acp_event_kind.as_deref(),
+        Some("tool_call" | "tool_call_update")
+    ) && !is_settled_tool_status(message.acp.acp_tool_status.as_deref());
+    in_flight.then(|| serialized_len(message))
+}
+
 /// Bytes `serde_json` would write for the value, without buffering them.
-fn serialized_len(value: &Value) -> usize {
+fn serialized_len(value: &impl Serialize) -> usize {
     struct Count(usize);
     impl io::Write for Count {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -163,7 +175,8 @@ fn serialized_len(value: &Value) -> usize {
         }
     }
     let mut count = Count(0);
-    // Serializing a `Value` cannot fail; a failure would only under-count.
+    // Serializing a `Value` or a row cannot fail; a failure would only
+    // under-count.
     let _ = serde_json::to_writer(&mut count, value);
     count.0
 }

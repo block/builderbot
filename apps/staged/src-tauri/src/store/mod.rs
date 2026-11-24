@@ -38,6 +38,7 @@ pub mod repo_affinities;
 pub mod repo_badges;
 mod reviews;
 mod session_feed;
+mod session_full;
 mod session_poll;
 mod session_summary;
 mod session_titles;
@@ -59,6 +60,8 @@ mod session_feed_tests;
 #[cfg(test)]
 mod session_feed_writer_tests;
 #[cfg(test)]
+mod session_full_tests;
+#[cfg(test)]
 mod session_summary_tests;
 #[cfg(test)]
 mod tags_tests;
@@ -77,6 +80,7 @@ pub use project_search::{ProjectSearchItem, ProjectSearchItemKind};
 pub use project_transfer::{BranchLanding, BranchTransfer, ProjectTransfer};
 pub use repo_badges::{fallback_short_name, next_hue};
 pub use session_feed::{SessionDirty, SessionFeed};
+pub use session_full::SessionFull;
 pub use session_poll::{SessionPoll, SessionPollRequest};
 pub use session_summary::{SessionSummary, SummaryRow, SummaryRowsQuery};
 pub use session_titles::{
@@ -89,7 +93,9 @@ pub use tag_import::{
     LEGACY_DEFAULT_STATUSES, LEGACY_STATUS_GROUP_ID, LEGACY_STATUS_OPTIONS_KEY,
 };
 pub use tags::{DeleteTagGroupMode, NewTag, ProjectTag, Tag, TagColor, TagGroup, TagState};
-pub use tool_bodies::{ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES};
+pub use tool_bodies::{
+    in_flight_tool_row_len, ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES,
+};
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 
 use rusqlite::{Connection, OptionalExtension};

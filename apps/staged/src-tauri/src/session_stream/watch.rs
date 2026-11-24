@@ -23,16 +23,27 @@
 //! second, and an unwatched one that another process writes would show
 //! stale state until this process next wrote it.
 //!
-//! One gap is left. Another instance can still write the *session row* of a
-//! session running here: its Stop ends a `running` row it has no runner for.
-//! That write is not seen until this process next writes the session, when
-//! the frame for that write carries the row's current fields.
+//! One gap is left at the title and summary levels. Another instance can
+//! still write the *session row* of a session running here: its Stop ends a
+//! `running` row it has no runner for. That write is not seen until this
+//! process next writes the session, when the frame for that write carries
+//! the row's current fields. The full level does see it, within a second
+//! (`full.rs`): there the version is read for a session running here too,
+//! and a change has the session row read again.
 //!
 //! **What a re-read sends.** `data_version` says that something was written,
 //! not what, so the session's newest rows are read as for a snapshot and
 //! compared with what the client was last sent, row by row, as fingerprints.
 //! Only the rows that differ go out, as a delta. A commit to some other
-//! session costs the read and sends nothing.
+//! session costs the read and sends nothing. That is for the summary level;
+//! at the full level the rows a client holds are too many to compare, and it
+//! is asked to read the session again (`full.rs`).
+//!
+//! **Which reads are tagged.** A read is tagged with the version taken
+//! before it only when it covered everything of the session that the level
+//! sends. A delta of the rows this process marked did not: tagged, it would
+//! claim the session was current as of that version and hide a row another
+//! process wrote just before.
 //!
 //! With one Staged process the value never changes, so the cost is the
 //! pragma: about a microsecond a second, and only while such a session is
@@ -41,7 +52,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::store::{SessionStatus, SessionSummary, SummaryRow};
+use crate::store::{SessionStatus, SummaryRow};
 
 use super::hub::fingerprint;
 
@@ -51,8 +62,8 @@ pub(super) const FOREIGN_CHECK: Duration = Duration::from_secs(1);
 
 /// Whether every write to the session's transcript goes through this
 /// process's store. See the module docs for why nothing else counts.
-pub(super) fn is_ours(summary: &SessionSummary) -> bool {
-    summary.status == SessionStatus::Running && summary.owner_pid == Some(std::process::id())
+pub(super) fn is_ours(status: &SessionStatus, owner_pid: Option<u32>) -> bool {
+    *status == SessionStatus::Running && owner_pid == Some(std::process::id())
 }
 
 /// A row as a client holds it, reduced to a number.
@@ -83,12 +94,19 @@ impl Watch {
         self.ours
     }
 
-    /// The session was read. `version` is the `data_version` taken before
-    /// the read, so a commit that lands between the two is never missed: it
-    /// makes the next value differ.
+    /// The session was read, as far as its level sends it. `version` is the
+    /// `data_version` taken before the read, so a commit that lands between
+    /// the two is never missed: it makes the next value differ.
     pub(super) fn read(&mut self, ours: bool, version: Option<i64>) {
         self.ours = ours;
         self.read_version = version;
+    }
+
+    /// The session row was read, and not everything a client holds of the
+    /// session: who writes it is known, and the version it was last read in
+    /// full at stands.
+    pub(super) fn seen(&mut self, ours: bool) {
+        self.ours = ours;
     }
 
     /// Whether another process may have written the session since it was

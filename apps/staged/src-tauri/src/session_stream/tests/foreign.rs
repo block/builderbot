@@ -22,19 +22,19 @@ use super::super::SessionStreamLevel::{Summary, Title};
 use super::super::{SessionStreamFrame, SessionStreamFrameKind, SessionStreamInterest};
 use super::*;
 
-fn another_pid() -> u32 {
+pub(super) fn another_pid() -> u32 {
     std::process::id().wrapping_add(1)
 }
 
 /// A session the other instance is running. Not written anywhere yet.
-fn theirs() -> Session {
+pub(super) fn theirs() -> Session {
     let mut session = Session::new_running("work", Path::new("/tmp"));
     session.owner_pid = Some(another_pid());
     session
 }
 
 /// A session the other instance has started.
-fn running_elsewhere(other: &Store) -> Session {
+pub(super) fn running_elsewhere(other: &Store) -> Session {
     let session = theirs();
     other.create_session(&session).unwrap();
     session
@@ -42,7 +42,7 @@ fn running_elsewhere(other: &Store) -> Session {
 
 /// The other instance takes the row as `running`, as its claim of a queued
 /// row or its resume of an ended one would.
-fn claim_elsewhere(other: &Store, session: &Session) {
+pub(super) fn claim_elsewhere(other: &Store, session: &Session) {
     let changed = other
         .hold_connection()
         .execute(
@@ -53,7 +53,7 @@ fn claim_elsewhere(other: &Store, session: &Session) {
     assert_eq!(changed, 1);
 }
 
-fn say(store: &Store, session: &Session, role: MessageRole, content: &str) -> i64 {
+pub(super) fn say(store: &Store, session: &Session, role: MessageRole, content: &str) -> i64 {
     store
         .add_session_message(&session.id, role, content)
         .unwrap()
@@ -155,6 +155,36 @@ async fn a_commit_that_leaves_the_session_alone_sends_nothing() {
     advance(FOREIGN_CHECK * 3).await;
     assert!(client.take().is_empty());
     assert_eq!(h.rounds(), rounds + 3, "version reads only, no re-read");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_made_here_does_not_hide_one_made_there_just_before() {
+    let (h, other) = Harness::beside_another_instance();
+    let session = running_elsewhere(&other);
+    say(&other, &session, MessageRole::User, "the prompt");
+    let client = h.client("a");
+    h.want("a", 1, &[(&session, Summary)]);
+    settle().await;
+    client.take();
+    past_the_interval().await;
+
+    // The other instance adds a row, and before the version is next read
+    // this one writes the session's title. The frame for the title reads
+    // the session fields and no row.
+    let reply = say(&other, &session, MessageRole::Assistant, "Looking");
+    h.store
+        .update_session_acp_title(&session.id, Some("Fix the flake"))
+        .unwrap();
+    past_the_gather().await;
+    let frame = only(client.take());
+    assert_eq!(summary(&frame).acp_title.as_deref(), Some("Fix the flake"));
+    assert!(row_ids(&frame).is_empty());
+
+    // That read was not of the newest rows, so it does not count as having
+    // caught up with the other instance: its row still arrives.
+    advance(FOREIGN_CHECK * 2).await;
+    let frame = only(client.take());
+    assert_eq!(row_ids(&frame), vec![reply]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -403,6 +433,7 @@ fn a_resync_frame_names_its_kind_and_carries_nothing_else() {
         session_id: "s".to_string(),
         kind: SessionStreamFrameKind::Resync,
         summary: None,
+        full: None,
     };
 
     assert_eq!(

@@ -1,12 +1,79 @@
 //! Centralized data-directory helpers.
 //!
-//! All application data lives under `~/.staged/`.
+//! All application data lives under `~/.staged/`, unless [`DATA_DIR_ENV`]
+//! names another directory. The paths documented below as `~/.staged/…` all
+//! hang off [`data_dir`], so they move with it.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// Base data directory: `~/.staged/`
+/// Environment variable that moves the whole data directory, so a development
+/// build can run beside an installed Staged without opening (and migrating)
+/// its database. Only an absolute path is honoured; see [`resolve_data_dir`].
+pub const DATA_DIR_ENV: &str = "STAGED_DATA_DIR";
+
+/// Base data directory: `$STAGED_DATA_DIR` when it is set to an absolute
+/// path, else `~/.staged/`.
 pub fn data_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|d| d.join(".staged"))
+    let requested = std::env::var_os(DATA_DIR_ENV);
+    if let Some(ignored) = ignored_data_dir_override(requested.as_ref()) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::warn!(
+                "Ignoring ${DATA_DIR_ENV}={ignored:?}: it must be an absolute path. \
+                 Using the default data directory."
+            );
+        });
+    }
+    resolve_data_dir(requested, dirs::home_dir())
+}
+
+/// `~/.staged/`, whatever [`DATA_DIR_ENV`] says: the directory an installed
+/// Staged keeps its data in. For code that must stay out of it even when the
+/// override points this process somewhere else.
+pub fn default_data_dir() -> Option<PathBuf> {
+    resolve_data_dir(None, dirs::home_dir())
+}
+
+/// Every directory that holds Staged's data as far as this process can
+/// tell: [`default_data_dir`], and [`data_dir`] when the override names
+/// another. For code that writes scratch files of its own and must stay out
+/// of an installed Staged's data whether or not an override is in force.
+pub fn all_data_dirs() -> Vec<PathBuf> {
+    resolve_all_data_dirs(std::env::var_os(DATA_DIR_ENV), dirs::home_dir())
+}
+
+/// [`all_data_dirs`] over its two inputs, the default directory first.
+pub(crate) fn resolve_all_data_dirs(
+    requested: Option<OsString>,
+    home: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = resolve_data_dir(None, home.clone()).into_iter().collect();
+    if let Some(in_use) = resolve_data_dir(requested, home) {
+        if !dirs.contains(&in_use) {
+            dirs.push(in_use);
+        }
+    }
+    dirs
+}
+
+/// [`data_dir`] over its two inputs: the override, if usable, else `.staged`
+/// under `home`.
+///
+/// A relative override is ignored, not resolved: the working directory is not
+/// one place (the app is started from the Finder, a terminal and `cargo`),
+/// and every caller reads this again, so one that changed directory would
+/// see a different data directory than the rest. An empty value is relative.
+fn resolve_data_dir(requested: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match requested.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => Some(dir),
+        _ => home.map(|d| d.join(".staged")),
+    }
+}
+
+/// The override [`resolve_data_dir`] will not use, for the warning.
+fn ignored_data_dir_override(requested: Option<&OsString>) -> Option<&OsString> {
+    requested.filter(|value| !std::path::Path::new(value).is_absolute())
 }
 
 /// Directory for bare/clone repos: `~/.staged/repos/`
@@ -135,6 +202,89 @@ pub fn migrate_directory_contents(src: &std::path::Path, dst: &std::path::Path) 
                 "Failed to migrate {} -> {}: {e}",
                 entry.path().display(),
                 dest.display()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home() -> Option<PathBuf> {
+        Some(PathBuf::from("/Users/someone"))
+    }
+
+    #[test]
+    fn data_dir_defaults_to_dot_staged_under_home() {
+        assert_eq!(
+            resolve_data_dir(None, home()),
+            Some(PathBuf::from("/Users/someone/.staged"))
+        );
+        assert_eq!(resolve_data_dir(None, None), None);
+    }
+
+    #[test]
+    fn data_dir_uses_an_absolute_override() {
+        let requested = Some(OsString::from("/tmp/staged-isolated/.staged"));
+        assert_eq!(ignored_data_dir_override(requested.as_ref()), None);
+        assert_eq!(
+            resolve_data_dir(requested.clone(), home()),
+            Some(PathBuf::from("/tmp/staged-isolated/.staged"))
+        );
+        // The override does not need a home directory to fall back on.
+        assert_eq!(
+            resolve_data_dir(requested, None),
+            Some(PathBuf::from("/tmp/staged-isolated/.staged"))
+        );
+    }
+
+    #[test]
+    fn all_data_dirs_keeps_the_default_directory_beside_an_override() {
+        let requested = Some(OsString::from("/tmp/staged-isolated/.staged"));
+        assert_eq!(
+            resolve_all_data_dirs(requested.clone(), home()),
+            vec![
+                PathBuf::from("/Users/someone/.staged"),
+                PathBuf::from("/tmp/staged-isolated/.staged"),
+            ]
+        );
+        // Without a home directory there is no default to list.
+        assert_eq!(
+            resolve_all_data_dirs(requested, None),
+            vec![PathBuf::from("/tmp/staged-isolated/.staged")]
+        );
+    }
+
+    #[test]
+    fn all_data_dirs_is_the_default_directory_alone_without_a_usable_override() {
+        let default = vec![PathBuf::from("/Users/someone/.staged")];
+        assert_eq!(resolve_all_data_dirs(None, home()), default);
+        // An override that names the default directory is not listed twice,
+        // and a relative one is ignored, as `data_dir` ignores it.
+        for requested in ["/Users/someone/.staged", "staged-data", ""] {
+            assert_eq!(
+                resolve_all_data_dirs(Some(OsString::from(requested)), home()),
+                default,
+                "{requested:?}"
+            );
+        }
+        assert!(resolve_all_data_dirs(None, None).is_empty());
+    }
+
+    #[test]
+    fn data_dir_ignores_a_relative_override() {
+        for relative in ["staged-data", "./staged-data", "../staged-data", ""] {
+            let requested = Some(OsString::from(relative));
+            assert_eq!(
+                ignored_data_dir_override(requested.as_ref()),
+                requested.as_ref(),
+                "{relative:?}"
+            );
+            assert_eq!(
+                resolve_data_dir(requested, home()),
+                Some(PathBuf::from("/Users/someone/.staged")),
+                "{relative:?}"
             );
         }
     }

@@ -19,6 +19,56 @@ export interface LineDiffResult {
   modifiedPairs: ModifiedPair[];
 }
 
+/**
+ * No one comparison takes more than this share of what is left of a budget:
+ * an eighth. The comparisons that cost most are of long lines with little in
+ * common, and they find nothing. Refusing those first leaves the tail of the
+ * budget to the cheap ones, which are the lines that changed by a few words.
+ */
+const WORK_BUDGET_SHARE = 8;
+
+/**
+ * A cap on the comparisons a diff makes between lines that are not the same.
+ *
+ * Matching equal lines is cheap. Pairing the rest is not: every unmatched
+ * line is compared by character with up to eleven others, and each pair
+ * found is then compared by word. Both fill a table with a cell for every
+ * pair of characters, or of words, so the cost grows with the number of
+ * changed lines times the square of their length.
+ *
+ * The budget is counted in those cells: about four nanoseconds each. It is a
+ * property of the input and not of the machine or the clock, so the same
+ * input always diffs the same way. A comparison that does not fit is not
+ * made, and its lines are taken to have nothing in common: they stay a
+ * removal and an addition, where they might have been a modified pair.
+ *
+ * One budget can cover several calls, and a caller's own comparisons through
+ * `spend`.
+ */
+export class DiffWorkBudget {
+  /** The cells filled so far. */
+  spent = 0;
+  /** A comparison was refused: the diff is not what it would be without a cap. */
+  capped = false;
+
+  constructor(readonly limit: number) {}
+
+  /** Pay for a comparison of `cells`, or learn that it is not to be made. */
+  spend(cells: number): boolean {
+    if (cells * WORK_BUDGET_SHARE > this.limit - this.spent) {
+      this.capped = true;
+      return false;
+    }
+    this.spent += cells;
+    return true;
+  }
+}
+
+export interface LineDiffOptions {
+  /** A cap on pairing the unmatched lines. Without one there is no cap. */
+  budget?: DiffWorkBudget;
+}
+
 function lcsIndices<T>(
   a: T[],
   b: T[],
@@ -83,9 +133,23 @@ function lcsLength(a: string, b: string): number {
   return prev[n];
 }
 
-const LCS_BAILOUT_PRODUCT = 1_000_000;
+/**
+ * The largest pair the quadratic passes below take on: two lines whose
+ * lengths multiply past this are not compared for similarity, and two token
+ * lists past it are highlighted whole.
+ */
+export const LCS_BAILOUT_PRODUCT = 1_000_000;
 
-function similarity(a: string, b: string): number {
+/**
+ * How alike two lines are, from 0 to 1. Two that the budget has no room to
+ * compare are not alike.
+ *
+ * What the lines start and end with in common is part of their longest
+ * common subsequence whatever lies between, so only the middles are
+ * compared, and only they are paid for: a long line with one word changed
+ * costs next to nothing, and two unrelated lines cost their whole product.
+ */
+function similarity(a: string, b: string, budget: DiffWorkBudget): number {
   if (a.length === 0 && b.length === 0) return 1;
   if (a.length === 0 || b.length === 0) return 0;
   const product = a.length * b.length;
@@ -93,7 +157,21 @@ function similarity(a: string, b: string): number {
     console.info('[diff] similarity: bailing out on large line pair', { aLen: a.length, bLen: b.length, product });
     return 0;
   }
-  const lcsLen = lcsLength(a, b);
+  const shorter = Math.min(a.length, b.length);
+  let prefix = 0;
+  while (prefix < shorter && a[prefix] === b[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    suffix < shorter - prefix &&
+    a[a.length - 1 - suffix] === b[b.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  const common = prefix + suffix;
+  if (!budget.spend((a.length - common) * (b.length - common))) return 0;
+  const lcsLen =
+    common +
+    lcsLength(a.slice(prefix, a.length - suffix), b.slice(prefix, b.length - suffix));
   return (2 * lcsLen) / (a.length + b.length);
 }
 
@@ -103,12 +181,38 @@ function splitWords(text: string): string[] {
   return text.match(/[\p{L}\p{N}_]+|\s+|[^\s\p{L}\p{N}_]/gu) ?? [];
 }
 
-function computeCharHighlights(
+/**
+ * The word-level difference between two strings: the ranges of each that the
+ * other does not hold. `computeLineDiff` runs this on every pair it calls
+ * modified; it is exported for callers that pair lines themselves.
+ */
+export function computeCharHighlights(
   before: string,
   after: string,
 ): { beforeHighlights: CharHighlight[]; afterHighlights: CharHighlight[] } {
-  const beforeTokens = splitWords(before);
-  const afterTokens = splitWords(after);
+  return highlightTokens(before, after, splitWords(before), splitWords(after));
+}
+
+/**
+ * What `computeCharHighlights` costs for two strings, in the cells a
+ * `DiffWorkBudget` counts: one for every pair of their words.
+ */
+export function charHighlightsWork(before: string, after: string): number {
+  return wordPairs(splitWords(before), splitWords(after));
+}
+
+/** Two lists too long to compare are highlighted whole, which fills nothing. */
+function wordPairs(beforeTokens: string[], afterTokens: string[]): number {
+  const pairs = beforeTokens.length * afterTokens.length;
+  return pairs > LCS_BAILOUT_PRODUCT ? 0 : pairs;
+}
+
+function highlightTokens(
+  before: string,
+  after: string,
+  beforeTokens: string[],
+  afterTokens: string[],
+): { beforeHighlights: CharHighlight[]; afterHighlights: CharHighlight[] } {
   if (beforeTokens.length * afterTokens.length > LCS_BAILOUT_PRODUCT) {
     console.info('[diff] computeCharHighlights: bailing out on large token pair', { beforeTokens: beforeTokens.length, afterTokens: afterTokens.length, beforeLen: before.length, afterLen: after.length });
     return {
@@ -171,8 +275,11 @@ const MAX_SCAN_AHEAD = 10;
 export function computeLineDiff(
   beforeLines: string[],
   afterLines: string[],
+  options: LineDiffOptions = {},
 ): LineDiffResult {
   const t0 = performance.now();
+  const budget = options.budget ?? new DiffWorkBudget(Infinity);
+  const spentBefore = budget.spent;
   const beforeMaxLen = beforeLines.reduce((max, l) => Math.max(max, l.length), 0);
   const afterMaxLen = afterLines.reduce((max, l) => Math.max(max, l.length), 0);
   console.info('[diff] computeLineDiff start', { beforeLines: beforeLines.length, afterLines: afterLines.length, beforeMaxLineLen: beforeMaxLen, afterMaxLineLen: afterMaxLen });
@@ -206,18 +313,33 @@ export function computeLineDiff(
   const modifiedPairs: ModifiedPair[] = [];
   let bi = 0;
   let ai = 0;
+  // The scan ahead found this pair alike, and it is not compared again.
+  let scanned = false;
 
   while (bi < unmatchedBefore.length && ai < unmatchedAfter.length) {
     const bIdx = unmatchedBefore[bi];
     const aIdx = unmatchedAfter[ai];
-    const sim = similarity(beforeLines[bIdx].trim(), afterLines[aIdx].trim());
+    const alike =
+      scanned ||
+      similarity(beforeLines[bIdx].trim(), afterLines[aIdx].trim(), budget) > SIMILARITY_THRESHOLD;
+    scanned = false;
 
-    if (sim > SIMILARITY_THRESHOLD) {
+    if (alike) {
+      const beforeTokens = splitWords(beforeLines[bIdx]);
+      const afterTokens = splitWords(afterLines[aIdx]);
+      if (!budget.spend(wordPairs(beforeTokens, afterTokens))) {
+        // A pair with no room left for its words is not made.
+        beforeClasses[bIdx] = 'removed';
+        bi++;
+        continue;
+      }
       beforeClasses[bIdx] = 'modified';
       afterClasses[aIdx] = 'modified';
-      const { beforeHighlights, afterHighlights } = computeCharHighlights(
+      const { beforeHighlights, afterHighlights } = highlightTokens(
         beforeLines[bIdx],
         afterLines[aIdx],
+        beforeTokens,
+        afterTokens,
       );
       modifiedPairs.push({
         beforeLineIndex: bIdx,
@@ -235,7 +357,7 @@ export function computeLineDiff(
       const scanLimit = Math.min(ai + 1 + MAX_SCAN_AHEAD, unmatchedAfter.length);
       for (let scan = ai + 1; scan < scanLimit; scan++) {
         const scanIdx = unmatchedAfter[scan];
-        const scanSim = similarity(beforeLines[bIdx].trim(), afterLines[scanIdx].trim());
+        const scanSim = similarity(beforeLines[bIdx].trim(), afterLines[scanIdx].trim(), budget);
         if (scanSim > SIMILARITY_THRESHOLD) {
           // Mark all skipped after-lines as pure additions.
           for (let skip = ai; skip < scan; skip++) {
@@ -243,6 +365,7 @@ export function computeLineDiff(
           }
           ai = scan;
           found = true;
+          scanned = true;
           break;
         }
       }
@@ -263,7 +386,7 @@ export function computeLineDiff(
   }
 
   const elapsed = performance.now() - t0;
-  console.info('[diff] computeLineDiff done', { modifiedPairs: modifiedPairs.length, elapsed: `${elapsed.toFixed(1)}ms` });
+  console.info('[diff] computeLineDiff done', { modifiedPairs: modifiedPairs.length, work: budget.spent - spentBefore, capped: budget.capped, elapsed: `${elapsed.toFixed(1)}ms` });
 
   return {
     beforeLines: beforeClasses,

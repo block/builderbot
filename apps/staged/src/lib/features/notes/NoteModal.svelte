@@ -32,6 +32,19 @@
   in the composer, otherwise the reply field reopens by the passage with
   what was written, to edit; closed on an empty reply, the field takes the
   block out of the draft and the mark goes.
+
+  A note that has been revised shows what the revision changed
+  (`NoteDiffState`): markers beside the note (`NoteChangeBar`), each level
+  with its change and scrolling with it, and lighting it on hover, as one
+  rectangle painted behind the change's text and ending at its marker.
+  Pressing one opens the note's previous version on the left
+  (`NotePreviousPane`), the two scrolling together, where the window has
+  room for two panes; elsewhere it scrolls to the change and keeps it lit.
+  There every change has its rectangle in both panes, running to the gutter
+  between them, where a band joins the two. The previous version takes the
+  place the chat would, so opening either closes the other. Escape closes the previous version before
+  it closes the note, and until it has, Escape in the find field closes the
+  search and nothing else.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -90,8 +103,9 @@
     resolveStagedMediaUrl,
   } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
+  import { missingMedia } from '../../shared/markdown/missingMedia';
   import { pageVideos } from '../../shared/markdown/pageVideos';
-  import { followSectionLink } from '../../shared/markdown/sectionLinks';
+  import { followSectionLink, type SectionLinkScope } from '../../shared/markdown/sectionLinks';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -110,6 +124,13 @@
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
   import NoteReplyQuotes from './NoteReplyQuotes.svelte';
+  import NoteChangeBar from './NoteChangeBar.svelte';
+  import NoteDiffPaneHeader from './NoteDiffPaneHeader.svelte';
+  import NotePreviousPane from './NotePreviousPane.svelte';
+  import { CONNECTOR_CURRENT_REACH } from './noteDiffConnectors';
+  import { MARKER_REACH } from './noteDiffScroll';
+  import { NoteDiffState } from './noteDiffState.svelte';
+  import './noteDiffStyles.css';
   import { highlightNoteMatches } from './noteQuoteHighlights';
   import { replyDraftPresence } from '../sessions/replyDrafts';
   import { formatReplyDraftLabel } from './replyDraftLabel';
@@ -237,6 +258,15 @@
   );
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
+  const noteDiff = new NoteDiffState();
+  /** The text the note held before its latest revision, when it has been revised. */
+  let previousVersion = $derived(open ? noteDiff.previous : null);
+  /** The previous version shows beside the note: asked for, and there is room for both. */
+  let splitDiffOpen = $derived(
+    noteDiff.open && viewport.canSplit && !chatOpen && hasNoteContent && previousVersion !== null
+  );
+  /** How many note-width columns the dialog holds. */
+  let noteColumns = $derived(splitDiffOpen ? 2 : 1);
   let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
   /**
    * The docked Reply button (a phone, a selection standing) covers the
@@ -266,7 +296,7 @@
   let resizing = $state(false);
 
   function handleWidthChange(total: number, commit: boolean) {
-    dialogWidth.set(total - (splitChatOpen ? CHAT_PANE_WIDTH : 0), commit);
+    dialogWidth.set((total - (splitChatOpen ? CHAT_PANE_WIDTH : 0)) / noteColumns, commit);
   }
 
   let noteSearchAvailable = $derived(hasNoteContent && !chatOnly);
@@ -292,16 +322,22 @@
   // note gets a short dialog and a long one scrolls inside a tall one. With the
   // chat pane open the height is pinned instead: its message list is a scroll
   // region with no natural height, and a dialog that grew as replies streamed
-  // in would shift the composer under the pointer.
+  // in would shift the composer under the pointer. It is pinned beside the
+  // previous version too, whose pane scrolls on its own.
   // Keep chat toggles animated; the resize handle suspends this transition
   // while measuring and applying pointer, keyboard, and reset commands.
   let contentClass = $derived(
-    `dialog-resize-gutter ${chatOpen ? 'h-[90vh]' : 'max-h-[90vh]'} p-0 gap-0 overflow-hidden flex flex-col${
+    `dialog-resize-gutter ${chatOpen || splitDiffOpen ? 'h-[90vh]' : 'max-h-[90vh]'} p-0 gap-0 overflow-hidden flex flex-col${
       resizing ? ' transition-none' : ' transition-[width] duration-150'
     }`
   );
-  let totalWidth = $derived(dialogWidth.width + (splitChatOpen ? CHAT_PANE_WIDTH : 0));
-  let totalMinWidth = $derived(dialogWidth.minWidth + (splitChatOpen ? CHAT_PANE_WIDTH : 0));
+  // The previous version gets a note column of its own; the window caps the sum.
+  let totalWidth = $derived(
+    dialogWidth.width * noteColumns + (splitChatOpen ? CHAT_PANE_WIDTH : 0)
+  );
+  let totalMinWidth = $derived(
+    dialogWidth.minWidth * noteColumns + (splitChatOpen ? CHAT_PANE_WIDTH : 0)
+  );
   let noteInfo = $derived<LinkedNoteContext | null>(
     displayNoteId
       ? {
@@ -329,26 +365,35 @@
   // (video, unreadable file, failed lookup) is kept as null so it is not
   // asked again and renders on the CSS caps alone.
   let mediaDimensions = $state<Record<string, ImageDimensions | null>>({});
+  /** The ids a lookup is out for, so no id is asked for twice. */
+  const mediaDimensionsAsked = new Set<string>();
   let noteMediaImageIds = $derived(collectStagedMediaImageIds(noteMarkdown));
   let mediaDimensionsKnown = $derived(noteMediaImageIds.every((id) => id in mediaDimensions));
+  // The previous version's images are looked up here too. Its ids arrive
+  // while the note's own lookup may still be out, and that lookup is left to
+  // answer: every answer is kept, whatever the viewer shows by then, since
+  // it is true of the id for good. Dropping it to ask again with the new
+  // ids would hold the note's first render back for a second round trip.
   $effect(() => {
     if (!open) return;
-    const missing = noteMediaImageIds.filter((id) => !(id in mediaDimensions));
+    const wanted = new Set([...noteMediaImageIds, ...previousMediaImageIds]);
+    const missing = [...wanted].filter(
+      (id) => !(id in mediaDimensions) && !mediaDimensionsAsked.has(id)
+    );
     if (!missing.length) return;
-    let cancelled = false;
+    for (const id of missing) mediaDimensionsAsked.add(id);
     const record = (found: Record<string, ImageDimensions>) => {
-      if (cancelled) return;
       const next = { ...mediaDimensions };
-      for (const id of missing) next[id] = found[id] ?? null;
+      for (const id of missing) {
+        next[id] = found[id] ?? null;
+        mediaDimensionsAsked.delete(id);
+      }
       mediaDimensions = next;
     };
     getMediaDimensions(missing).then(record, (error) => {
       console.warn('Failed to load note image dimensions', error);
       record({});
     });
-    return () => {
-      cancelled = true;
-    };
   });
   // The note is not rendered until everything its render needs is in — its
   // images' dimensions (a local lookup) and, for a note with a pikchr
@@ -365,17 +410,51 @@
       pikchrRendererLoadFailed,
     })
   );
-  let renderedNoteHtml = $derived(
-    noteRenderReady
-      ? renderNoteMarkdown(noteMarkdown, {
-          pikchrRenderer,
-          renderInlineText: hashtagItems.length
-            ? (text) => renderHashtagTokens(text, hashtagItems)
-            : undefined,
-          mediaDimensions: (id) => mediaDimensions[id],
-        })
+  function renderNote(markdown: string): string {
+    return renderNoteMarkdown(markdown, {
+      pikchrRenderer,
+      renderInlineText: hashtagItems.length
+        ? (text) => renderHashtagTokens(text, hashtagItems)
+        : undefined,
+      mediaDimensions: (id) => mediaDimensions[id],
+    });
+  }
+  let renderedNoteHtml = $derived(noteRenderReady ? renderNote(noteMarkdown) : null);
+  // The previous version is what the change bar compares the note with and
+  // the side-by-side view shows. It is rendered as the note is, so it waits
+  // on the same kinds of input, its own images' dimensions and the pikchr
+  // renderer. The note never waits on these: its render is not held back
+  // for a version it may not have.
+  let previousMarkdown = $derived(
+    previousVersion ? noteMarkdownWithTitle(previousVersion.title, previousVersion.content) : null
+  );
+  let previousHasPikchr = $derived(
+    previousMarkdown !== null &&
+      extractMarkdownDiagramFences(previousMarkdown).some(
+        (diagram) => diagram.language === 'pikchr'
+      )
+  );
+  let previousMediaImageIds = $derived(
+    previousMarkdown === null ? [] : collectStagedMediaImageIds(previousMarkdown)
+  );
+  let renderedPreviousHtml = $derived(
+    previousMarkdown !== null &&
+      noteRenderInputsReady({
+        mediaDimensionsKnown: previousMediaImageIds.every((id) => id in mediaDimensions),
+        needsPikchr: previousHasPikchr,
+        pikchrRendererLoaded: pikchrRenderer !== null,
+        pikchrRendererLoadFailed,
+      })
+      ? renderNote(previousMarkdown)
       : null
   );
+  let previousMarkdownEl = $state<HTMLDivElement>();
+  /**
+   * Media the note embeds is in the store. Media only the previous version
+   * names may not be: it is deleted once nothing but a version names it, and
+   * the version then shows a placeholder where it was (missingMedia.ts).
+   */
+  const noteEmbedsMedia = (id: string) => noteMarkdown.includes(id);
   let mediaViewer = $state<OpenMarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
 
@@ -479,7 +558,8 @@
   });
 
   $effect(() => {
-    if (!open || !noteHasPikchr || pikchrRenderer || pikchrRendererLoadFailed) return;
+    const needed = noteHasPikchr || previousHasPikchr;
+    if (!open || !needed || pikchrRenderer || pikchrRendererLoadFailed) return;
 
     const loadKey = pikchrRendererLoadKey;
     let stale = false;
@@ -583,10 +663,50 @@
     }
 
     chatAutoOpenDecisionKey = key;
-    if (assistantMessagesAfterNote > 0 && !chatOpen) {
+    // Not over the previous version the reader has just opened in its place.
+    if (assistantMessagesAfterNote > 0 && !chatOpen && !untrack(() => noteDiff.engaged)) {
       setChatOpen(true);
     }
   });
+
+  // The note's previous version is fetched when the note opens and each time
+  // it is fetched again: a revision replaces it. `updatedAt` moves on every
+  // write of the note, so it asks again after those that left the text alone.
+  $effect(() => {
+    const id = open && hasNoteContent ? displayNoteId : null;
+    const subject = id ? { id, title: displayTitle, content: displayContent } : null;
+    void displayUpdatedAt;
+    untrack(() => noteDiff.load(subject));
+  });
+
+  // The chat and the previous version take the same place beside the note,
+  // one at a time: the chat opening, from here or from the host, closes the
+  // previous version (see `handleDiffSelect` for the other way round).
+  $effect(() => {
+    if (chatOpen) untrack(() => noteDiff.close());
+  });
+
+  function handleDiffSelect(hunkId: string) {
+    const split = viewport.canSplit;
+    if (split && chatOpen) setChatOpen(false);
+    noteDiff.select(hunkId, split);
+  }
+
+  /**
+   * Escape lets go of the diff first: the previous version closes and the
+   * note stays.
+   *
+   * The find field keeps its Escape to itself for as long as that holds
+   * (`containEscape` below), so that closing the search does not also let go
+   * of the change being read. With nothing of the diff held, one Escape in
+   * the field closes the search and the note, as it does in the session
+   * viewer and did before notes had a diff.
+   */
+  function handleEscapeKeydown(event: KeyboardEvent) {
+    if (!noteDiff.engaged) return;
+    event.preventDefault();
+    noteDiff.close();
+  }
 
   // Showing the chat marks its replies read, clearing the unread dot on the
   // note's row; hiding it (or closing the dialog) does too, covering replies
@@ -786,7 +906,15 @@
     return { type, id, ref, item };
   }
 
-  function handleContentClick(event: MouseEvent) {
+  /**
+   * A press in a rendered note. `section` is the markdown it was in and the
+   * box that scrolls it: the note's own, unless the previous version's pane
+   * says the press was in the version it shows.
+   */
+  function handleContentClick(
+    event: MouseEvent,
+    section: SectionLinkScope = { content: markdownEl, scroller: contentEl }
+  ) {
     if (openMediaViewerFromEvent(event) || openDiagramViewerFromEvent(event)) return;
 
     const click = hashtagClickFromTarget(event.target);
@@ -796,9 +924,12 @@
       onHashtagClick(click);
       return;
     }
-    // A link to a heading of this note scrolls to it, looked up in this
-    // note's own markdown: another note open behind may share the heading.
-    if (followSectionLink(event, { content: markdownEl, scroller: contentEl })) return;
+    // A link to a heading scrolls to it, looked up in the markdown the link
+    // is in: another note open behind may share the heading, and so does
+    // the previous version beside this one, where a link is to a heading of
+    // that version and scrolls its pane. A link that is in the markdown is
+    // kept from navigating the webview, whether or not a heading is found.
+    if (followSectionLink(event, section)) return;
     handleExternalLinkClick(event);
   }
 
@@ -891,6 +1022,19 @@
   </Button>
 {/snippet}
 
+{#snippet previousContent()}
+  {#if renderedPreviousHtml !== null}
+    <div
+      class="markdown-content"
+      bind:this={previousMarkdownEl}
+      {@attach pageVideos(renderedPreviousHtml)}
+      {@attach missingMedia(renderedPreviousHtml, noteEmbedsMedia)}
+    >
+      {@html renderedPreviousHtml}
+    </div>
+  {/if}
+{/snippet}
+
 <Dialog.Root
   {open}
   onOpenChange={(v) => {
@@ -908,6 +1052,7 @@
     style={dialogWidthStyle(totalWidth)}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
+    onEscapeKeydown={handleEscapeKeydown}
   >
     <Dialog.Header
       class="gap-0 border-b border-[var(--border-subtle)] p-0 flex-shrink-0 {chatOnly
@@ -934,6 +1079,7 @@
               visible={searchVisible}
               {matchCount}
               currentIndex={currentMatchIndex}
+              containEscape={noteDiff.engaged}
               onSearch={performSearch}
               onNext={nextMatch}
               onPrevious={previousMatch}
@@ -973,19 +1119,45 @@
         {/if}
       </div>
     </Dialog.Header>
-    <div class:split-chat-open={splitChatOpen} class:chat-only={chatOnly} class="modal-body">
+    <div
+      class:split-chat-open={splitChatOpen}
+      class:split-diff-open={splitDiffOpen}
+      class:chat-only={chatOnly}
+      class="modal-body"
+    >
+      {#if splitDiffOpen && previousVersion}
+        <NotePreviousPane
+          {noteDiff}
+          contentEl={previousMarkdownEl}
+          renderKey={renderedPreviousHtml}
+          savedAt={previousVersion.savedAt}
+          currentScrollEl={contentEl}
+          bottomInset={bottomSlotHeight}
+          onClose={() => noteDiff.close()}
+          onSelect={handleDiffSelect}
+          onContentClick={handleContentClick}
+          onContentKeydown={handleContentKeydown}
+          content={previousContent}
+        />
+      {/if}
       <section
         id="note-modal-note-pane"
         class="note-pane"
         aria-hidden={chatOnly}
         aria-label="Note content"
       >
+        {#if splitDiffOpen}
+          <NoteDiffPaneHeader label="Current version" />
+        {/if}
         <div class="note-scroll" style:--selection-dock-overlap="{dockOverlap}px">
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="modal-content"
             class:ends-pane={!showBottomBar}
+            class:note-diff-all={splitDiffOpen}
+            style:--note-diff-blocks-reach="{CONNECTOR_CURRENT_REACH}px"
+            style:--note-diff-markers-reach="{MARKER_REACH}px"
             bind:this={contentEl}
             onclick={handleContentClick}
             {@attach openMediaOnPinch}
@@ -1018,6 +1190,17 @@
                 dockHost={dockEl}
                 onDockedChange={(docked) => (replyDocked = docked)}
                 ignoreHeading={isTitleHeading}
+              />
+            {/if}
+            {#if hasNoteContent}
+              <NoteChangeBar
+                {noteDiff}
+                contentEl={markdownEl}
+                scrollEl={contentEl}
+                renderKey={renderedNoteHtml}
+                previousHtml={renderedPreviousHtml}
+                showAll={splitDiffOpen}
+                onSelect={handleDiffSelect}
               />
             {/if}
           </div>
@@ -1287,9 +1470,27 @@
      is docked and reaches up over the note's bottom edge the text clears
      that too (`--selection-dock-overlap`, measured above), so a selection
      ending in the last lines can scroll out from behind it. */
-  /* Positioned for the selection's Reply button, which scrolls with the text. */
+  /* Positioned for the selection's Reply button and for what the diff
+     draws, which scrolls with the text: its markers, and the rectangle
+     behind each change (NoteDiffBlocks), which is painted under the text
+     and so needs the scroll area to be a stacking context. The markers
+     stand in the right padding, as far in as the text's inset. A rectangle
+     starts half-way across the left padding, which is where the band from
+     the previous version lands when that is open
+     (`--note-diff-blocks-reach`, set above), and ends at its marker's left
+     edge (`--note-diff-markers-reach`, set above from the markers' own
+     sizes in noteDiffScroll.ts). Both hold still when a wide table makes
+     the note scroll sideways, for which they are told the left padding
+     (`--note-diff-scroll-padding`). */
   .modal-content {
+    --note-diff-markers-inset: var(--dialog-safe-right, 0px);
+    --note-diff-scroll-padding: calc(24px + var(--dialog-safe-left, 0px));
+    --note-diff-blocks-left: calc(
+      var(--note-diff-blocks-reach, 12px) + var(--dialog-safe-left, 0px)
+    );
+    --note-diff-blocks-right: calc(var(--note-diff-markers-reach) + var(--dialog-safe-right, 0px));
     position: relative;
+    isolation: isolate;
     flex: 1;
     overflow-y: auto;
     padding: 24px;
@@ -1317,6 +1518,20 @@
     padding-bottom: calc(
       24px + max(var(--selection-dock-overlap, 0px), var(--dialog-safe-bottom, 0px))
     );
+  }
+
+  /* Beside its previous version the note has room under it, so its last
+     change can reach the line the two panes are kept level on, a third of
+     the way down (NotePreviousPane has the same). It is not at the dialog's
+     left edge there, so it has no inset to clear on that side: its left
+     padding is a fixed width, the first half of which the diff's
+     connectors cross to reach the rectangles behind its changes
+     (NoteDiffConnectors). */
+  .modal-body.split-diff-open .modal-content {
+    --note-diff-blocks-left: var(--note-diff-blocks-reach, 12px);
+    --note-diff-scroll-padding: 24px;
+    padding-bottom: 60vh;
+    padding-left: 24px;
   }
 
   .modal-content::-webkit-scrollbar {

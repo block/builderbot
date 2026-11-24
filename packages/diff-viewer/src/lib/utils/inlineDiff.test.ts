@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  charHighlightsWork,
+  computeCharHighlights,
   computeLineDiff,
   createLineDiffCache,
+  DiffWorkBudget,
+  LCS_BAILOUT_PRODUCT,
   type LineDiffResult,
   type CharHighlight,
 } from './inlineDiff';
@@ -509,6 +513,187 @@ describe('computeLineDiff', () => {
       expect(result.beforeLines).toEqual(['modified']);
       expect(result.afterLines).toEqual(['modified']);
       expect(result.modifiedPairs).toHaveLength(1);
+    });
+  });
+});
+
+describe('DiffWorkBudget', () => {
+  it('pays for a comparison that takes no more than an eighth of what is left', () => {
+    const budget = new DiffWorkBudget(800);
+
+    expect(budget.spend(100)).toBe(true);
+    expect(budget.spent).toBe(100);
+    expect(budget.capped).toBe(false);
+  });
+
+  it('refuses a comparison that takes more, and goes on paying for cheaper ones', () => {
+    const budget = new DiffWorkBudget(800);
+    budget.spend(100);
+
+    // 700 are left: an eighth is 87.5.
+    expect(budget.spend(88)).toBe(false);
+    expect(budget.capped).toBe(true);
+    expect(budget.spent).toBe(100);
+    expect(budget.spend(87)).toBe(true);
+    expect(budget.spent).toBe(187);
+    // A refusal is not forgotten.
+    expect(budget.capped).toBe(true);
+  });
+
+  it('pays for a comparison that costs nothing when nothing is left', () => {
+    const budget = new DiffWorkBudget(0);
+
+    expect(budget.spend(0)).toBe(true);
+    expect(budget.spend(1)).toBe(false);
+  });
+});
+
+describe('computeLineDiff with a work budget', () => {
+  // Lines with no character in common: comparing them costs their whole
+  // product and finds nothing.
+  const unrelatedBefore = 'abcdefghij'.repeat(30);
+  const unrelatedAfter = 'klmnopqrst'.repeat(30);
+
+  it('charges only for what two lines do not start and end with in common', () => {
+    const before = `${'x'.repeat(400)} old ${'y'.repeat(400)}`;
+    const after = `${'x'.repeat(400)} new ${'y'.repeat(400)}`;
+    const budget = new DiffWorkBudget(1_000_000);
+
+    const result = computeLineDiff([before], [after], { budget });
+
+    expect(result.modifiedPairs).toHaveLength(1);
+    // "old" against "new" by character, then five words against five.
+    expect(budget.spent).toBe(3 * 3 + 5 * 5);
+    expect(budget.capped).toBe(false);
+  });
+
+  it('charges two unrelated lines their whole product', () => {
+    const budget = new DiffWorkBudget(1_000_000);
+
+    computeLineDiff([unrelatedBefore], [unrelatedAfter], { budget });
+
+    expect(budget.spent).toBe(300 * 300);
+  });
+
+  it('gives the same answer as without a budget when everything fits', () => {
+    const before = ['const a = 1;', unrelatedBefore, 'return a + b;', 'kept'];
+    const after = ['const a = 2;', 'kept', unrelatedAfter, 'return a - b;'];
+    const budget = new DiffWorkBudget(100_000_000);
+
+    expect(computeLineDiff(before, after, { budget })).toEqual(computeLineDiff(before, after));
+    expect(budget.capped).toBe(false);
+  });
+
+  it('leaves lines it has no room to compare as removed and added', () => {
+    const before = ['the quick brown fox'];
+    const after = ['the quick red fox'];
+    expect(computeLineDiff(before, after).beforeLines).toEqual(['modified']);
+
+    // "brown" against "red" is 15 cells, more than an eighth of 100.
+    const budget = new DiffWorkBudget(100);
+    const result = computeLineDiff(before, after, { budget });
+
+    expect(result.beforeLines).toEqual(['removed']);
+    expect(result.afterLines).toEqual(['added']);
+    expect(result.modifiedPairs).toEqual([]);
+    expect(budget.capped).toBe(true);
+    expect(budget.spent).toBe(0);
+  });
+
+  it('does not pair lines when there is no room left for their words', () => {
+    const before = ['the quick brown fox'];
+    const after = ['the quick red fox'];
+    // Room for the 15 cells of the characters, not for the 49 of the words.
+    const budget = new DiffWorkBudget(200);
+
+    const result = computeLineDiff(before, after, { budget });
+
+    expect(result.beforeLines).toEqual(['removed']);
+    expect(result.afterLines).toEqual(['added']);
+    expect(budget.capped).toBe(true);
+    expect(budget.spent).toBe(15);
+  });
+
+  it('still pairs cheap lines after refusing costly ones', () => {
+    const before = [unrelatedBefore, 'the quick brown fox'];
+    const after = [unrelatedAfter, 'the quick red fox'];
+    // The two long lines cost 90,000 cells to compare; either against a
+    // short one costs under 6,000.
+    const budget = new DiffWorkBudget(100_000);
+
+    const result = computeLineDiff(before, after, { budget });
+
+    expect(result.beforeLines).toEqual(['removed', 'modified']);
+    expect(result.afterLines).toEqual(['added', 'modified']);
+    expect(result.modifiedPairs).toHaveLength(1);
+    expect(budget.capped).toBe(true);
+  });
+
+  it('never spends more than its limit, however much there is to compare', () => {
+    const before = Array.from({ length: 60 }, (_, i) => `${i} ${unrelatedBefore}`);
+    const after = Array.from({ length: 60 }, (_, i) => `${unrelatedAfter} ${i}`);
+    const budget = new DiffWorkBudget(2_000_000);
+
+    const result = computeLineDiff(before, after, { budget });
+
+    expect(result.modifiedPairs).toEqual([]);
+    expect(budget.capped).toBe(true);
+    expect(budget.spent).toBeLessThanOrEqual(2_000_000);
+    // Most of it was used: the cap is what stopped the comparing.
+    expect(budget.spent).toBeGreaterThan(1_000_000);
+  });
+
+  it('draws on a budget another diff has already spent from', () => {
+    const budget = new DiffWorkBudget(1_000_000);
+    computeLineDiff([unrelatedBefore], [unrelatedAfter], { budget });
+    const spent = budget.spent;
+
+    computeLineDiff(['the quick brown fox'], ['the quick red fox'], { budget });
+
+    expect(budget.spent).toBe(spent + 15 + 49);
+  });
+});
+
+describe('charHighlightsWork', () => {
+  it('is a cell for every pair of words, spaces and punctuation included', () => {
+    // Five tokens against eight.
+    expect(charHighlightsWork('evicted oldest first', 'evicted newest first, in')).toBe(5 * 8);
+  });
+
+  it('is nothing for two strings with too many words to compare', () => {
+    const words = Math.ceil(Math.sqrt(LCS_BAILOUT_PRODUCT) / 2) + 1;
+    const text = Array.from({ length: words }, (_, i) => `a${i}`).join(' ');
+
+    expect(charHighlightsWork(text, text)).toBe(0);
+  });
+});
+
+describe('computeCharHighlights', () => {
+  it('returns the words each string has that the other lacks', () => {
+    const before = 'evicted oldest first';
+    const after = 'evicted newest first, in batches';
+    const { beforeHighlights, afterHighlights } = computeCharHighlights(before, after);
+
+    expect(beforeHighlights.map((h) => before.slice(h.start, h.end))).toEqual(['oldest']);
+    expect(afterHighlights.map((h) => after.slice(h.start, h.end))).toEqual(['newest', ', in batches']);
+  });
+
+  it('returns nothing for identical strings', () => {
+    expect(computeCharHighlights('same words', 'same words')).toEqual({
+      beforeHighlights: [],
+      afterHighlights: [],
+    });
+  });
+
+  it('highlights both strings whole when they have too many words to compare', () => {
+    // Each word and each space is a token: 1,001 on each side.
+    const words = Math.ceil(Math.sqrt(LCS_BAILOUT_PRODUCT) / 2) + 1;
+    const before = Array.from({ length: words }, (_, i) => `a${i}`).join(' ');
+    const after = Array.from({ length: words }, (_, i) => `b${i}`).join(' ');
+
+    expect(computeCharHighlights(before, after)).toEqual({
+      beforeHighlights: [{ start: 0, end: before.length }],
+      afterHighlights: [{ start: 0, end: after.length }],
     });
   });
 });

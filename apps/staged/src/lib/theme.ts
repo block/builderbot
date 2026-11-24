@@ -59,6 +59,8 @@ export interface Theme {
   diff: {
     addedBg: string; // Background tint for added lines
     removedBg: string; // Background tint for removed lines
+    addedBgEmphasis: string; // The added tint, stronger: the change being pointed at
+    removedBgEmphasis: string; // The removed tint, stronger
     changedBg: string; // Neutral background for changed lines (not add/remove specific)
     rangeBorder: string; // Border color for change range markers
     commentHighlight: string; // Highlight color for commented regions in spine
@@ -375,6 +377,39 @@ export interface ThemeGitColors {
   modified: string | null;
 }
 
+/** The colors createAdaptiveTheme() is given for one mode of the app chrome. */
+export interface ChromeBaseColors {
+  bg: string;
+  fg: string;
+  comment: string;
+  gitColors: ThemeGitColors;
+}
+
+/**
+ * Base colors fed into createAdaptiveTheme() for the app chrome. The chrome
+ * does not derive from the user's chosen diff/syntax theme: it has exactly
+ * one fixed light and one fixed dark identity, selected by the resolved app
+ * mode (see `applyChromeTheme` in preferences.svelte.ts). They are here,
+ * beside the function they feed, so a test of the chrome's colours can use
+ * the real ones.
+ */
+export const CHROME_BASE_COLORS: Record<'dark' | 'light', ChromeBaseColors> = {
+  /** Dark chrome — sourced from the previous laserwave-derived app.css :root defaults. */
+  dark: {
+    bg: '#27212e',
+    fg: '#ffffff',
+    comment: '#91889b',
+    gitColors: { added: '#3fb950', deleted: '#f85149', modified: '#d29922' },
+  },
+  /** Light chrome — derived from a clean, legible light palette (github-light). */
+  light: {
+    bg: '#ffffff',
+    fg: '#24292e',
+    comment: '#6e7781',
+    gitColors: { added: '#28a745', deleted: '#d73a49', modified: '#2188ff' },
+  },
+};
+
 /**
  * Create an adaptive theme based on syntax theme colors.
  *
@@ -497,6 +532,12 @@ export function createAdaptiveTheme(
       // Very subtle tints - the syntax highlighting should dominate
       addedBg: overlay(accentGreen, isDark ? 0.15 : 0.18),
       removedBg: overlay(accentRed, isDark ? 0.15 : 0.18),
+      // The same tints, stronger: the one change among several that is
+      // being pointed at (a note diff's active change). Strong enough to
+      // tell from the tints above beside them, and no stronger, so that
+      // text keeps its contrast: theme.test.ts holds both.
+      addedBgEmphasis: overlay(accentGreen, isDark ? 0.24 : 0.28),
+      removedBgEmphasis: overlay(accentRed, isDark ? 0.24 : 0.28),
       // Neutral highlight for changed lines - subtle foreground tint
       changedBg: overlay(syntaxFg, isDark ? 0.08 : 0.1),
       // Range borders need to be visible but not distracting
@@ -622,6 +663,8 @@ export function themeToVarMap(t: Theme): Record<string, string> {
 
     '--diff-added-bg': t.diff.addedBg,
     '--diff-removed-bg': t.diff.removedBg,
+    '--diff-added-bg-emphasis': t.diff.addedBgEmphasis,
+    '--diff-removed-bg-emphasis': t.diff.removedBgEmphasis,
     '--diff-changed-bg': t.diff.changedBg,
     '--diff-range-border': t.diff.rangeBorder,
     '--diff-comment-highlight': t.diff.commentHighlight,

@@ -2693,6 +2693,11 @@ pub(crate) async fn dispatch(
             })
             .await
         }
+        "get_note_previous_version" => {
+            let store = get_store(store_mutex)?;
+            let note_id: String = arg(&args, "noteId")?;
+            blocking_store_json(move || store.get_previous_note_version(&note_id)).await
+        }
         "set_note_read" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;

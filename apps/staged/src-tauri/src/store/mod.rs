@@ -10,7 +10,7 @@
 //! Tables: app_metadata, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, project_notes, reviews, images,
 //! action_contexts, repo_actions, repo_affinities, queued_session_messages,
-//! tag_groups, tags, project_tags.
+//! tag_groups, tags, project_tags, note_versions.
 
 pub mod models;
 
@@ -23,6 +23,7 @@ pub mod images;
 mod messages;
 mod migrations;
 mod note_transfer;
+mod note_versions;
 mod notes;
 mod project_activity;
 mod project_notes;
@@ -50,6 +51,8 @@ mod images_tests;
 #[cfg(test)]
 mod migration_tests;
 #[cfg(test)]
+mod note_versions_tests;
+#[cfg(test)]
 mod tags_tests;
 #[cfg(test)]
 mod tests;
@@ -59,7 +62,7 @@ pub use branch_move::{BranchMove, RepoPlacement, WorkdirMove};
 pub use control_grants::{renewed_expiry, ControlGrantRecord, CONTROL_GRANT_LIFETIME_MS};
 pub use messages::TranscriptWindow;
 pub use models::*;
-pub use note_transfer::ChildNoteMove;
+pub use note_transfer::{no_media_retargeted, ChildNoteMove, MediaRetarget};
 pub use project_activity::ProjectActivity;
 pub use project_notes::DeletedProjectNoteSessions;
 pub use project_search::{ProjectSearchItem, ProjectSearchItemKind};

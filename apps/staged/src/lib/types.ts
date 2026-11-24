@@ -700,6 +700,21 @@ export interface ProjectSessionResponse {
   noteId: string;
 }
 
+/**
+ * The title and body a note or project note held before a revision replaced
+ * them. A note's current text is never one, so a note that has not been
+ * revised has none.
+ */
+export interface NoteVersion {
+  id: string;
+  /** The note or project note this was a version of. */
+  noteId: string;
+  title: string;
+  content: string;
+  /** When this text was written (ms): the note's `updatedAt` when it was replaced. */
+  savedAt: number;
+}
+
 // =============================================================================
 // Project search
 // =============================================================================

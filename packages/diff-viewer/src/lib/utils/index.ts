@@ -68,6 +68,18 @@ export {
 } from './highlighter';
 
 export { ConnectorRendererCanvas, type CommentHighlightInfo } from './connectorRendererCanvas';
+export {
+  BEZIER_CP_FRACTION,
+  connectorFillPathData,
+  connectorShape,
+  connectorStrokePathData,
+  SvgPathData,
+  traceConnectorFill,
+  traceConnectorStroke,
+  type ConnectorEdges,
+  type ConnectorPathSink,
+  type ConnectorShape,
+} from './connectorGeometry';
 export { setupDiffKeyboardNav } from './diffKeyboard';
 export { setupMarkdownScrollSync } from './markdownScrollSync';
 export { sanitize } from './sanitize';
@@ -101,5 +113,12 @@ export {
 	type FileSelectionWithSearchConfig
 } from './fileSelection';
 
-export { computeLineDiff, createLineDiffCache } from './inlineDiff.js';
-export type { BeforeLineClass, AfterLineClass, CharHighlight, ModifiedPair, LineDiffResult, LineDiffCache } from './inlineDiff.js';
+export {
+  charHighlightsWork,
+  computeCharHighlights,
+  computeLineDiff,
+  createLineDiffCache,
+  DiffWorkBudget,
+  LCS_BAILOUT_PRODUCT,
+} from './inlineDiff.js';
+export type { BeforeLineClass, AfterLineClass, CharHighlight, ModifiedPair, LineDiffResult, LineDiffOptions, LineDiffCache } from './inlineDiff.js';

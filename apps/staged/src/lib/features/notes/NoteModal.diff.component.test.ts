@@ -1,0 +1,963 @@
+import { flushSync, mount, tick, unmount } from 'svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { ImageDimensions, NoteVersion } from '../../types';
+
+/**
+ * The note viewer showing what a revision changed: the change bar, the
+ * previous version opening beside the note in the chat's place, and Escape.
+ * The dialog is the real one, so Escape goes through its own layer; the
+ * window is wide enough for two panes unless a test narrows it. jsdom lays
+ * nothing out, so where the markers and panes are is covered by
+ * NoteChangeBar's and NotePreviousPane's own tests.
+ */
+
+const screen = vi.hoisted(() => {
+  const state = { wide: true };
+  // Before anything imports the viewport, which reads the window as it loads.
+  window.matchMedia = ((query: string) => ({
+    media: query,
+    get matches() {
+      return query === '(min-width: 1000px)' && state.wide;
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+  return state;
+});
+
+const commands = vi.hoisted(() => ({
+  getNotePreviousVersion: vi.fn<(noteId: string) => Promise<NoteVersion | null>>(),
+  getMediaDimensions: vi.fn<(ids: string[]) => Promise<Record<string, ImageDimensions>>>(),
+}));
+
+vi.mock(
+  '../sessions/PooledSessionChatPane.svelte',
+  () => import('../sessions/testStubs/EmptyStub.svelte')
+);
+vi.mock('./NoteTransferMenu.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
+vi.mock('./NoteReplyQuotes.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
+vi.mock(
+  '../../shared/markdown/DiagramViewerModal.svelte',
+  () => import('../sessions/testStubs/EmptyStub.svelte')
+);
+vi.mock(
+  '../../shared/markdown/MediaViewerModal.svelte',
+  () => import('../sessions/testStubs/EmptyStub.svelte')
+);
+// Showing a note marks it read, through stores this test has no use for.
+vi.mock('./noteReadTracker.svelte', () => ({
+  NoteReadTracker: class {
+    unread = false;
+    canToggle = false;
+    toggling = false;
+    reset() {}
+    show() {}
+    observe() {}
+    toggle() {}
+  },
+}));
+// The dialog's stored width; there is no store here to read it from.
+vi.mock('../../shared/persistentStore', () => ({
+  getStoreValue: vi.fn(async () => undefined),
+  setStoreValue: vi.fn(async () => {}),
+  deleteStoreValue: vi.fn(async () => {}),
+  listStoreKeys: vi.fn(async () => []),
+  listenToStoreChanges: vi.fn(() => () => {}),
+}));
+vi.mock('../../transport', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../transport')>()),
+  listenToEvent: () => () => {},
+}));
+vi.mock('../../api/commands', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../api/commands')>()),
+  getMediaDimensions: commands.getMediaDimensions,
+  getNotePreviousVersion: commands.getNotePreviousVersion,
+  countAssistantMessagesAfter: async () => 0,
+  markSessionChatRead: async () => {},
+}));
+
+import NoteModal from './NoteModal.svelte';
+import modalSource from './NoteModal.svelte?raw';
+import { NOTE_DIFF_ACTIVE_ATTRIBUTE, NOTE_DIFF_ATTRIBUTE } from './noteDiffHighlights';
+import { splitNoteMarkdown } from './noteMarkdown';
+import {
+  CURRENT_NOTE,
+  fakeResizeObserver,
+  HUNK_KINDS,
+  layOut,
+  pointerArrives,
+  PREVIOUS_NOTE,
+} from './testStubs/noteDiffFixtures';
+import { runSearchShortcut } from '../keyboard/searchTargets';
+import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
+import { viewport } from '../../shared/viewport.svelte';
+
+const MEDIA_ID = '3f2a9c1e-1234-4567-8123-123456789abc';
+const NOTE_MEDIA_ID = '7b1d4e2a-9876-4abc-8def-0123456789ab';
+const NOTE_DIALOG_WIDTH = 700;
+
+const stored = (markdown: string) => {
+  const { title, body } = splitNoteMarkdown(markdown);
+  return { title, content: body };
+};
+
+const versionOf = (markdown: string, id = 'version-1'): NoteVersion => ({
+  id,
+  noteId: 'note-1',
+  ...stored(markdown),
+  savedAt: Date.now() - 5 * 60_000,
+});
+
+let modal: ReturnType<typeof mount> | null = null;
+/** Report a new layout to everything observing one. */
+let resize: () => void;
+
+/** The dialog opens and closes over timers and frames; let them run, then render. */
+async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await tick();
+  flushSync();
+}
+
+async function open(overrides: Record<string, unknown> = {}) {
+  const onClose = vi.fn();
+  const onChatOpenChange = vi.fn<(open: boolean) => void>();
+  const props = reactiveProps({
+    open: true,
+    ...stored(CURRENT_NOTE),
+    noteId: 'note-1',
+    noteUpdatedAt: 2_000,
+    sessionId: 'session-1' as string | null,
+    chatOpen: false,
+    onClose,
+    onChatOpenChange,
+    ...overrides,
+  });
+  const target = document.createElement('div');
+  document.body.appendChild(target);
+  modal = mount(NoteModal, { target, props });
+  await settle();
+  return { props, onClose, onChatOpenChange };
+}
+
+const dialog = () => document.querySelector<HTMLElement>('[data-slot="dialog-content"]');
+const previousPane = () => document.querySelector<HTMLElement>('.previous-pane');
+const chatPane = () => document.querySelector('#note-modal-chat-pane');
+const notePane = () => document.querySelector<HTMLElement>('#note-modal-note-pane')!;
+// The note's own bar and markers; its previous version has none.
+const bar = () => document.querySelector('#note-modal-note-pane .note-change-bar');
+const markersIn = (pane: Element) => [
+  ...pane.querySelectorAll<HTMLButtonElement>('.note-change-marker'),
+];
+const markers = () => markersIn(notePane());
+const marker = (kind: string) => markers().find((el) => el.dataset.kind === kind)!;
+const note = () => notePane().querySelector<HTMLElement>('.markdown-content')!;
+const lit = (el: Element) =>
+  [...el.querySelectorAll(`[${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`)].map((block) => block.textContent);
+const connectors = () => [...document.querySelectorAll<SVGGElement>('.note-diff-connector')];
+/** The rectangles and gap lines painted behind the changes of the version in `pane`. */
+const paintedIn = (pane: Element) =>
+  [...pane.querySelectorAll<HTMLElement>('.note-diff-block, .note-diff-gap')].map((el) => [
+    el.classList.contains('note-diff-block') ? 'block' : 'gap',
+    el.dataset.kind,
+    el.classList.contains('is-active'),
+  ]);
+/**
+ * Lay both versions out, as a layout would report: in panes that show all of
+ * their blocks, or `viewport` of them.
+ */
+async function layOutBoth(viewport = 700) {
+  const pane = previousPane()!;
+  layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, viewport);
+  layOut(
+    pane.querySelector('.markdown-content')!,
+    pane.querySelector<HTMLElement>('.previous-scroll')!,
+    viewport
+  );
+  resize();
+  await settle();
+}
+const button = (label: string) =>
+  document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+async function press(el: HTMLElement) {
+  el.click();
+  await settle();
+}
+
+async function pressEscape(target: EventTarget = document) {
+  target.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+  );
+  await settle();
+}
+
+const searchBar = () => document.querySelector<HTMLElement>('.search-bar');
+
+/** Open find-in-note, as the search shortcut does, and return its field. */
+async function openSearch() {
+  runSearchShortcut('find');
+  await settle();
+  return searchBar()!.querySelector<HTMLInputElement>('input')!;
+}
+
+beforeEach(() => {
+  document.body.innerHTML = '';
+  screen.wide = true;
+  viewport.canSplit = true;
+  const observer = fakeResizeObserver();
+  vi.stubGlobal('ResizeObserver', observer.FakeResizeObserver);
+  resize = observer.resize;
+  commands.getNotePreviousVersion.mockReset().mockResolvedValue(versionOf(PREVIOUS_NOTE));
+  commands.getMediaDimensions.mockReset().mockResolvedValue({});
+  // `computeLineDiff` reports each run.
+  vi.spyOn(console, 'info').mockImplementation(() => {});
+});
+
+afterEach(async () => {
+  if (modal) unmount(modal);
+  modal = null;
+  await settle();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('NoteModal change bar', () => {
+  it('shows no bar for a note with no previous version', async () => {
+    commands.getNotePreviousVersion.mockResolvedValue(null);
+    await open();
+
+    expect(commands.getNotePreviousVersion).toHaveBeenCalledWith('note-1');
+    expect(note().textContent).toContain('The cache is filled when the app starts.');
+    expect(bar()).toBeNull();
+    expect(note().querySelector(`[${NOTE_DIFF_ATTRIBUTE}]`)).toBeNull();
+  });
+
+  it('asks for no previous version of a note that has no id yet', async () => {
+    await open({ noteId: null });
+
+    expect(commands.getNotePreviousVersion).not.toHaveBeenCalled();
+    expect(bar()).toBeNull();
+  });
+
+  it('shows a marker for each change since the previous version', async () => {
+    await open();
+
+    expect(markers().map((el) => el.dataset.kind)).toEqual(HUNK_KINDS);
+    // Nothing is tinted until a change is pointed at.
+    expect(notePane().querySelector('.note-diff-all')).toBeNull();
+    expect(lit(note())).toEqual([]);
+    expect(previousPane()).toBeNull();
+  });
+
+  it('puts the markers in the note’s scroll area, so they scroll with the note', async () => {
+    await open();
+
+    const scroller = notePane().querySelector('.modal-content')!;
+    expect(bar()!.parentElement).toBe(scroller);
+    expect(scroller.contains(note())).toBe(true);
+  });
+
+  it('ends the rectangle behind each change where its marker begins', async () => {
+    await open();
+    const scroller = notePane().querySelector<HTMLElement>('.modal-content')!;
+    const length = (el: HTMLElement, property: string) =>
+      parseFloat(el.style.getPropertyValue(property));
+
+    // A marker is 4px wide with its right edge 8px from the scroll area's
+    // edge, so its left edge is 12px from it: the 10px marker's was 18px.
+    const markers = bar() as HTMLElement;
+    const markerLeft =
+      length(markers, '--note-diff-marker-gap') + length(markers, '--note-diff-marker-width');
+    expect(markerLeft).toBe(12);
+    // The rectangles are told to end there, with nothing between: jsdom
+    // lays nothing out, so the rule that hands it on is read. A full-screen
+    // dialog's safe area moves both in alike.
+    expect(length(scroller, '--note-diff-markers-reach')).toBe(markerLeft);
+    // Without its white space: however the rule is wrapped.
+    const rule = modalSource.match(/\n  \.modal-content \{[^}]*\}/)![0].replace(/\s+/g, '');
+    expect(rule).toContain(
+      '--note-diff-blocks-right:calc(var(--note-diff-markers-reach)+var(--dialog-safe-right,0px));'
+    );
+    expect(rule).toContain('--note-diff-markers-inset:var(--dialog-safe-right,0px);');
+  });
+
+  it('lights a change in the note while its marker is hovered', async () => {
+    await open();
+
+    pointerArrives(marker('modified'));
+    flushSync();
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+
+    marker('modified').dispatchEvent(new MouseEvent('pointerleave'));
+    flushSync();
+    expect(lit(note())).toEqual([]);
+  });
+
+  it('draws a line where removed text was while its marker is hovered', async () => {
+    await open();
+    const gaps = () => [...notePane().querySelectorAll<HTMLElement>('.note-diff-gap')];
+    expect(gaps()).toEqual([]);
+
+    pointerArrives(marker('removed'));
+    flushSync();
+    expect(gaps().map((gap) => gap.dataset.kind)).toEqual(['removed']);
+    expect(gaps()[0].classList.contains('is-active')).toBe(true);
+
+    marker('removed').dispatchEvent(new MouseEvent('pointerleave'));
+    flushSync();
+    expect(gaps()).toEqual([]);
+  });
+
+  it('compares with a previous version that holds an image once its size is known', async () => {
+    const previous = `${PREVIOUS_NOTE}\n\n![Before](staged-media://${MEDIA_ID}.png)`;
+    commands.getNotePreviousVersion.mockResolvedValue(versionOf(previous));
+    commands.getMediaDimensions.mockResolvedValue({
+      [MEDIA_ID]: { width: 640, height: 480, density: 2 },
+    });
+    await open();
+
+    expect(commands.getMediaDimensions).toHaveBeenCalledExactlyOnceWith([MEDIA_ID]);
+    // The image the revision dropped stood where its last paragraph was added:
+    // one change, a modified one.
+    expect(markers().map((el) => el.dataset.kind)).toEqual(['removed', 'modified', 'modified']);
+
+    await press(marker('removed'));
+    const image = previousPane()!.querySelector<HTMLImageElement>('.markdown-media img')!;
+    expect(image.getAttribute('width')).toBe('320');
+  });
+});
+
+describe('NoteModal media the previous version names', () => {
+  const withImage = (markdown: string, id: string) =>
+    `${markdown}\n\n![Figure](staged-media://${id}.png)`;
+  const figureOf = (pane: Element, id: string) =>
+    pane.querySelector<HTMLElement>(`figure[data-media-id="${id}"]`)!;
+  /** The load failed; `error` does not bubble. */
+  const fail = (figure: Element) => figure.querySelector('img')!.dispatchEvent(new Event('error'));
+
+  it('shows a placeholder for an image the revision replaced, which is no longer stored', async () => {
+    commands.getNotePreviousVersion.mockResolvedValue(
+      versionOf(withImage(PREVIOUS_NOTE, MEDIA_ID))
+    );
+    await open(stored(withImage(CURRENT_NOTE, NOTE_MEDIA_ID)));
+    await press(markers().at(-1)!);
+    const figure = figureOf(previousPane()!, MEDIA_ID);
+    expect(figure.hasAttribute('data-media-missing')).toBe(false);
+
+    fail(figure);
+
+    expect(figure.getAttribute('data-media-missing')).toBe('image');
+    expect(figure.getAttribute('data-media-missing-label')).toBe('Image no longer available');
+    // The block is still the changed one: marked, and lit by its marker.
+    expect(figure.getAttribute(NOTE_DIFF_ATTRIBUTE)).toBe('modified');
+    expect(figure.hasAttribute(NOTE_DIFF_ACTIVE_ATTRIBUTE)).toBe(true);
+  });
+
+  it('leaves an image both versions embed as it is, and the note’s own', async () => {
+    commands.getNotePreviousVersion.mockResolvedValue(
+      versionOf(withImage(PREVIOUS_NOTE, NOTE_MEDIA_ID))
+    );
+    await open(stored(withImage(CURRENT_NOTE, NOTE_MEDIA_ID)));
+    await press(marker('modified'));
+
+    fail(figureOf(previousPane()!, NOTE_MEDIA_ID));
+    fail(figureOf(note(), NOTE_MEDIA_ID));
+
+    expect(document.querySelector('[data-media-missing]')).toBeNull();
+  });
+});
+
+describe('NoteModal image sizes', () => {
+  it('does not hold the note back for the images of its previous version', async () => {
+    // Each lookup waits for the test, as a slow one would.
+    const lookups: {
+      ids: string[];
+      answer: (found: Record<string, ImageDimensions>) => void;
+    }[] = [];
+    commands.getMediaDimensions.mockImplementation(
+      (ids) => new Promise((answer) => lookups.push({ ids, answer }))
+    );
+    const withImage = (markdown: string, id: string) =>
+      `${markdown}\n\n![Figure](staged-media://${id}.png)`;
+    commands.getNotePreviousVersion.mockResolvedValue(
+      versionOf(withImage(PREVIOUS_NOTE, MEDIA_ID))
+    );
+
+    // The previous version arrives while the note's own lookup is out.
+    await open(stored(withImage(CURRENT_NOTE, NOTE_MEDIA_ID)));
+    // Its image is asked for on its own: the note's is not asked for twice.
+    expect(lookups.map((lookup) => lookup.ids)).toEqual([[NOTE_MEDIA_ID], [MEDIA_ID]]);
+    expect(notePane().querySelector('.markdown-content')).toBeNull();
+
+    // The note renders on its own lookup's answer, the other still out.
+    lookups[0].answer({ [NOTE_MEDIA_ID]: { width: 640, height: 480, density: 2 } });
+    await settle();
+    expect(note().querySelector('.markdown-media img')!.getAttribute('width')).toBe('320');
+    expect(bar()).toBeNull();
+
+    lookups[1].answer({ [MEDIA_ID]: { width: 200, height: 100, density: 1 } });
+    await settle();
+    expect(markers().length).toBeGreaterThan(0);
+    expect(lookups).toHaveLength(2);
+  });
+});
+
+describe('NoteModal previous version', () => {
+  it('opens the previous version beside the note on a marker press, in the chat’s place', async () => {
+    const { onChatOpenChange } = await open({ chatOpen: true });
+    expect(chatPane()).not.toBeNull();
+    expect(dialog()!.style.width).toBe(`${NOTE_DIALOG_WIDTH + 380}px`);
+
+    await press(marker('modified'));
+
+    const pane = previousPane()!;
+    expect(pane.textContent).toContain('Previous version');
+    expect(pane.textContent).toContain('saved 5m ago');
+    expect(pane.querySelector('.markdown-content')!.textContent).toContain(
+      'The cache is warmed when the app starts.'
+    );
+    // The chat closed for it, and the host was told.
+    expect(chatPane()).toBeNull();
+    expect(onChatOpenChange).toHaveBeenLastCalledWith(false);
+    // Two note columns, both named, and every change tinted in both.
+    expect(dialog()!.style.width).toBe(`${NOTE_DIALOG_WIDTH * 2}px`);
+    expect(notePane().querySelector('.note-diff-pane-header')!.textContent).toContain(
+      'Current version'
+    );
+    expect(notePane().querySelector('.modal-content')!.classList.contains('note-diff-all')).toBe(
+      true
+    );
+    // The pressed change is lit in both versions.
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+    expect(lit(pane)).toEqual(['The cache is warmed when the app starts.']);
+    expect(marker('modified').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('has no markers beside the previous version: the note’s are the only ones', async () => {
+    await open();
+    await press(marker('modified'));
+    const pane = previousPane()!;
+
+    expect(markersIn(pane)).toEqual([]);
+    expect(pane.querySelector('.note-change-bar')).toBeNull();
+    // The note keeps one for each change, in the split as in the single pane.
+    expect(markers().map((el) => el.dataset.kind)).toEqual(HUNK_KINDS);
+    expect(bar()!.closest('.modal-content')).not.toBeNull();
+  });
+
+  it('paints every change as one rectangle in each version, or a line where it has no text', async () => {
+    await open();
+    await press(marker('modified'));
+    await layOutBoth();
+
+    // Removed, modified, added: the selected one lit in both versions.
+    expect(paintedIn(previousPane()!)).toEqual([
+      ['block', 'removed', false],
+      ['block', 'modified', true],
+      ['gap', 'added', false],
+    ]);
+    expect(paintedIn(notePane())).toEqual([
+      ['gap', 'removed', false],
+      ['block', 'modified', true],
+      ['block', 'added', false],
+    ]);
+    // Behind the text of each version, in what scrolls it: nothing is put
+    // into the rendered markdown.
+    for (const pane of [previousPane()!, notePane()]) {
+      const layer = pane.querySelector('.note-diff-blocks')!;
+      expect(layer.getAttribute('aria-hidden')).toBe('true');
+      expect(layer.closest('.markdown-content')).toBeNull();
+      expect(pane.querySelector('.markdown-content .note-diff-block')).toBeNull();
+    }
+    expect(notePane().querySelector('.note-diff-blocks')!.parentElement).toBe(
+      notePane().querySelector('.modal-content')
+    );
+  });
+
+  it('reaches every change from the note’s markers and from its band, by pointer and by keyboard', async () => {
+    await open();
+    await press(marker('modified'));
+    await layOutBoth();
+    const pane = previousPane()!;
+    const pointed = () =>
+      connectors()
+        .filter((el) => el.classList.contains('is-pointed'))
+        .map((el) => el.dataset.kind);
+    const band = (kind: string) =>
+      connectors()
+        .find((el) => el.dataset.kind === kind)!
+        .querySelector<SVGPathElement>('.connector-fill')!;
+
+    for (const kind of HUNK_KINDS) {
+      // Keyboard: the note's marker is a button in the Tab order. Focus
+      // points at its change in both versions, Enter (a button's click)
+      // selects it.
+      const button = marker(kind);
+      expect(button.tagName).toBe('BUTTON');
+      expect(button.tabIndex).toBe(0);
+      button.focus();
+      flushSync();
+      expect(pointed()).toEqual([kind]);
+      await press(button);
+      expect(button.getAttribute('aria-pressed')).toBe('true');
+      button.blur();
+      flushSync();
+      expect(pointed()).toEqual([kind]);
+
+      // Pointer, at the note's marker.
+      const other = HUNK_KINDS.find((k) => k !== kind)!;
+      pointerArrives(marker(other));
+      flushSync();
+      expect(pointed()).toEqual([other]);
+      marker(other).dispatchEvent(new MouseEvent('pointerleave'));
+      flushSync();
+
+      // Pointer, at the band: what is left of the previous version's reach.
+      pointerArrives(band(other));
+      flushSync();
+      expect(pointed()).toEqual([other]);
+      band(other).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle();
+      expect(marker(other).getAttribute('aria-pressed')).toBe('true');
+      band(other).dispatchEvent(new MouseEvent('pointerleave'));
+      flushSync();
+      expect(pointed()).toEqual([other]);
+    }
+    // Removed text included: it is lit where it is, from the note's side.
+    await press(marker('removed'));
+    expect(lit(pane)).toEqual(['Logs are kept for a week.']);
+    expect(lit(note())).toEqual([]);
+    expect(paintedIn(notePane())[0]).toEqual(['gap', 'removed', true]);
+  });
+
+  it('joins each change across the gutter between the two versions, and only there', async () => {
+    await open();
+    // One pane: nothing to join.
+    expect(connectors()).toEqual([]);
+
+    await press(marker('modified'));
+    // jsdom lays nothing out: give both versions their blocks.
+    await layOutBoth();
+    const pane = previousPane()!;
+
+    // One band per change, between the panes: in the previous version's
+    // pane but outside its scroll area, since it follows both.
+    expect(connectors().map((el) => el.dataset.kind)).toEqual(HUNK_KINDS);
+    expect(connectors().every((el) => pane.contains(el))).toBe(true);
+    expect(connectors().every((el) => el.closest('.previous-scroll') === null)).toBe(true);
+    // The selected change's band is the one lit.
+    expect(
+      connectors()
+        .filter((el) => el.classList.contains('is-pointed'))
+        .map((el) => el.dataset.kind)
+    ).toEqual(['modified']);
+
+    // A band is part of its change: pressing it selects the change.
+    connectors()[0]
+      .querySelector('.connector-fill')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await settle();
+    expect(marker('removed').getAttribute('aria-pressed')).toBe('true');
+    expect(lit(pane)).toEqual(['Logs are kept for a week.']);
+    // The markers are still the only way in by keyboard, and the only names.
+    expect(pane.querySelectorAll('.note-diff-connectors [tabindex]')).toHaveLength(0);
+    expect(document.querySelector('.note-diff-connectors')!.getAttribute('aria-hidden')).toBe(
+      'true'
+    );
+
+    await pressEscape();
+    expect(previousPane()).toBeNull();
+    expect(connectors()).toEqual([]);
+  });
+
+  it('closes the previous version when the chat opens', async () => {
+    const { onChatOpenChange } = await open();
+    await press(marker('modified'));
+    expect(previousPane()).not.toBeNull();
+
+    await press(button('Show chat pane'));
+
+    expect(previousPane()).toBeNull();
+    expect(chatPane()).not.toBeNull();
+    expect(onChatOpenChange).toHaveBeenLastCalledWith(true);
+    expect(lit(note())).toEqual([]);
+    expect(dialog()!.style.width).toBe(`${NOTE_DIALOG_WIDTH + 380}px`);
+  });
+
+  it('closes the previous version when the host opens the chat', async () => {
+    const { props } = await open();
+    await press(marker('modified'));
+
+    props.chatOpen = true;
+    await settle();
+
+    expect(previousPane()).toBeNull();
+    expect(chatPane()).not.toBeNull();
+  });
+
+  it('closes the previous version from its header and keeps the note', async () => {
+    const { onClose } = await open();
+    await press(marker('added'));
+
+    await press(button('Close previous version'));
+
+    expect(previousPane()).toBeNull();
+    expect(lit(note())).toEqual([]);
+    expect(notePane().querySelector('.note-diff-pane-header')).toBeNull();
+    expect(dialog()!.style.width).toBe(`${NOTE_DIALOG_WIDTH}px`);
+    expect(markers()).toHaveLength(3);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('closes the previous version on Escape and the note on the next', async () => {
+    const { onClose } = await open();
+    await press(marker('modified'));
+    expect(previousPane()).not.toBeNull();
+
+    await pressEscape();
+
+    expect(previousPane()).toBeNull();
+    expect(lit(note())).toEqual([]);
+    expect(dialog()).not.toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await pressEscape();
+
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('leaves nothing lit after Escape with the pointer on a band between the versions', async () => {
+    await open();
+    await press(marker('modified'));
+    await layOutBoth();
+    const pane = previousPane()!;
+    const gaps = () => [...notePane().querySelectorAll<HTMLElement>('.note-diff-gap')];
+
+    pointerArrives(connectors()[0].querySelector('.connector-fill')!);
+    flushSync();
+    expect(lit(pane)).toEqual(['Logs are kept for a week.']);
+
+    await pressEscape();
+
+    expect(previousPane()).toBeNull();
+    expect(lit(note())).toEqual([]);
+    expect(gaps()).toEqual([]);
+    expect(markers().filter((el) => el.classList.contains('is-pointed'))).toEqual([]);
+  });
+
+  it('keeps a change lit by its focused marker after Escape closes the previous version', async () => {
+    const { onClose } = await open();
+    const focused = marker('modified');
+
+    // Tab to the marker, then Enter, which is a button's click.
+    focused.focus();
+    flushSync();
+    await press(focused);
+    expect(previousPane()).not.toBeNull();
+
+    await pressEscape();
+
+    // The selection is let go of and the pane is gone. Focus never left the
+    // marker, so it still shows its change.
+    expect(previousPane()).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(focused);
+    expect(focused.getAttribute('aria-pressed')).toBe('false');
+    expect(focused.classList.contains('is-pointed')).toBe(true);
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+
+    // Until focus leaves it.
+    focused.blur();
+    flushSync();
+    expect(lit(note())).toEqual([]);
+  });
+
+  it('closes only the search on Escape in the find field, and keeps the previous version', async () => {
+    const { onClose } = await open();
+    await press(marker('modified'));
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
+    expect(previousPane()).not.toBeNull();
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The next Escape is the previous version's, and the one after the note's.
+    await pressEscape();
+    expect(previousPane()).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    await pressEscape();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('closes the search and the note on one Escape in the find field when nothing of the diff is open', async () => {
+    const { onClose } = await open();
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('closes only the search on Escape in the find field while a change is lit without a second pane', async () => {
+    screen.wide = false;
+    viewport.canSplit = false;
+    const { onClose } = await open();
+    await press(marker('modified'));
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('closes the search and the note on one Escape again once the previous version is closed', async () => {
+    const { onClose } = await open();
+    await press(marker('modified'));
+    await pressEscape();
+    expect(previousPane()).toBeNull();
+    const field = await openSearch();
+
+    await pressEscape(field);
+
+    expect(searchBar()).toBeNull();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('closes the note on Escape when nothing of the diff is open', async () => {
+    const { onClose } = await open();
+
+    await pressEscape();
+
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the change lit without a second pane where the window is too narrow', async () => {
+    screen.wide = false;
+    viewport.canSplit = false;
+    const { onClose } = await open();
+
+    await press(marker('modified'));
+
+    expect(previousPane()).toBeNull();
+    expect(connectors()).toEqual([]);
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+    expect(dialog()!.style.width).toBe(`${NOTE_DIALOG_WIDTH}px`);
+
+    // Escape lets go of it before it closes the note.
+    await pressEscape();
+    expect(lit(note())).toEqual([]);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps a change lit by its focused marker when a second press lets go of it in a narrow window', async () => {
+    screen.wide = false;
+    viewport.canSplit = false;
+    await open();
+    const focused = marker('modified');
+
+    // Tab to the marker, then Enter twice: the first selects the change, the
+    // second lets go of it.
+    focused.focus();
+    flushSync();
+    await press(focused);
+    expect(focused.getAttribute('aria-pressed')).toBe('true');
+    await press(focused);
+
+    expect(previousPane()).toBeNull();
+    expect(document.activeElement).toBe(focused);
+    expect(focused.getAttribute('aria-pressed')).toBe('false');
+    expect(focused.classList.contains('is-pointed')).toBe(true);
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+
+    // Until focus leaves it.
+    focused.blur();
+    flushSync();
+    expect(lit(note())).toEqual([]);
+  });
+
+  it('starts over when the note is revised under an open previous version', async () => {
+    const { props } = await open();
+    await press(marker('modified'));
+    expect(previousPane()).not.toBeNull();
+
+    // What was the note is now its previous version.
+    const revised = `${CURRENT_NOTE}\n\nOne more paragraph.`;
+    commands.getNotePreviousVersion.mockResolvedValue(versionOf(CURRENT_NOTE, 'version-2'));
+    Object.assign(props, stored(revised), { noteUpdatedAt: 3_000 });
+    await settle();
+
+    expect(previousPane()).toBeNull();
+    expect(markers().map((el) => el.dataset.kind)).toEqual(['added']);
+    expect(lit(note())).toEqual([]);
+  });
+
+  it('keeps the previous version open through a write that left the text alone', async () => {
+    const { props } = await open();
+    await press(marker('modified'));
+
+    props.noteUpdatedAt = 3_000;
+    await settle();
+
+    expect(commands.getNotePreviousVersion).toHaveBeenCalledTimes(2);
+    expect(previousPane()).not.toBeNull();
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+  });
+});
+
+describe('NoteModal section links beside the previous version', () => {
+  // Both versions have "Limits", in the same place. Only the previous one
+  // has "Rollout plan" and only the note has "Audit"; neither has the last.
+  const LINKS = (other: string) =>
+    `Jump to [the limits](#limits), [the plan](#rollout-plan), [the audit](#audit), ` +
+    `[nowhere](#no-such-heading) or ${other}.`;
+  const SECTIONED_PREVIOUS = [
+    '# Cache design',
+    '',
+    LINKS('back'),
+    '',
+    'Nothing is written to disk.',
+    '',
+    '## Limits',
+    '',
+    'Logs are kept for a week.',
+    '',
+    '## Rollout plan',
+    '',
+    'One region at a time.',
+  ].join('\n');
+  const SECTIONED_CURRENT = [
+    '# Cache design',
+    '',
+    LINKS('on'),
+    '',
+    'Nothing is written to disk.',
+    '',
+    '## Limits',
+    '',
+    'Logs are kept for a month.',
+    '',
+    '## Audit',
+    '',
+    'Every eviction is logged.',
+  ].join('\n');
+
+  const noteScroller = () => notePane().querySelector<HTMLElement>('.modal-content')!;
+  const previousScroller = () => previousPane()!.querySelector<HTMLElement>('.previous-scroll')!;
+  const previousNote = () => previousPane()!.querySelector<HTMLElement>('.markdown-content')!;
+  const link = (version: Element, href: string) =>
+    [...version.querySelectorAll<HTMLAnchorElement>('a')].find(
+      (a) => a.getAttribute('href') === href
+    )!;
+  const heading = (version: Element, text: string) =>
+    [...version.querySelectorAll<HTMLElement>('h1, h2')].find((h) => h.textContent === text)!;
+
+  /** Press a link as a reader does, and say whether the webview was kept from navigating. */
+  async function follow(anchor: HTMLAnchorElement) {
+    const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+    anchor.dispatchEvent(event);
+    await settle();
+    return event.defaultPrevented;
+  }
+
+  /** Both versions open side by side, each scroll area recording what it is told to scroll to. */
+  async function openSplit(viewport = 700) {
+    commands.getNotePreviousVersion.mockResolvedValue(versionOf(SECTIONED_PREVIOUS));
+    await open(stored(SECTIONED_CURRENT));
+    await press(markers()[0]);
+    await layOutBoth(viewport);
+    const scrolls = { note: vi.fn(), previous: vi.fn() };
+    noteScroller().scrollTo = scrolls.note as unknown as Element['scrollTo'];
+    previousScroller().scrollTo = scrolls.previous as unknown as Element['scrollTo'];
+    return scrolls;
+  }
+
+  it('scrolls the previous version to its own heading for a section link pressed in it', async () => {
+    const scrolls = await openSplit();
+
+    expect(await follow(link(previousNote(), '#limits'))).toBe(true);
+
+    // The heading both versions have: the previous version's is the one found.
+    expect(scrolls.previous).toHaveBeenCalledOnce();
+    expect(scrolls.note).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(heading(previousNote(), 'Limits'));
+  });
+
+  it('finds a heading only the previous version has', async () => {
+    const scrolls = await openSplit();
+
+    expect(await follow(link(previousNote(), '#rollout-plan'))).toBe(true);
+
+    expect(scrolls.previous).toHaveBeenCalledOnce();
+    expect(scrolls.note).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(heading(previousNote(), 'Rollout plan'));
+  });
+
+  it.each([
+    ['only the note has', '#audit'],
+    ['neither version has', '#no-such-heading'],
+  ])(
+    'goes nowhere for a link in the previous version to a heading %s, and keeps the webview where it is',
+    async (_what, href) => {
+      const scrolls = await openSplit();
+      const address = window.location.href;
+
+      expect(await follow(link(previousNote(), href))).toBe(true);
+
+      expect(scrolls.previous).not.toHaveBeenCalled();
+      expect(scrolls.note).not.toHaveBeenCalled();
+      expect(previousPane()!.contains(document.activeElement)).toBe(false);
+      expect(note().contains(document.activeElement)).toBe(false);
+      expect(window.location.href).toBe(address);
+    }
+  );
+
+  it('still scrolls the note to its own headings for a section link pressed in the note', async () => {
+    const scrolls = await openSplit();
+
+    expect(await follow(link(note(), '#limits'))).toBe(true);
+    expect(scrolls.note).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(heading(note(), 'Limits'));
+
+    expect(await follow(link(note(), '#audit'))).toBe(true);
+    expect(scrolls.note).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(heading(note(), 'Audit'));
+
+    // A heading only the previous version has is not one of the note's.
+    expect(await follow(link(note(), '#rollout-plan'))).toBe(true);
+    expect(scrolls.note).toHaveBeenCalledTimes(2);
+    expect(scrolls.previous).not.toHaveBeenCalled();
+  });
+
+  it('brings the note along when a section link scrolls the previous version', async () => {
+    // Nine blocks of 100px in panes 300px tall.
+    await openSplit(300);
+    const target = heading(previousNote(), 'Limits');
+    const scroller = previousScroller();
+    // The layout jsdom does not do: where the heading is on screen, and a
+    // scroll that happens and is reported.
+    target.getBoundingClientRect = () =>
+      ({ top: target.offsetTop - scroller.scrollTop }) as DOMRect;
+    scroller.scrollTo = ((options: ScrollToOptions) => {
+      scroller.scrollTop = options.top ?? 0;
+      scroller.dispatchEvent(new Event('scroll'));
+    }) as Element['scrollTo'];
+    expect(target.offsetTop).toBe(300);
+    expect(noteScroller().scrollTop).toBe(0);
+
+    await follow(link(previousNote(), '#limits'));
+
+    // The previous version's heading is at the top of its pane, and the
+    // note has followed as it follows any scroll there: its own "Limits" is
+    // level with it.
+    expect(scroller.scrollTop).toBe(300);
+    expect(noteScroller().scrollTop).toBe(heading(note(), 'Limits').offsetTop);
+  });
+});

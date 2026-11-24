@@ -71,6 +71,8 @@ pub(crate) mod workspace_setup;
 #[cfg(test)]
 mod board_load_bench;
 #[cfg(test)]
+mod note_versions_seed;
+#[cfg(test)]
 pub mod test_utils;
 
 use serde::Serialize;
@@ -2492,6 +2494,7 @@ pub fn run() {
             note_commands::update_note,
             note_commands::delete_note,
             note_commands::get_note,
+            note_commands::get_note_previous_version,
             note_commands::set_note_read,
             note_commands::list_child_notes,
             note_commands::create_project_note,

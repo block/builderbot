@@ -270,6 +270,7 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     // Notes.
     ("note_commands.rs", "get_branch_note_by_session"),
     ("note_commands.rs", "get_note"),
+    ("note_commands.rs", "get_note_previous_version"),
     ("note_commands.rs", "list_child_notes"),
     ("note_commands.rs", "create_project_note"),
     ("note_commands.rs", "get_project_note"),

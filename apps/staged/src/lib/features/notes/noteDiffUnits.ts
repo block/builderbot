@@ -13,9 +13,11 @@
  * the browser collapses it and a `<br>` read as a space. Markup that leaves
  * the words alone therefore does not change it: the spans around a quoted
  * passage, find-in-note's marks, a list re-indented in the HTML. Code keeps
- * its whitespace, where it is content. `readNoteDiffUnitText` can also
- * report where each character of that text is in the DOM, which is how a
- * range of it is turned back into a `Range` (noteDiffHighlights.ts).
+ * its whitespace, where it is content. A table row's cells are kept apart
+ * (`CELL_SEPARATOR`), since which cell a word is in is content too.
+ * `readNoteDiffUnitText` can also report where each character of that text
+ * is in the DOM, which is how a range of it is turned back into a `Range`
+ * (noteDiffHighlights.ts).
  */
 
 import type { NoteDiffUnit } from './noteDiff';
@@ -96,6 +98,24 @@ function trailingNodes(element: Element): Node[] {
   return nodes;
 }
 
+/**
+ * What stands between two cells of a table row in the row's text, in place
+ * of the space the markup between them would have left.
+ *
+ * Without it a row is the same text wherever its cells are divided: `a b`
+ * beside `c` reads as `a` beside `b c` does, and words a revision moved to
+ * another column were no change at all. A tab, as a row copied out of a
+ * table has between its cells and as a reply's quote of one has. Rendered
+ * text holds no tab of its own outside code, where a tab collapses to a
+ * space, and the diff treats it as it treats a space: a word's highlight
+ * does not start or end on it, and a row that differs in nothing else is
+ * marked whole (`wordRanges` in noteDiff.ts).
+ */
+export const CELL_SEPARATOR = '\t';
+
+/** The cells of a table row. */
+const CELL_TAGS = new Set(['TD', 'TH']);
+
 /** The whitespace HTML collapses: space, tab, line feed, form feed, carriage return. */
 function isCollapsible(code: number): boolean {
   return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
@@ -108,8 +128,8 @@ export interface NoteDiffUnitText {
   nodes: Text[];
   /**
    * For each character of `text`, the index in `nodes` of the node holding
-   * it, or -1 for a space no text node holds (a `<br>`). Empty unless
-   * positions were asked for.
+   * it, or -1 for one no text node holds (the space of a `<br>`, the parting
+   * between two cells). Empty unless positions were asked for.
    */
   nodeOf: number[];
   /** For each character of `text`, its offset in that node. */
@@ -122,7 +142,9 @@ export interface NoteDiffUnitText {
  *
  * A run of whitespace is one space, and none is kept at either end; a
  * collapsed run is placed at its first character. Text inside a `<pre>` is
- * kept as it is.
+ * kept as it is. Each cell of a table row after its first is led by a
+ * `CELL_SEPARATOR`, an empty cell too, with no space kept either side of
+ * it: the row reads the same however its markup is spaced.
  */
 export function readNoteDiffUnitText(element: Element, withPositions = false): NoteDiffUnitText {
   const nodes: Text[] = [];
@@ -131,16 +153,19 @@ export function readNoteDiffUnitText(element: Element, withPositions = false): N
   let text = '';
   // A space owed to the text so far, written once more text follows it.
   let pending: { node: number; offset: number } | null = null;
+  // Nothing has been written since a cell began: a cell's text starts at its first word.
+  let cellStart = false;
 
   const write = (char: string, node: number, offset: number) => {
     text += char;
+    cellStart = false;
     if (withPositions) {
       nodeOf.push(node);
       offsetOf.push(offset);
     }
   };
   const owe = (node: number, offset: number) => {
-    if (text.length === 0) return;
+    if (text.length === 0 || cellStart) return;
     // A place in a text node is kept over a `<br>`'s, which has none.
     if (!pending || (pending.node === -1 && node !== -1)) pending = { node, offset };
   };
@@ -169,6 +194,12 @@ export function readNoteDiffUnitText(element: Element, withPositions = false): N
     if (tag === 'BR') {
       owe(-1, 0);
       return;
+    }
+    if (CELL_TAGS.has(tag) && node.previousElementSibling) {
+      // The space owed to the cell before goes: its text ended at its last word.
+      pending = null;
+      write(CELL_SEPARATOR, -1, 0);
+      cellStart = true;
     }
     const inPre = preformatted || tag === 'PRE';
     for (let child = node.firstChild; child; child = child.nextSibling) visit(child, inPre);

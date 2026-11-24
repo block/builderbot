@@ -105,7 +105,7 @@
   import '../../shared/markdown/mediaStyles.css';
   import { missingMedia } from '../../shared/markdown/missingMedia';
   import { pageVideos } from '../../shared/markdown/pageVideos';
-  import { followSectionLink } from '../../shared/markdown/sectionLinks';
+  import { followSectionLink, type SectionLinkScope } from '../../shared/markdown/sectionLinks';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -906,7 +906,15 @@
     return { type, id, ref, item };
   }
 
-  function handleContentClick(event: MouseEvent) {
+  /**
+   * A press in a rendered note. `section` is the markdown it was in and the
+   * box that scrolls it: the note's own, unless the previous version's pane
+   * says the press was in the version it shows.
+   */
+  function handleContentClick(
+    event: MouseEvent,
+    section: SectionLinkScope = { content: markdownEl, scroller: contentEl }
+  ) {
     if (openMediaViewerFromEvent(event) || openDiagramViewerFromEvent(event)) return;
 
     const click = hashtagClickFromTarget(event.target);
@@ -916,9 +924,12 @@
       onHashtagClick(click);
       return;
     }
-    // A link to a heading of this note scrolls to it, looked up in this
-    // note's own markdown: another note open behind may share the heading.
-    if (followSectionLink(event, { content: markdownEl, scroller: contentEl })) return;
+    // A link to a heading scrolls to it, looked up in the markdown the link
+    // is in: another note open behind may share the heading, and so does
+    // the previous version beside this one, where a link is to a heading of
+    // that version and scrolls its pane. A link that is in the markdown is
+    // kept from navigating the webview, whether or not a heading is found.
+    if (followSectionLink(event, section)) return;
     handleExternalLinkClick(event);
   }
 

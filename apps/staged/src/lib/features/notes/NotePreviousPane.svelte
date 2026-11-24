@@ -30,6 +30,12 @@
   keyboard. Text the revision removed, which has its full height here, has
   a short marker in the note, across the line where it was.
 
+  A link in the version to one of its sections (`[Limits](#limits)`) is to
+  a heading of this version: presses are handed to the viewer with this
+  pane's markdown and scroll area, so the heading is looked up here and this
+  pane is the one scrolled (sectionLinks.ts). The note follows, as it does
+  any scroll of this pane.
+
   The pane scrolls with the note (`currentScrollEl`). Each maps the other's
   place through the blocks both versions hold (noteDiffScroll.ts), so a
   shared block on the reference line in one is on it in the other. The pane
@@ -49,6 +55,7 @@
 -->
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
+  import type { SectionLinkScope } from '../../shared/markdown/sectionLinks';
   import { formatRelativeTime } from '../../shared/relativeTime';
   import type { NoteDiffSide } from './noteDiff';
   import {
@@ -88,8 +95,12 @@
     onClose: () => void;
     /** A change was pressed, at its band between the panes. */
     onSelect: (hunkId: string) => void;
-    /** A press or a key in the version, handled as the note's are. */
-    onContentClick?: (event: MouseEvent) => void;
+    /**
+     * A press or a key in the version, handled as the note's are. A press
+     * comes with the version's markdown and the box that scrolls it: a link
+     * to a section is to a heading of this version, and scrolls this pane.
+     */
+    onContentClick?: (event: MouseEvent, section: SectionLinkScope) => void;
     onContentKeydown?: (event: KeyboardEvent) => void;
     /** The rendered version. */
     content: Snippet;
@@ -272,7 +283,7 @@
       class="previous-scroll note-diff-all"
       style:--note-diff-blocks-right="{CONNECTOR_PREVIOUS_REACH}px"
       bind:this={scrollEl}
-      onclick={onContentClick}
+      onclick={(event) => onContentClick?.(event, { content: contentEl, scroller: scrollEl })}
       onkeydown={onContentKeydown}
     >
       <div class="previous-content">
@@ -360,12 +371,13 @@
      they are, so a change is painted across whatever part of it is in view.
 
      A scroll box cuts off what is drawn outside it, as the focus ring of a
-     heading or a diagram is. So the box is larger than the text by 4px all
-     round, and pulled out by as much, which leaves the text where it would
-     be without the box. */
+     heading or a diagram is. A heading's is the widest, 2px drawn 4px off
+     it, and a heading takes focus here when a link to it is followed. So
+     the box is larger than the text by 6px all round, and pulled out by as
+     much, which leaves the text where it would be without the box. */
   .previous-content {
-    margin: -4px;
-    padding: 4px;
+    margin: -6px;
+    padding: 6px;
     overflow-x: auto;
   }
 

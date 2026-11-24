@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import NotePreviousPane from './NotePreviousPane.svelte';
 import paneSource from './NotePreviousPane.svelte?raw';
+import modalSource from './NoteModal.svelte?raw';
 import {
   NOTE_DIFF_ACTIVE_ATTRIBUTE,
   NOTE_DIFF_ATTRIBUTE,
@@ -28,6 +29,7 @@ import {
   PREVIOUS_NOTE,
 } from './testStubs/noteDiffFixtures';
 import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
+import type { SectionLinkScope } from '../../shared/markdown/sectionLinks';
 
 /**
  * The previous version beside the note: marked from the viewer's diff and
@@ -94,7 +96,7 @@ function render({
   const html = renderNoteMarkdown(shown);
   const onClose = vi.fn();
   const onSelect = vi.fn<(hunkId: string) => void>();
-  const onContentClick = vi.fn<(event: MouseEvent) => void>();
+  const onContentClick = vi.fn<(event: MouseEvent, scope: SectionLinkScope) => void>();
   const props = reactiveProps({
     noteDiff,
     contentEl: undefined as HTMLElement | undefined,
@@ -580,6 +582,25 @@ describe('NotePreviousPane', () => {
     expect(rule('.previous-content')).toMatch(/overflow-x:\s*auto/);
   });
 
+  it('leaves room in the sideways box for the focus ring of a heading a link was followed to', () => {
+    // A scroll box cuts off what is drawn outside it. The box is larger
+    // than the text by its padding, and pulled out by as much.
+    const styles = (source: string) =>
+      /<style[^>]*>([\s\S]*)<\/style>/.exec(source)![1].replace(/\/\*[\s\S]*?\*\//g, '');
+    const box = /\.previous-content\s*\{([^}]*)\}/.exec(styles(paneSource))![1];
+    const room = Number(/padding:\s*(\d+)px;/.exec(box)![1]);
+    expect(box).toMatch(new RegExp(`margin:\\s*-${room}px;`));
+
+    // The ring the viewer draws round a heading that took focus from the keyboard.
+    const ring = /:is\(h1, h2, h3, h4, h5, h6, a\[name\]\):focus-visible\)\s*\{([^}]*)\}/.exec(
+      styles(modalSource)
+    )![1];
+    const width = Number(/outline:\s*(\d+)px/.exec(ring)![1]);
+    const offset = Number(/outline-offset:\s*(\d+)px/.exec(ring)![1]);
+    expect(width + offset).toBeGreaterThan(0);
+    expect(room).toBeGreaterThanOrEqual(width + offset);
+  });
+
   it('lets go of a change hovered at its band when the pane closes', () => {
     const { noteDiff } = render();
 
@@ -639,6 +660,17 @@ describe('NotePreviousPane', () => {
     contentEl.querySelector('p')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
     expect(onContentClick).toHaveBeenCalledOnce();
+  });
+
+  it('says which markdown a press was in and what scrolls it: this version’s, not the note’s', () => {
+    const { contentEl, scrollEl, currentScrollEl, onContentClick } = render();
+
+    contentEl.querySelector('p')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    const [event, scope] = onContentClick.mock.calls[0];
+    expect(event).toBeInstanceOf(MouseEvent);
+    expect(scope).toEqual({ content: contentEl, scroller: scrollEl });
+    expect(scope.scroller).not.toBe(currentScrollEl);
   });
 
   it('keeps clear of what stands under the note’s scroll area', () => {

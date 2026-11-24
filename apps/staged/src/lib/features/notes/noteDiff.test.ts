@@ -286,6 +286,51 @@ describe('computeNoteDiff', () => {
     expect(covered(current[5].text, rowOp.currentRanges)).toEqual(['80']);
   });
 
+  it('pairs a table row whose words moved between its cells, with the row to show for it', () => {
+    // A row's text has a tab between its cells (noteDiffUnits.ts).
+    const header = unit('Setting\tLimit\tApplies to', 'tr');
+    const diff = computeNoteDiff(
+      [header, unit('uploads and downloads\tare capped\tper file', 'tr')],
+      [header, unit('uploads\tand downloads are capped\tper file', 'tr')]
+    );
+
+    // The words are the same and in the same order: where the cells end is
+    // all that differs, which is spacing and not a word.
+    expect(diff.hunks).toHaveLength(1);
+    expect(diff.hunks[0]).toMatchObject({
+      kind: 'modified',
+      previousIndices: [1],
+      currentIndices: [1],
+    });
+    expect(diff.hunks[0].ops).toEqual([
+      {
+        type: 'modified',
+        previousIndex: 1,
+        currentIndex: 1,
+        previousRanges: [],
+        currentRanges: [],
+        wholeUnit: true,
+      },
+    ]);
+  });
+
+  it('never ends a changed word of a table row on the parting between two cells', () => {
+    const diff = computeNoteDiff(
+      [unit('uploads\t10 MB\tper file', 'tr')],
+      [unit('downloads\t25 MB\tper folder', 'tr')]
+    );
+    const [op] = diff.hunks[0].ops;
+    if (op.type !== 'modified') throw new Error('expected a modified op');
+
+    // Changed words either side of a cell's edge are one stretch, as words
+    // either side of a space are; the stretch starts and ends on a word.
+    expect(covered('uploads\t10 MB\tper file', op.previousRanges)).toEqual(['uploads\t10', 'file']);
+    expect(covered('downloads\t25 MB\tper folder', op.currentRanges)).toEqual([
+      'downloads\t25',
+      'folder',
+    ]);
+  });
+
   it('shows a moved block as a removal and an addition', () => {
     const diff = computeNoteDiff([intro, middle, outro], [middle, outro, intro]);
 

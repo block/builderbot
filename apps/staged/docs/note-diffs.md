@@ -41,6 +41,20 @@ that replace a note's text: `update_note_title_and_content`,
   blocks, `noteDiff.ts` compares them, and `NoteChangeBar.svelte` and
   `NotePreviousPane.svelte` show the result. All of it is in
   `src/lib/features/notes/`.
+- A block is compared by its text as a reader sees it, with whitespace
+  collapsed, and by what the text does not show: link targets, images, a
+  code block's language, ticked boxes, a diagram's drawing. Bold, italics
+  and a table's column alignment are not compared.
+- A table is compared a row at a time, and a row's text keeps its cells
+  apart: a tab stands between one cell and the next (`CELL_SEPARATOR` in
+  `noteDiffUnits.ts`), an empty cell included. So `| a b | c |` and
+  `| a | b c |` are different rows, and words a revision moved to another
+  column get a marker like any other change. Such a row is amber. The words
+  that changed are painted in it as in any block; when the cells' edges are
+  all that moved, the whole row is painted, as a block is whose link target
+  alone changed. A word's highlight never starts or ends between two cells,
+  and changed words either side of a cell's edge are one highlight running
+  from one cell into the next.
 
 ## The rectangle behind a change
 
@@ -263,6 +277,18 @@ hit-tested by the browser and styled from CSS.
   dividing the panes is drawn beside their headers only. The note's own
   markers stay in its right margin, where they are in the one-pane view, so
   opening the previous version moves none of them.
+- **Links in the previous version.** A link there is followed as it is in
+  the note. One to a section (`[Limits](#limits)`) is to a heading of the
+  previous version: `NotePreviousPane` hands each press to the viewer with
+  its own markdown and scroll area, so the heading is looked up in that
+  version and that pane scrolls to it, with the note following as it
+  follows any scroll of the pane. The heading takes focus, and the box the
+  version scrolls sideways in is 6px larger than the text all round so that
+  the heading's focus ring is drawn whole. A link in the note is to the
+  note's headings, as in the one-pane view. Either way the webview does not
+  navigate: a link to a heading its own version does not have, or has no
+  longer, does nothing (`followSectionLink` in
+  `src/lib/shared/markdown/sectionLinks.ts`).
 - **Pointing.** Hovering a band lights its change in both panes, as hovering
   a marker does, and pressing it selects the change. Only the bands take the
   pointer; between them a press is the text's. The wheel over a band scrolls

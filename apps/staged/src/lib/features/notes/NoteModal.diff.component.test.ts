@@ -163,14 +163,17 @@ const paintedIn = (pane: Element) =>
     el.dataset.kind,
     el.classList.contains('is-active'),
   ]);
-/** Lay both versions out, in panes that show all of their blocks, as a layout would report. */
-async function layOutBoth() {
+/**
+ * Lay both versions out, as a layout would report: in panes that show all of
+ * their blocks, or `viewport` of them.
+ */
+async function layOutBoth(viewport = 700) {
   const pane = previousPane()!;
-  layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, 700);
+  layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, viewport);
   layOut(
     pane.querySelector('.markdown-content')!,
     pane.querySelector<HTMLElement>('.previous-scroll')!,
-    700
+    viewport
   );
   resize();
   await settle();
@@ -806,5 +809,155 @@ describe('NoteModal previous version', () => {
     expect(commands.getNotePreviousVersion).toHaveBeenCalledTimes(2);
     expect(previousPane()).not.toBeNull();
     expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+  });
+});
+
+describe('NoteModal section links beside the previous version', () => {
+  // Both versions have "Limits", in the same place. Only the previous one
+  // has "Rollout plan" and only the note has "Audit"; neither has the last.
+  const LINKS = (other: string) =>
+    `Jump to [the limits](#limits), [the plan](#rollout-plan), [the audit](#audit), ` +
+    `[nowhere](#no-such-heading) or ${other}.`;
+  const SECTIONED_PREVIOUS = [
+    '# Cache design',
+    '',
+    LINKS('back'),
+    '',
+    'Nothing is written to disk.',
+    '',
+    '## Limits',
+    '',
+    'Logs are kept for a week.',
+    '',
+    '## Rollout plan',
+    '',
+    'One region at a time.',
+  ].join('\n');
+  const SECTIONED_CURRENT = [
+    '# Cache design',
+    '',
+    LINKS('on'),
+    '',
+    'Nothing is written to disk.',
+    '',
+    '## Limits',
+    '',
+    'Logs are kept for a month.',
+    '',
+    '## Audit',
+    '',
+    'Every eviction is logged.',
+  ].join('\n');
+
+  const noteScroller = () => notePane().querySelector<HTMLElement>('.modal-content')!;
+  const previousScroller = () => previousPane()!.querySelector<HTMLElement>('.previous-scroll')!;
+  const previousNote = () => previousPane()!.querySelector<HTMLElement>('.markdown-content')!;
+  const link = (version: Element, href: string) =>
+    [...version.querySelectorAll<HTMLAnchorElement>('a')].find(
+      (a) => a.getAttribute('href') === href
+    )!;
+  const heading = (version: Element, text: string) =>
+    [...version.querySelectorAll<HTMLElement>('h1, h2')].find((h) => h.textContent === text)!;
+
+  /** Press a link as a reader does, and say whether the webview was kept from navigating. */
+  async function follow(anchor: HTMLAnchorElement) {
+    const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+    anchor.dispatchEvent(event);
+    await settle();
+    return event.defaultPrevented;
+  }
+
+  /** Both versions open side by side, each scroll area recording what it is told to scroll to. */
+  async function openSplit(viewport = 700) {
+    commands.getNotePreviousVersion.mockResolvedValue(versionOf(SECTIONED_PREVIOUS));
+    await open(stored(SECTIONED_CURRENT));
+    await press(markers()[0]);
+    await layOutBoth(viewport);
+    const scrolls = { note: vi.fn(), previous: vi.fn() };
+    noteScroller().scrollTo = scrolls.note as unknown as Element['scrollTo'];
+    previousScroller().scrollTo = scrolls.previous as unknown as Element['scrollTo'];
+    return scrolls;
+  }
+
+  it('scrolls the previous version to its own heading for a section link pressed in it', async () => {
+    const scrolls = await openSplit();
+
+    expect(await follow(link(previousNote(), '#limits'))).toBe(true);
+
+    // The heading both versions have: the previous version's is the one found.
+    expect(scrolls.previous).toHaveBeenCalledOnce();
+    expect(scrolls.note).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(heading(previousNote(), 'Limits'));
+  });
+
+  it('finds a heading only the previous version has', async () => {
+    const scrolls = await openSplit();
+
+    expect(await follow(link(previousNote(), '#rollout-plan'))).toBe(true);
+
+    expect(scrolls.previous).toHaveBeenCalledOnce();
+    expect(scrolls.note).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(heading(previousNote(), 'Rollout plan'));
+  });
+
+  it.each([
+    ['only the note has', '#audit'],
+    ['neither version has', '#no-such-heading'],
+  ])(
+    'goes nowhere for a link in the previous version to a heading %s, and keeps the webview where it is',
+    async (_what, href) => {
+      const scrolls = await openSplit();
+      const address = window.location.href;
+
+      expect(await follow(link(previousNote(), href))).toBe(true);
+
+      expect(scrolls.previous).not.toHaveBeenCalled();
+      expect(scrolls.note).not.toHaveBeenCalled();
+      expect(previousPane()!.contains(document.activeElement)).toBe(false);
+      expect(note().contains(document.activeElement)).toBe(false);
+      expect(window.location.href).toBe(address);
+    }
+  );
+
+  it('still scrolls the note to its own headings for a section link pressed in the note', async () => {
+    const scrolls = await openSplit();
+
+    expect(await follow(link(note(), '#limits'))).toBe(true);
+    expect(scrolls.note).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(heading(note(), 'Limits'));
+
+    expect(await follow(link(note(), '#audit'))).toBe(true);
+    expect(scrolls.note).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(heading(note(), 'Audit'));
+
+    // A heading only the previous version has is not one of the note's.
+    expect(await follow(link(note(), '#rollout-plan'))).toBe(true);
+    expect(scrolls.note).toHaveBeenCalledTimes(2);
+    expect(scrolls.previous).not.toHaveBeenCalled();
+  });
+
+  it('brings the note along when a section link scrolls the previous version', async () => {
+    // Nine blocks of 100px in panes 300px tall.
+    await openSplit(300);
+    const target = heading(previousNote(), 'Limits');
+    const scroller = previousScroller();
+    // The layout jsdom does not do: where the heading is on screen, and a
+    // scroll that happens and is reported.
+    target.getBoundingClientRect = () =>
+      ({ top: target.offsetTop - scroller.scrollTop }) as DOMRect;
+    scroller.scrollTo = ((options: ScrollToOptions) => {
+      scroller.scrollTop = options.top ?? 0;
+      scroller.dispatchEvent(new Event('scroll'));
+    }) as Element['scrollTo'];
+    expect(target.offsetTop).toBe(300);
+    expect(noteScroller().scrollTop).toBe(0);
+
+    await follow(link(previousNote(), '#limits'));
+
+    // The previous version's heading is at the top of its pane, and the
+    // note has followed as it follows any scroll there: its own "Limits" is
+    // level with it.
+    expect(scroller.scrollTop).toBe(300);
+    expect(noteScroller().scrollTop).toBe(heading(note(), 'Limits').offsetTop);
   });
 });

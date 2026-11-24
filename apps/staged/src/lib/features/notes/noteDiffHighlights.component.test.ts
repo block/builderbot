@@ -331,6 +331,94 @@ describe('noteDiffHunkRanges', () => {
   });
 });
 
+describe('noteDiffHunkRanges in a table row', () => {
+  const table = (row: string) =>
+    ['| Setting | Limit | Applies to |', '| --- | --- | --- |', row].join('\n');
+
+  it('covers the changed words of each cell, in the cell that holds them', () => {
+    const { previous, current, diff } = scene(
+      table('| uploads here | 10 MB each | every file |'),
+      table('| downloads here | 25 MB each | every folder |')
+    );
+    const [hunk] = diff.hunks;
+    const cellOf = (range: Range) =>
+      [...range.startContainer.parentElement!.closest('tr')!.cells].indexOf(
+        range.startContainer.parentElement!.closest('td')!
+      );
+
+    const added = noteDiffHunkRanges(current, hunk, 'current');
+    expect(texts(added)).toEqual(['downloads', '25', 'folder']);
+    expect(added.map(cellOf)).toEqual([0, 1, 2]);
+    const removed = noteDiffHunkRanges(previous, hunk, 'previous');
+    expect(texts(removed)).toEqual(['uploads', '10', 'file']);
+    expect(removed.map(cellOf)).toEqual([0, 1, 2]);
+    // No range starts or ends on the parting between two cells.
+    for (const range of [...added, ...removed]) {
+      expect(range.startContainer.nodeType).toBe(Node.TEXT_NODE);
+      expect(range.endContainer).toBe(range.startContainer);
+    }
+  });
+
+  it('runs changed words either side of a cell’s edge on as one stretch, from text to text', () => {
+    const { current, diff } = scene(
+      table('| uploads | 10 MB each | every file |'),
+      table('| downloads | 25 MB each | every file |')
+    );
+    const ranges = noteDiffHunkRanges(current, diff.hunks[0], 'current');
+
+    // As words either side of a line break are: nothing but the parting is between them.
+    expect(ranges).toHaveLength(1);
+    const [range] = ranges;
+    expect(range.startContainer.nodeType).toBe(Node.TEXT_NODE);
+    expect((range.startContainer as Text).data.slice(range.startOffset)).toBe('downloads');
+    expect(range.endContainer.nodeType).toBe(Node.TEXT_NODE);
+    expect((range.endContainer as Text).data.slice(0, range.endOffset)).toBe('25');
+    expect(range.startContainer.parentElement?.closest('td')?.cellIndex).toBe(0);
+    expect(range.endContainer.parentElement?.closest('td')?.cellIndex).toBe(1);
+  });
+
+  it('finds the same words with find-in-note’s marks in the cells', () => {
+    const { currentRoot, current, diff } = scene(
+      table('| uploads | 10 MB each | every file |'),
+      table('| uploads | 25 MB each | every folder |')
+    );
+
+    // One match is a changed word's own cell, one splits a changed word.
+    expect(highlightMatches(currentRoot, 'e', 0).total).toBeGreaterThan(3);
+
+    expect(texts(noteDiffHunkRanges(current, diff.hunks[0], 'current'))).toEqual(['25', 'folder']);
+  });
+
+  it('marks a row whose words moved between its cells, and points at text in it', () => {
+    const { previousRoot, currentRoot, previous, current, diff } = scene(
+      table('| uploads and downloads | are capped | per file |'),
+      table('| uploads | and downloads are capped | per file |')
+    );
+
+    expect(diff.hunks).toHaveLength(1);
+    const [hunk] = diff.hunks;
+    applyNoteDiffMarks(currentRoot, current, diff.hunks, 'current');
+    applyNoteDiffMarks(previousRoot, previous, diff.hunks, 'previous');
+    expect(marks(currentRoot)).toEqual([['uploads', 'modified', hunk.id]]);
+    expect(marks(previousRoot)).toEqual([['uploads', 'modified', hunk.id]]);
+    expect(currentRoot.querySelector(`[${NOTE_DIFF_ATTRIBUTE}]`)?.tagName).toBe('TR');
+
+    // Whatever is pointed at is the row's own words, never the parting alone.
+    for (const [units, side] of [
+      [current, 'current'],
+      [previous, 'previous'],
+    ] as const) {
+      const ranges = noteDiffHunkRanges(units, hunk, side);
+      expect(ranges.length).toBeGreaterThan(0);
+      for (const range of ranges) {
+        expect(range.toString().trim()).not.toBe('');
+        expect(range.startContainer.parentElement?.closest('tr')).toBe(units[1].element);
+        expect(range.endContainer.parentElement?.closest('tr')).toBe(units[1].element);
+      }
+    }
+  });
+});
+
 describe('paintNoteDiffWords', () => {
   class FakeHighlight {
     ranges: Range[];

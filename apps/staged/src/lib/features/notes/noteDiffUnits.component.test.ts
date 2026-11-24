@@ -4,7 +4,9 @@ import { watchForMissingMedia } from '../../shared/markdown/missingMedia';
 import type { PikchrRenderer } from '../../shared/markdown/pikchrRendering';
 import { highlightMatches } from '../../shared/textHighlight';
 import { computeNoteDiff } from './noteDiff';
+import { applyQuoteHighlights } from './noteQuoteHighlights';
 import {
+  CELL_SEPARATOR,
   extractNoteDiffUnits,
   measureNoteDiffUnits,
   readNoteDiffUnitText,
@@ -105,8 +107,8 @@ describe('extractNoteDiffUnits', () => {
       ['ol-li', 'Run the migration'],
       ['ul-li', 'Schema reviewed'],
       ['ul-li', 'Rollout planned'],
-      ['tr', 'Name Limit'],
-      ['tr', 'uploads 10 MB'],
+      ['tr', 'Name\tLimit'],
+      ['tr', 'uploads\t10 MB'],
       ['code', 'const limit = 10;\n  evict(limit);\n'],
       ['media', 'The settings page'],
       ['media', ''],
@@ -209,6 +211,110 @@ describe('extractNoteDiffUnits', () => {
     expect(computeNoteDiff(extractNoteDiffUnits(parse(markdown)), marked).hunks).toEqual([]);
   });
 
+  describe('a table row', () => {
+    const table = (...rows: string[]) => ['| One | Two | Three |', '| --- | --- | --- |', ...rows];
+    /** The units of a three-column table with these rows under its header. */
+    const rowsOf = (...rows: string[]) =>
+      extractNoteDiffUnits(parse(table(...rows).join('\n'))).slice(1);
+    /** The kinds of change between two tables that differ in their rows alone. */
+    const changes = (before: string[], after: string[]) =>
+      computeNoteDiff(
+        extractNoteDiffUnits(parse(table(...before).join('\n'))),
+        extractNoteDiffUnits(mount(table(...after).join('\n')))
+      ).hunks.map((hunk) => [hunk.kind, hunk.previousIndices, hunk.currentIndices]);
+
+    it('keeps its cells apart in its text', () => {
+      const [row] = rowsOf('| a b | c | d |');
+
+      expect(row.text).toBe(['a b', 'c', 'd'].join(CELL_SEPARATOR));
+    });
+
+    it('reads as changed when words moved from one cell to the next', () => {
+      // The words of the row are the same, in the same order, before and after.
+      const [before] = rowsOf('| a b | c | d |');
+      const [after] = rowsOf('| a | b c | d |');
+      expect(after.text.split(/\s/)).toEqual(before.text.split(/\s/));
+
+      expect(after.text).not.toBe(before.text);
+      expect(
+        changes(['| a b | c | d |', '| x | y | z |'], ['| a | b c | d |', '| x | y | z |'])
+      ).toEqual([['modified', [1], [1]]]);
+    });
+
+    it('reads as changed when a whole cell moved to the next column', () => {
+      const [before] = rowsOf('| a |  | b |');
+      const [after] = rowsOf('|  | a | b |');
+
+      expect(before.text).toBe(`a${CELL_SEPARATOR}${CELL_SEPARATOR}b`);
+      expect(after.text).toBe(`${CELL_SEPARATOR}a${CELL_SEPARATOR}b`);
+      expect(changes(['| a |  | b |'], ['|  | a | b |'])).toEqual([['modified', [1], [1]]]);
+    });
+
+    it('tells a cell moved from the first column to the last from the row it left', () => {
+      // Both read "a b" once the ends are trimmed, which a line diff does.
+      expect(changes(['|  | a | b |'], ['| a | b |  |'])).toEqual([['modified', [1], [1]]]);
+    });
+
+    it('reads the same whatever whitespace its markup has around and inside its cells', () => {
+      const row = (markup: string) => {
+        const root = document.createElement('div');
+        root.innerHTML = `<table><tbody>${markup}</tbody></table>`;
+        return extractNoteDiffUnits(root)[0].text;
+      };
+
+      expect(row('<tr><td>a b</td><td>c</td></tr>')).toBe(`a b${CELL_SEPARATOR}c`);
+      expect(row('<tr>\n  <td> a\n b </td>\n  <td>\n c </td>\n</tr>')).toBe(
+        `a b${CELL_SEPARATOR}c`
+      );
+    });
+
+    it('is unchanged by find-in-note’s marks and a reply’s quote spans inside its cells', () => {
+      const markdown = [
+        ...table('| uploads are capped | 10 MB each | per file |', '| x | y | z |'),
+        '',
+        'After the table.',
+      ].join('\n');
+      const previous = extractNoteDiffUnits(parse(markdown));
+      const root = mount(markdown);
+      const before = summary(extractNoteDiffUnits(root));
+
+      // A quote that runs from one cell into the next, and a match in each of them.
+      expect(
+        applyQuoteHighlights(root, [
+          { id: 'q1', quote: 'capped\t10 MB', headings: [] },
+          { id: 'q2', quote: 'per', headings: [] },
+        ])
+      ).toEqual(['q1', 'q2']);
+      expect(highlightMatches(root, 'a', 0).total).toBeGreaterThan(2);
+      expect(root.querySelectorAll('td .note-quote-highlight').length).toBeGreaterThan(1);
+      expect(root.querySelectorAll('td mark').length).toBeGreaterThan(2);
+
+      const marked = extractNoteDiffUnits(root);
+      expect(summary(marked)).toEqual(before);
+      expect(marked.map((unit) => unit.signature)).toEqual(previous.map((unit) => unit.signature));
+      expect(computeNoteDiff(previous, marked).hunks).toEqual([]);
+    });
+
+    it('still pairs a row with one word changed, and finds the word', () => {
+      const previous = extractNoteDiffUnits(
+        parse(table('| uploads | 10 MB | per file |').join('\n'))
+      );
+      const current = extractNoteDiffUnits(
+        mount(table('| uploads | 25 MB | per file |').join('\n'))
+      );
+      const { hunks } = computeNoteDiff(previous, current);
+
+      expect(hunks).toHaveLength(1);
+      expect(hunks[0].ops).toMatchObject([{ type: 'modified', wholeUnit: false }]);
+      const [op] = hunks[0].ops;
+      if (op.type !== 'modified') throw new Error('expected a modified pair');
+      const words = (text: string, ranges: { start: number; end: number }[]) =>
+        ranges.map(({ start, end }) => text.slice(start, end));
+      expect(words(previous[1].text, op.previousRanges)).toEqual(['10']);
+      expect(words(current[1].text, op.currentRanges)).toEqual(['25']);
+    });
+  });
+
   describe('signature', () => {
     /** The signature of the one block `markdown` renders. */
     function signatureOf(markdown: string): string {
@@ -307,6 +413,23 @@ describe('readNoteDiffUnitText', () => {
     );
 
     expect(readNoteDiffUnitText(element).text).toBe('Shown');
+  });
+
+  it('parts the cells of a table row, with no space kept beside the parting', () => {
+    const row = block(
+      '<table><tbody><tr>\n<td> The <em>cache</em> </td>\n<td></td>\n<td>is warm </td>\n</tr></tbody></table>'
+    ).querySelector('tr') as HTMLElement;
+    const read = readNoteDiffUnitText(row, true);
+
+    expect(read.text).toBe(`The cache${CELL_SEPARATOR}${CELL_SEPARATOR}is warm`);
+    // The parting is in no text node, and every other character is where it says.
+    for (let index = 0; index < read.text.length; index++) {
+      if (read.text[index] === CELL_SEPARATOR) {
+        expect(read.nodeOf[index]).toBe(-1);
+      } else {
+        expect(read.nodes[read.nodeOf[index]].data[read.offsetOf[index]]).toBe(read.text[index]);
+      }
+    }
   });
 
   it('reports no positions unless asked', () => {

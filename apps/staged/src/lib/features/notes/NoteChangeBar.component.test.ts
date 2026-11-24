@@ -9,7 +9,14 @@ import {
   NOTE_DIFF_ADDED_HIGHLIGHT,
   NOTE_DIFF_ATTRIBUTE,
 } from './noteDiffHighlights';
-import { BLOCK_BLEED, GAP_MARKER_HEIGHT } from './noteDiffScroll';
+import {
+  BLOCK_BLEED,
+  GAP_MARKER_HEIGHT,
+  MARKER_EDGE_GAP,
+  MARKER_HIT_OUTSET,
+  MARKER_REACH,
+  MARKER_WIDTH,
+} from './noteDiffScroll';
 import { NoteDiffState } from './noteDiffState.svelte';
 import {
   BLOCK_HEIGHT,
@@ -92,6 +99,12 @@ const parts = (el: Element) =>
     part.dataset.kind,
     part.style.height,
   ]);
+/** A length the markers are given as a custom property, in px. */
+const px = (el: HTMLElement, property: string) => parseFloat(el.style.getPropertyValue(property));
+/** A rule of the markers' stylesheet, by its selector. */
+const markerRule = (selector: string) =>
+  markersSource.match(new RegExp(`\\n  ${selector.replace(/[.:]/g, '\\$&')} \\{[^}]*\\}`))?.[0] ??
+  '';
 const paragraph = (el: Element, text: string) =>
   [...el.querySelectorAll('p')].find((p) => p.textContent === text)!;
 const marked = (el: Element) =>
@@ -263,6 +276,98 @@ describe('NoteChangeBar', () => {
     flushSync();
 
     expect(scrollbar()).toBe('6px,6px');
+  });
+
+  it('paints each marker as a bar 4px wide, whatever its state', () => {
+    const { noteDiff, props } = render(PREVIOUS_NOTE);
+    props.showAll = true;
+    flushSync();
+
+    // The width is the bar's to say, once, for every marker in it.
+    expect(px(bar()!, '--note-diff-marker-width')).toBe(4);
+    expect(MARKER_WIDTH).toBe(4);
+    // jsdom lays nothing out, so the rule that takes it is read: one rule
+    // sets a marker's width, so a pointed or a pressed marker is as wide.
+    expect(markerRule('.note-change-marker')).toMatch(/width:\s*var\(--note-diff-marker-width\);/);
+    expect(
+      markersSource.match(/\n  \.note-change-marker(?![\w-])[^{\n]*\{[^}]*[\s;]width:/g)
+    ).toHaveLength(1);
+    expect(markerRule('.note-change-marker')).toMatch(/border-radius:\s*0;/);
+
+    // Hovered and selected, a marker has nothing of its own that widens it.
+    hover(marker('modified'));
+    noteDiff.select(marker('modified').dataset.hunkId!, true);
+    flushSync();
+    expect(marker('modified').classList.contains('is-pointed')).toBe(true);
+    expect(marker('modified').getAttribute('aria-pressed')).toBe('true');
+    expect(marker('modified').style.width).toBe('');
+    expect(px(bar()!, '--note-diff-marker-width')).toBe(4);
+  });
+
+  it('takes the pointer over more than a marker paints, between the text and the scrollbar', () => {
+    render(PREVIOUS_NOTE);
+    const width = px(bar()!, '--note-diff-marker-width');
+    const gap = px(bar()!, '--note-diff-marker-gap');
+    // The hit area's `inset` from the marker's box: negative, so outside it.
+    const [top, right, bottom, left] = bar()!
+      .style.getPropertyValue('--note-diff-marker-hit')
+      .split(' ')
+      .map((value) => -parseFloat(value));
+    expect({ top, right, bottom, left }).toEqual(MARKER_HIT_OUTSET);
+
+    // As wide as the 10px a marker used to paint, at least, and over the
+    // place it stood: from 8px to 18px off the scroll area's edge.
+    expect(width + left + right).toBeGreaterThanOrEqual(10);
+    expect(gap - right).toBeLessThanOrEqual(8);
+    expect(gap + width + left).toBeGreaterThanOrEqual(18);
+    // Not over the scrollbar, 6px wide at the edge, nor over the text,
+    // whose column ends 24px from it (the scroll area's padding).
+    expect(gap - right).toBeGreaterThanOrEqual(6);
+    expect(gap + width + left).toBeLessThanOrEqual(24);
+    // The short marker of removed text is as easy to hit up and down.
+    expect(marker('removed').style.height).toBe(`${GAP_MARKER_HEIGHT}px`);
+    expect(GAP_MARKER_HEIGHT + top + bottom).toBeGreaterThanOrEqual(10);
+
+    // It is the marker's own, so a press there is a press on the marker,
+    // and it paints nothing. The bar around the markers takes no presses:
+    // one between markers is the text's.
+    const hit = markerRule('.note-change-marker::before');
+    expect(hit).toMatch(/inset:\s*var\(--note-diff-marker-hit\);/);
+    expect(hit).not.toMatch(/background|border|outline|box-shadow/);
+    expect(markerRule('.note-change-bar')).toMatch(/pointer-events:\s*none;/);
+    expect(markerRule('.note-change-marker')).toMatch(/pointer-events:\s*auto;/);
+  });
+
+  it('shows which marker has keyboard focus with a ring that clears the scrollbar', () => {
+    render(PREVIOUS_NOTE);
+    const ring = markerRule('.note-change-marker:focus-visible');
+    const [, ringWidth] = ring.match(/outline:\s*(\d+)px solid var\(--ui-accent\);/)!;
+    const [, offset] = ring.match(/outline-offset:\s*(\d+)(?:px)?;/)!;
+
+    // The scrollbar is 6px wide at the edge and is painted over what
+    // reaches under it.
+    expect(Number(ringWidth)).toBeGreaterThanOrEqual(2);
+    expect(px(bar()!, '--note-diff-marker-gap') - Number(offset) - Number(ringWidth)).toBe(6);
+  });
+
+  it('stands the markers where the rectangles behind the changes are told to end', () => {
+    render(PREVIOUS_NOTE);
+
+    // The marker's left edge, from the scroll area's edge: what the viewer
+    // gives the rectangles as their right end (`--note-diff-blocks-right`).
+    expect(px(bar()!, '--note-diff-marker-gap') + px(bar()!, '--note-diff-marker-width')).toBe(
+      MARKER_REACH
+    );
+    expect(MARKER_REACH).toBe(MARKER_EDGE_GAP + MARKER_WIDTH);
+    // Both count from the same edge: each takes the scrollbar's width off
+    // its own `right`.
+    expect(markerRule('.note-change-bar').replace(/\s+/g, '')).toContain(
+      'right:calc(var(--note-diff-marker-gap)-var(--note-diff-scrollbar,0px)'
+    );
+    expect(markerRule('.note-change-marker')).toMatch(/right:\s*0;/);
+    expect(
+      blocksSource.match(/\n  \.note-diff-blocks \{[^}]*\}/)![0].replace(/\s+/g, '')
+    ).toContain('right:calc(var(--note-diff-blocks-right,0px)-var(--note-diff-scrollbar,0px)');
   });
 
   it('paints one rectangle behind a change of several blocks, margins and all', () => {

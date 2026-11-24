@@ -128,6 +128,7 @@
   import NoteDiffPaneHeader from './NoteDiffPaneHeader.svelte';
   import NotePreviousPane from './NotePreviousPane.svelte';
   import { CONNECTOR_CURRENT_REACH } from './noteDiffConnectors';
+  import { MARKER_REACH } from './noteDiffScroll';
   import { NoteDiffState } from './noteDiffState.svelte';
   import './noteDiffStyles.css';
   import { highlightNoteMatches } from './noteQuoteHighlights';
@@ -1145,6 +1146,7 @@
             class:ends-pane={!showBottomBar}
             class:note-diff-all={splitDiffOpen}
             style:--note-diff-blocks-reach="{CONNECTOR_CURRENT_REACH}px"
+            style:--note-diff-markers-reach="{MARKER_REACH}px"
             bind:this={contentEl}
             onclick={handleContentClick}
             {@attach openMediaOnPinch}
@@ -1465,16 +1467,17 @@
      starts half-way across the left padding, which is where the band from
      the previous version lands when that is open
      (`--note-diff-blocks-reach`, set above), and ends at its marker's left
-     edge: the markers are 8px from the edge and 10px wide. Both hold still
-     when a wide table makes the note scroll sideways, for which they are
-     told the left padding (`--note-diff-scroll-padding`). */
+     edge (`--note-diff-markers-reach`, set above from the markers' own
+     sizes in noteDiffScroll.ts). Both hold still when a wide table makes
+     the note scroll sideways, for which they are told the left padding
+     (`--note-diff-scroll-padding`). */
   .modal-content {
     --note-diff-markers-inset: var(--dialog-safe-right, 0px);
     --note-diff-scroll-padding: calc(24px + var(--dialog-safe-left, 0px));
     --note-diff-blocks-left: calc(
       var(--note-diff-blocks-reach, 12px) + var(--dialog-safe-left, 0px)
     );
-    --note-diff-blocks-right: calc(18px + var(--dialog-safe-right, 0px));
+    --note-diff-blocks-right: calc(var(--note-diff-markers-reach) + var(--dialog-safe-right, 0px));
     position: relative;
     isolation: isolate;
     flex: 1;

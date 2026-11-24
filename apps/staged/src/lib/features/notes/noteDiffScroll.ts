@@ -191,6 +191,32 @@ export const GAP_MARKER_HEIGHT = 8;
 /** The least a marker is tall, for a block shorter than that (a rule). */
 export const MIN_MARKER_HEIGHT = 4;
 
+/** How wide a marker is painted, in px: at rest, pointed at and selected alike. */
+export const MARKER_WIDTH = 4;
+
+/** From the right edge of the note's scroll area to a marker's right edge, in px. */
+export const MARKER_EDGE_GAP = 8;
+
+/**
+ * From the right edge of the note's scroll area to a marker's left edge, in
+ * px. The rectangle behind a change ends there (`--note-diff-blocks-right`
+ * in NoteModal), so the marker is its solid end with nothing between them.
+ */
+export const MARKER_REACH = MARKER_EDGE_GAP + MARKER_WIDTH;
+
+/**
+ * How far past what it paints a marker takes the pointer, in px. A bar 4px
+ * wide, or a marker 8px tall, is too little to aim at, so the room around it
+ * is the marker's too, and nothing is painted there.
+ *
+ * It is the room the note leaves free. Towards the text it stops where the
+ * text's column does, 24px from the scroll area's edge (the scroll area's
+ * right padding in NoteModal), so a press on the text is the text's. On the
+ * other side it stops at the scrollbar, 6px wide at that edge, so a press
+ * there is the scrollbar's.
+ */
+export const MARKER_HIT_OUTSET = { top: 3, right: 2, bottom: 3, left: 12 } as const;
+
 /**
  * Where the line for a hunk with no unit on a side is drawn: the middle of
  * the gap its blocks would fill, between the units either side of it, or

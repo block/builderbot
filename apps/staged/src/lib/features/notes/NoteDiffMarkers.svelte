@@ -11,6 +11,12 @@
   block here (text the revision removed) has a short marker across the end
   of the line drawn for it.
 
+  A marker is a thin bar (`MARKER_WIDTH`), and takes the pointer over more
+  than it paints (`MARKER_HIT_OUTSET`): the room between the text and the
+  scrollbar, which nothing else uses. Its sizes are in noteDiffScroll.ts,
+  the one place they are written, and are handed to the styles below as
+  custom properties.
+
   Only the note has markers. Its previous version, beside it, has none: a
   change there is joined to its place in the note by a band
   (NoteDiffConnectors.svelte), which is pointed at and pressed as a marker
@@ -36,7 +42,12 @@
   import { untrack } from 'svelte';
   import type { NoteDiffHunk } from './noteDiff';
   import { ChangeHover, RestingPointer } from './noteDiffPointer';
-  import { hunkMarkerBox } from './noteDiffScroll';
+  import {
+    hunkMarkerBox,
+    MARKER_EDGE_GAP,
+    MARKER_HIT_OUTSET,
+    MARKER_WIDTH,
+  } from './noteDiffScroll';
   import type { NoteDiffState } from './noteDiffState.svelte';
 
   interface Props {
@@ -54,6 +65,16 @@
   let { noteDiff, label, scrollbarWidth = 0, overflowX = 0, onSelect }: Props = $props();
 
   const KIND_LABELS = { added: 'Added', removed: 'Removed', modified: 'Modified' } as const;
+
+  /** The marker's hit area, as the `inset` of an element that is the marker's size at 0. */
+  const HIT_INSET = [
+    MARKER_HIT_OUTSET.top,
+    MARKER_HIT_OUTSET.right,
+    MARKER_HIT_OUTSET.bottom,
+    MARKER_HIT_OUTSET.left,
+  ]
+    .map((px) => `${-px}px`)
+    .join(' ');
 
   const pointer = new RestingPointer();
   const hover = new ChangeHover();
@@ -106,6 +127,9 @@
     class="note-change-bar"
     role="group"
     aria-label={label}
+    style:--note-diff-marker-width="{MARKER_WIDTH}px"
+    style:--note-diff-marker-gap="{MARKER_EDGE_GAP}px"
+    style:--note-diff-marker-hit={HIT_INSET}
     style:--note-diff-scrollbar="{scrollbarWidth}px"
     style:--note-diff-overflow="{overflowX}px"
   >
@@ -138,11 +162,11 @@
   /* In the text's right padding (24px), clear of the text and of the
      scrollbar at the edge (6px wide, see `.modal-content` in NoteModal).
      `right` counts from the content's edge, which stops at a scrollbar that
-     takes room; taking its width off keeps the markers 8px from the scroll
-     area's edge either way. Their left edge, 18px from it, is where the
-     rectangles painted behind the changes end (`--note-diff-blocks-right`
-     in NoteModal). The bar has no height of its own and takes no presses: a
-     press between markers is the text's.
+     takes room; taking its width off keeps the markers the same distance
+     (`--note-diff-marker-gap`) from the scroll area's edge either way.
+     Their left edge is where the rectangles painted behind the changes end
+     (`--note-diff-blocks-right` in NoteModal). The bar has no height of its
+     own and takes no presses: a press between markers is the text's.
 
      The markers scroll up and down with the text and hold still sideways,
      as the rectangles they end do (see NoteDiffBlocks.svelte for how): the
@@ -154,8 +178,8 @@
     top: 0;
     left: 0;
     right: calc(
-      8px - var(--note-diff-scrollbar, 0px) + var(--note-diff-markers-inset, 0px) -
-        var(--note-diff-overflow, 0px)
+      var(--note-diff-marker-gap) - var(--note-diff-scrollbar, 0px) +
+        var(--note-diff-markers-inset, 0px) - var(--note-diff-overflow, 0px)
     );
     z-index: 1;
     height: 0;
@@ -172,7 +196,7 @@
   .note-change-marker {
     position: absolute;
     right: 0;
-    width: 10px;
+    width: var(--note-diff-marker-width);
     padding: 0;
     border: none;
     border-radius: 0;
@@ -181,13 +205,17 @@
     pointer-events: auto;
   }
 
-  /* A short marker is still easy to hit. The room is taken above, below and
-     towards the text; on the other side the scrollbar is 2px away, and a
-     press on it is the scrollbar's. */
+  /* What takes the pointer for a marker is wider and taller than the
+     marker, and paints nothing: this, which counts as the button it is in.
+     It runs from the edge of the text's column to the scrollbar, and a
+     little above and below (`--note-diff-marker-hit`, from
+     `MARKER_HIT_OUTSET`), so a thin bar or a short marker is as easy to hit
+     as a wide one. A press on the text is still the text's, and a press on
+     the scrollbar the scrollbar's. */
   .note-change-marker::before {
     content: '';
     position: absolute;
-    inset: -3px -2px -3px -6px;
+    inset: var(--note-diff-marker-hit);
   }
 
   /* The colours are the code diff's (see noteDiffStyles.css). A marker is
@@ -207,8 +235,12 @@
     --marker-color: var(--diff-modified-accent);
   }
 
+  /* The marker with keyboard focus has a ring, close round it. With any
+     room between them the ring's right side would reach under the scrollbar
+     (the marker is `--note-diff-marker-gap` from the edge and the scrollbar
+     6px wide), which hides half of it. */
   .note-change-marker:focus-visible {
     outline: 2px solid var(--ui-accent);
-    outline-offset: 1px;
+    outline-offset: 0;
   }
 </style>

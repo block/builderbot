@@ -130,12 +130,26 @@ placed from its blocks as measured (`hunkMarkerBox` in `noteDiffScroll.ts`):
 - The blocks are measured again whenever the note is laid out (an image
   loading, the dialog or the window resized, the previous version opening or
   closing, text wrapping again), and the markers and rectangles follow.
-- They stand in the note's right padding, 12px clear of the text and 8px from
+- Each is a bar 4px wide, at rest, pointed at and selected alike. They stand
+  in the note's right padding, 12px clear of the text's column and 8px from
   the scroll area's edge, which leaves the scrollbar and the dialog's resize
   handle free. That distance is the same whether or not the note has a
-  scrollbar.
+  scrollbar. The rectangle behind a change ends at its marker's left edge,
+  12px from the scroll area's edge, with nothing between the two.
+- A marker takes the pointer over more than it paints: 18px across, from the
+  edge of the text's column to the scrollbar, and 3px above and below, so
+  the 8px marker of removed text is 14px tall to the pointer. It is the
+  button's own `::before`, which paints nothing, in room nothing else uses:
+  a press on the text is the text's and a press on the scrollbar the
+  scrollbar's.
 - They are square, and nothing is drawn round the one whose change is lit:
-  the rectangle shows that.
+  the rectangle shows that. The one with keyboard focus has a 2px ring in
+  the accent colour, close round the bar so that the scrollbar does not
+  cover its right side.
+- The sizes are written once, in `noteDiffScroll.ts` (`MARKER_WIDTH`,
+  `MARKER_EDGE_GAP`, `MARKER_REACH`, `MARKER_HIT_OUTSET`), and reach the
+  styles as custom properties: the markers set theirs on their own bar, and
+  `NoteModal` hands `MARKER_REACH` to the rectangles as where they end.
 
 Only the note has markers. The previous version has none: the vertical bars
 beside it stood between its text and the bands, and without them the
@@ -487,6 +501,11 @@ What to expect:
   its list. They move with the text as the note scrolls. In a window too
   short to show the whole note, the markers of changes further down are out
   of view until the note is scrolled to them.
+- A marker is a thin bar, 4px wide, and easier to hit than it looks: the
+  pointer is on it anywhere between the end of the text's column and the
+  scrollbar, at its height. A press on the last word of a line beside a
+  marker is still a press on the text. A marker reached with Tab has a blue
+  ring close round it.
 - Hovering paints one square rectangle behind the change, from just left of
   the text to the marker, and the changed words in it, in the amber a code
   diff gives a modified line and its changed characters. The green one

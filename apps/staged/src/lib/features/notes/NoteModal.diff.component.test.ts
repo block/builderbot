@@ -78,6 +78,7 @@ vi.mock('../../api/commands', async (importOriginal) => ({
 }));
 
 import NoteModal from './NoteModal.svelte';
+import modalSource from './NoteModal.svelte?raw';
 import { NOTE_DIFF_ACTIVE_ATTRIBUTE, NOTE_DIFF_ATTRIBUTE } from './noteDiffHighlights';
 import { splitNoteMarkdown } from './noteMarkdown';
 import {
@@ -253,6 +254,30 @@ describe('NoteModal change bar', () => {
     const scroller = notePane().querySelector('.modal-content')!;
     expect(bar()!.parentElement).toBe(scroller);
     expect(scroller.contains(note())).toBe(true);
+  });
+
+  it('ends the rectangle behind each change where its marker begins', async () => {
+    await open();
+    const scroller = notePane().querySelector<HTMLElement>('.modal-content')!;
+    const length = (el: HTMLElement, property: string) =>
+      parseFloat(el.style.getPropertyValue(property));
+
+    // A marker is 4px wide with its right edge 8px from the scroll area's
+    // edge, so its left edge is 12px from it: the 10px marker's was 18px.
+    const markers = bar() as HTMLElement;
+    const markerLeft =
+      length(markers, '--note-diff-marker-gap') + length(markers, '--note-diff-marker-width');
+    expect(markerLeft).toBe(12);
+    // The rectangles are told to end there, with nothing between: jsdom
+    // lays nothing out, so the rule that hands it on is read. A full-screen
+    // dialog's safe area moves both in alike.
+    expect(length(scroller, '--note-diff-markers-reach')).toBe(markerLeft);
+    // Without its white space: however the rule is wrapped.
+    const rule = modalSource.match(/\n  \.modal-content \{[^}]*\}/)![0].replace(/\s+/g, '');
+    expect(rule).toContain(
+      '--note-diff-blocks-right:calc(var(--note-diff-markers-reach)+var(--dialog-safe-right,0px));'
+    );
+    expect(rule).toContain('--note-diff-markers-inset:var(--dialog-safe-right,0px);');
   });
 
   it('lights a change in the note while its marker is hovered', async () => {

@@ -2,9 +2,9 @@
 //!
 //! A row on the project detail or the branch timeline shows a running
 //! session's title and a one-line subtitle. The subtitle is derived in the
-//! frontend (`deriveHint` in `liveSessionHints.ts`) from a few session fields
-//! and the newest visible rows of the transcript, and of those rows it reads
-//! only the id, the role, the attachment ids and, for some roles, the text.
+//! frontend (`deriveHint` in `sessionHint.ts`) from a few session fields and
+//! the newest visible rows of the transcript, and of those rows it reads only
+//! the id, the role, the attachment ids and, for some roles, the text.
 //! [`Store::read_session_summary`] reads exactly that, under one lock and one
 //! read transaction, so the session fields and the rows are one snapshot.
 //!
@@ -18,7 +18,9 @@ use super::messages::{parse_image_ids, VISIBLE_MESSAGE_FILTER};
 use super::models::{MessageRole, PipelineExecution, SessionStatus};
 use super::{Store, StoreError};
 
-/// One visible transcript row, as far as the subtitle reads it.
+/// One visible transcript row, as far as the subtitle reads it. The row type
+/// `deriveHint` takes (`HintRow` in `sessionHint.ts`) has the same four
+/// fields, under the names they serialize to here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummaryRow {
@@ -26,7 +28,8 @@ pub struct SummaryRow {
     pub role: MessageRole,
     /// Left out for `tool_result` rows and for the opening prompt: the
     /// subtitle never reads either text, and an opening prompt is the largest
-    /// row of most transcripts.
+    /// row of most transcripts. `sessionHint.test.ts` fails if the subtitle
+    /// starts to read one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

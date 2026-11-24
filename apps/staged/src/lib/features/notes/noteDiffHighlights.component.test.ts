@@ -78,7 +78,7 @@ function scene(previousMarkdown = PREVIOUS, currentMarkdown = CURRENT): Scene {
   return { previousRoot, currentRoot, previous, current, diff: computeNoteDiff(previous, current) };
 }
 
-/** Each marked block under `root`: its text's first word, colour and hunk. */
+/** Each marked block under `root`: its text's first word, its own change and its hunk. */
 function marks(root: Element): [string, string | null, string | null][] {
   return [...root.querySelectorAll(`[${NOTE_DIFF_ATTRIBUTE}]`)].map((element) => [
     (element.textContent ?? '').trim().split(/\s+/)[0],
@@ -120,16 +120,18 @@ describe('the fixture', () => {
 });
 
 describe('applyNoteDiffMarks', () => {
-  it('marks the current version’s changed blocks with their hunk’s kind and id', () => {
+  // Both hunks are modified ones, and their markers say so. A block is
+  // marked as the code diff viewer classes a line: by its own change.
+  it('marks the current version’s changed blocks with their own change and their hunk’s id', () => {
     const { currentRoot, current, diff } = scene();
 
     applyNoteDiffMarks(currentRoot, current, diff.hunks, 'current');
 
     expect(marks(currentRoot)).toEqual([
-      ['A', 'modified', 'hunk-0'],
+      ['A', 'added', 'hunk-0'],
       ['Entries', 'modified', 'hunk-0'],
       ['See', 'modified', 'hunk-1'],
-      ['Retention', 'modified', 'hunk-1'],
+      ['Retention', 'added', 'hunk-1'],
     ]);
   });
 
@@ -140,10 +142,20 @@ describe('applyNoteDiffMarks', () => {
 
     expect(marks(previousRoot)).toEqual([
       ['Entries', 'modified', 'hunk-0'],
-      ['This', 'modified', 'hunk-0'],
+      ['This', 'removed', 'hunk-0'],
       ['See', 'modified', 'hunk-1'],
-      ['Logs', 'modified', 'hunk-1'],
+      ['Logs', 'removed', 'hunk-1'],
     ]);
+  });
+
+  it('never marks a block as added in the previous version or removed in the note', () => {
+    const { previousRoot, currentRoot, previous, current, diff } = scene();
+
+    applyNoteDiffMarks(previousRoot, previous, diff.hunks, 'previous');
+    applyNoteDiffMarks(currentRoot, current, diff.hunks, 'current');
+
+    expect(previousRoot.querySelector(`[${NOTE_DIFF_ATTRIBUTE}='added']`)).toBeNull();
+    expect(currentRoot.querySelector(`[${NOTE_DIFF_ATTRIBUTE}='removed']`)).toBeNull();
   });
 
   it('marks additions and removals in their own colours, and nothing for the side without them', () => {
@@ -194,7 +206,7 @@ describe('applyNoteDiffMarks', () => {
 
     expect(marks(currentRoot)).toEqual([
       ['See', 'modified', 'hunk-1'],
-      ['Retention', 'modified', 'hunk-1'],
+      ['Retention', 'added', 'hunk-1'],
     ]);
     expect(active(currentRoot)).toEqual([]);
   });
@@ -240,21 +252,15 @@ describe('setActiveNoteDiffHunk', () => {
 });
 
 describe('noteDiffHunkRanges', () => {
-  it('covers the words that differ in a modified block, and whole the block only one side has', () => {
+  it('covers the words that differ in a modified block, and nothing of a block only one side has', () => {
     const { previous, current, diff } = scene();
     const [hunk] = diff.hunks;
 
     // The reworded paragraph's words run through bold text and a line break.
-    expect(texts(noteDiffHunkRanges(current, hunk, 'current'))).toEqual([
-      'A new paragraph about thumbnails.',
-      'newest',
-      'thousand',
-    ]);
-    expect(texts(noteDiffHunkRanges(previous, hunk, 'previous'))).toEqual([
-      'oldest',
-      'hundred',
-      'This paragraph will be dropped.',
-    ]);
+    // The new paragraph before it and the dropped one after are whole
+    // changes, coloured as blocks: no words are picked out of them.
+    expect(texts(noteDiffHunkRanges(current, hunk, 'current'))).toEqual(['newest', 'thousand']);
+    expect(texts(noteDiffHunkRanges(previous, hunk, 'previous'))).toEqual(['oldest', 'hundred']);
   });
 
   it('covers the whole text of a block that changed in its link alone', () => {
@@ -263,17 +269,15 @@ describe('noteDiffHunkRanges', () => {
 
     expect(texts(noteDiffHunkRanges(current, hunk, 'current'))).toEqual([
       'See the design doc for more.',
-      'Retention is set by policy, per workspace, and audited.',
     ]);
     expect(texts(noteDiffHunkRanges(previous, hunk, 'previous'))).toEqual([
       'See the design doc for more.',
-      'Logs are kept for a week.',
     ]);
   });
 
   it('starts and ends its ranges inside the text nodes that hold the words', () => {
     const { current, diff } = scene();
-    const [, newest] = noteDiffHunkRanges(current, diff.hunks[0], 'current');
+    const [newest] = noteDiffHunkRanges(current, diff.hunks[0], 'current');
 
     expect(newest.startContainer.nodeType).toBe(Node.TEXT_NODE);
     expect(newest.startContainer.parentElement?.tagName).toBe('STRONG');
@@ -301,7 +305,6 @@ describe('noteDiffHunkRanges', () => {
     expect(highlightMatches(currentRoot, 'new', 0).total).toBe(2);
 
     expect(texts(noteDiffHunkRanges(current, diff.hunks[0], 'current'))).toEqual([
-      'A new paragraph about thumbnails.',
       'newest',
       'thousand',
     ]);
@@ -312,9 +315,7 @@ describe('noteDiffHunkRanges', () => {
     const reworded = current.find((unit) => unit.text.startsWith('Entries'));
     reworded!.element.textContent = 'Entries are evicted at random.';
 
-    expect(texts(noteDiffHunkRanges(current, diff.hunks[0], 'current'))).toEqual([
-      'A new paragraph about thumbnails.',
-    ]);
+    expect(noteDiffHunkRanges(current, diff.hunks[0], 'current')).toEqual([]);
   });
 
   it('ends a range at the last word before a line break, not at the break', () => {

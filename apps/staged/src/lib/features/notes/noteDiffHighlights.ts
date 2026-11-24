@@ -7,10 +7,11 @@
  * be woven through theirs. So a change is shown two ways that leave the
  * nodes alone:
  *
- * - Blocks carry attributes, for a stylesheet to tint: `data-note-diff` (the
- *   colour of the hunk the block is in), `data-note-diff-hunk` (which hunk)
- *   and `data-note-diff-active` (it is the hunk being pointed at). The
- *   markup is rebuilt on every render, so they are put back then.
+ * - Blocks carry attributes, for a stylesheet to tint: `data-note-diff` (how
+ *   the block itself changed, which is its colour), `data-note-diff-hunk`
+ *   (which hunk it is in) and `data-note-diff-active` (it is the hunk being
+ *   pointed at). The markup is rebuilt on every render, so they are put
+ *   back then.
  * - Words are painted through the CSS Custom Highlight API: ranges
  *   registered under a name and styled with `::highlight()`. The ranges are
  *   built when a hunk is pointed at, from the text as it then stands: a
@@ -23,22 +24,32 @@
 
 import {
   hunkTextRanges,
+  type NoteDiffChange,
   type NoteDiffHunk,
   type NoteDiffSide,
   type NoteDiffTextRange,
 } from './noteDiff';
 import { readNoteDiffUnitText, type NoteDiffDomUnit } from './noteDiffUnits';
 
-/** On a changed block: its hunk's kind, `added`, `removed` or `modified`. */
+/**
+ * On a changed block: how it changed. `modified` when the other version has
+ * its counterpart, and otherwise `added` (in the note) or `removed` (in the
+ * previous version).
+ *
+ * This is the block's change and not its hunk's, as the code diff viewer
+ * colours each line by its own class: in a hunk the change bar marks as
+ * modified, a paragraph the revision replaced outright is removed on one
+ * side and added on the other.
+ */
 export const NOTE_DIFF_ATTRIBUTE = 'data-note-diff';
 /** On a changed block: its hunk's id. */
 export const NOTE_DIFF_HUNK_ATTRIBUTE = 'data-note-diff-hunk';
 /** On the blocks of the hunk being pointed at. */
 export const NOTE_DIFF_ACTIVE_ATTRIBUTE = 'data-note-diff-active';
 
-/** The highlight over words only the current version has. */
+/** The highlight over the words a changed block gained, in the note. */
 export const NOTE_DIFF_ADDED_HIGHLIGHT = 'note-diff-added';
-/** The highlight over words only the previous version has. */
+/** The highlight over the words a changed block lost, in the previous version. */
 export const NOTE_DIFF_REMOVED_HIGHLIGHT = 'note-diff-removed';
 
 const MARKED = `[${NOTE_DIFF_ATTRIBUTE}], [${NOTE_DIFF_HUNK_ATTRIBUTE}], [${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`;
@@ -67,14 +78,20 @@ export function applyNoteDiffMarks(
 ): void {
   clearNoteDiffMarks(root);
   for (const hunk of hunks) {
-    const indices = side === 'previous' ? hunk.previousIndices : hunk.currentIndices;
-    for (const index of indices) {
-      const element = units[index]?.element;
+    for (const op of hunk.ops) {
+      const index = unitIndexOn(op, side);
+      const element = index === null ? undefined : units[index]?.element;
       if (!element) continue;
-      element.setAttribute(NOTE_DIFF_ATTRIBUTE, hunk.kind);
+      element.setAttribute(NOTE_DIFF_ATTRIBUTE, op.type);
       element.setAttribute(NOTE_DIFF_HUNK_ATTRIBUTE, hunk.id);
     }
   }
+}
+
+/** The block a change has on one side, or `null` where only the other version has one. */
+function unitIndexOn(op: NoteDiffChange, side: NoteDiffSide): number | null {
+  if (side === 'previous') return op.type === 'added' ? null : op.previousIndex;
+  return op.type === 'removed' ? null : op.currentIndex;
 }
 
 /** Make `hunkId`'s blocks under `root` the active ones, or none with `null`. */
@@ -133,8 +150,9 @@ function highlightName(side: NoteDiffSide): string {
 
 /**
  * Paint `ranges` as one side's changed words, in place of what was painted
- * for it: the previous version's as removed, the current one's as added.
- * No ranges clears the side. Returns whether the runtime can paint at all.
+ * for it. Each side has a highlight of its own, since each pane paints its
+ * own ranges; the stylesheet gives the two one colour. No ranges clears the
+ * side. Returns whether the runtime can paint at all.
  */
 export function paintNoteDiffWords(side: NoteDiffSide, ranges: readonly Range[]): boolean {
   const registry = globalThis.CSS?.highlights;

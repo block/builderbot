@@ -59,6 +59,8 @@ export interface Theme {
   diff: {
     addedBg: string; // Background tint for added lines
     removedBg: string; // Background tint for removed lines
+    addedBgEmphasis: string; // The added tint, stronger: the change being pointed at
+    removedBgEmphasis: string; // The removed tint, stronger
     changedBg: string; // Neutral background for changed lines (not add/remove specific)
     rangeBorder: string; // Border color for change range markers
     commentHighlight: string; // Highlight color for commented regions in spine
@@ -497,6 +499,12 @@ export function createAdaptiveTheme(
       // Very subtle tints - the syntax highlighting should dominate
       addedBg: overlay(accentGreen, isDark ? 0.15 : 0.18),
       removedBg: overlay(accentRed, isDark ? 0.15 : 0.18),
+      // The same tints, stronger: the one change among several that is
+      // being pointed at (a note diff's active change). Strong enough to
+      // tell from the tints above beside them, and no stronger, so that
+      // text keeps its contrast: theme.test.ts holds both.
+      addedBgEmphasis: overlay(accentGreen, isDark ? 0.24 : 0.28),
+      removedBgEmphasis: overlay(accentRed, isDark ? 0.24 : 0.28),
       // Neutral highlight for changed lines - subtle foreground tint
       changedBg: overlay(syntaxFg, isDark ? 0.08 : 0.1),
       // Range borders need to be visible but not distracting
@@ -622,6 +630,8 @@ export function themeToVarMap(t: Theme): Record<string, string> {
 
     '--diff-added-bg': t.diff.addedBg,
     '--diff-removed-bg': t.diff.removedBg,
+    '--diff-added-bg-emphasis': t.diff.addedBgEmphasis,
+    '--diff-removed-bg-emphasis': t.diff.removedBgEmphasis,
     '--diff-changed-bg': t.diff.changedBg,
     '--diff-range-border': t.diff.rangeBorder,
     '--diff-comment-highlight': t.diff.commentHighlight,

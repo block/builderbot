@@ -145,9 +145,9 @@ const MAX_PAIR_SCAN = 10;
  *
  * Blocks whose comparison was refused are left as removals and additions.
  * Their change is still marked, and as modified where it holds blocks of
- * both versions: it reads as replaced, the blocks tinted whole rather than
- * by word, and the two sides lined up by the change instead of block by
- * block. Blocks with the same text and a different signature (an image, a
+ * both versions: it reads as replaced, the previous version's blocks removed
+ * and the note's added, with no changed words, and the two sides lined up by
+ * the change instead of block by block. Blocks with the same text and a different signature (an image, a
  * diagram) are paired regardless, which costs nothing.
  */
 export const NOTE_DIFF_WORK_BUDGET = 12_000_000;
@@ -465,29 +465,22 @@ export interface NoteDiffUnitRanges {
 }
 
 /**
- * What to point out, on one side, beyond the hunk's own colour.
+ * The words to point out on one side, beyond its blocks' own colours.
  *
  * In a block that was modified it is the words that differ, or the whole
- * block when none do. In a hunk that holds both versions' blocks it is also
- * every block only this side has: within a change marked as a modification,
- * that is the part which is wholly new, or wholly gone. A hunk of additions
- * alone, or removals alone, is that already, and has nothing to point out.
+ * block when none do. A block only one version has is not listed, in a hunk
+ * of either kind: it is new or gone as a whole, and its own colour says so
+ * (see `NOTE_DIFF_ATTRIBUTE`), as an added or a removed line of a code diff
+ * has no changed words in it.
  */
 export function hunkTextRanges(hunk: NoteDiffHunk, side: NoteDiffSide): NoteDiffUnitRanges[] {
   const result: NoteDiffUnitRanges[] = [];
   for (const op of hunk.ops) {
-    if (op.type === 'modified') {
-      const unitIndex = side === 'previous' ? op.previousIndex : op.currentIndex;
-      const ranges = side === 'previous' ? op.previousRanges : op.currentRanges;
-      if (op.wholeUnit) result.push({ unitIndex, ranges: null });
-      else if (ranges.length > 0) result.push({ unitIndex, ranges });
-    } else if (hunk.kind === 'modified') {
-      if (op.type === 'removed' && side === 'previous') {
-        result.push({ unitIndex: op.previousIndex, ranges: null });
-      } else if (op.type === 'added' && side === 'current') {
-        result.push({ unitIndex: op.currentIndex, ranges: null });
-      }
-    }
+    if (op.type !== 'modified') continue;
+    const unitIndex = side === 'previous' ? op.previousIndex : op.currentIndex;
+    const ranges = side === 'previous' ? op.previousRanges : op.currentRanges;
+    if (op.wholeUnit) result.push({ unitIndex, ranges: null });
+    else if (ranges.length > 0) result.push({ unitIndex, ranges });
   }
   return result;
 }

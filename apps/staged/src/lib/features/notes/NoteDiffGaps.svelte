@@ -4,8 +4,8 @@
   A hunk with no block on this side has nothing here to tint (see
   noteDiffHighlights.ts): in the note, text the revision removed; in the
   previous version, text it added. This draws a line across the gap such
-  text would fill, in the hunk's colour, between the blocks either side of
-  it.
+  text would fill, in the hunk's colour (red for removed text, green for
+  added), between the blocks either side of it.
 
   Mounted inside the element that scrolls the version, which must be
   positioned: the lines are placed in its content and scroll with it. Only
@@ -61,20 +61,25 @@
     height: 2px;
     margin-top: -1px;
     border-radius: 1px;
-    background-color: var(--gap-color);
-    opacity: 0.45;
+    background-color: var(--gap-faint);
     pointer-events: none;
   }
 
   .note-diff-gap.is-active {
-    opacity: 1;
+    background-color: var(--gap-color);
   }
 
+  /* The code diff's colours, as the blocks and markers have them (see
+     noteDiffStyles.css): the line of the change being pointed at is the
+     solid colour of its marker, and the others, drawn beside the previous
+     version, are the emphasised tint of the same kind. */
   .note-diff-gap[data-kind='added'] {
     --gap-color: var(--status-added);
+    --gap-faint: var(--diff-added-bg-emphasis);
   }
 
   .note-diff-gap[data-kind='removed'] {
     --gap-color: var(--status-deleted);
+    --gap-faint: var(--diff-removed-bg-emphasis);
   }
 </style>

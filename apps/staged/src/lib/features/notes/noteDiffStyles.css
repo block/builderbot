@@ -3,11 +3,37 @@
  *
  * The markup comes from `{@html}`, in the note and in its previous version,
  * so these rules are global and keyed on the attributes and highlight names
- * that module sets. A changed block carries `data-note-diff`, its hunk's
- * kind, and is tinted in that kind's colour, the colour of its marker on
- * the change bar. It is tinted while its hunk is the one being pointed at
- * (`data-note-diff-active`), and faintly throughout inside a
- * `.note-diff-all` container: the two panes of the side-by-side view.
+ * that module sets.
+ *
+ * The colours are the code diff viewer's (DiffViewer.svelte in
+ * packages/diff-viewer), by its own tokens, so that a note diff and a code
+ * diff read as one system. A block is to a note what a line is to a file:
+ *
+ *   an added block     --diff-added-bg       the viewer's added line
+ *   a removed block    --diff-removed-bg     its removed line
+ *   a changed block    --diff-modified-bg    its modified line, amber on
+ *                                            both sides
+ *   changed words      --diff-modified-inline-bg, on both sides, as the
+ *                      viewer's `.char-changed`
+ *
+ * `data-note-diff` is the block's own change, not its hunk's: in a change
+ * that holds both versions' blocks, a block with a counterpart is amber and
+ * one without is red in the previous version or green in the note, as the
+ * viewer's lines are.
+ *
+ * Every changed block is tinted inside a `.note-diff-all` container (the two
+ * panes of the side-by-side view), in exactly the viewer's tints. The blocks
+ * of the change being pointed at (`data-note-diff-active`) take the
+ * `-emphasis` token of the same colour, wherever they are. The viewer has
+ * one strength only; the stronger ones are defined beside its tokens, in
+ * theme.ts and app.css, not mixed here. No colour is, and
+ * noteDiffColours.test.ts holds this file to that.
+ *
+ * The tokens are read where the note is, in the app's chrome. The viewer's
+ * panes are themed apart from it, by the diff theme chosen in Settings (see
+ * `applyDiffTheme` in preferences.svelte.ts), so a diff theme with git
+ * colours of its own shows other greens and reds in its panes than the
+ * chrome's, here and in the diff's own file list alike.
  *
  * The tint is an inset shadow, not a background: it lies over whatever
  * background the block has (a code block's, a table header's) instead of
@@ -17,31 +43,40 @@
  * A figure is the exception. What it holds covers its inside, so the
  * shadow does not show: a diagram's drawing takes the tint itself, and an
  * image or a video, whose colours are the thing to compare, is left as it
- * is. Both get an edge in the hunk's colour, stronger than the tint, which
- * is all that marks an image.
+ * is. Both get an edge in the solid colour of the change, which is all that
+ * marks an image: a hairline at rest, and 2px while pointed at. The solid
+ * colours are the ones the tints are made of: `--status-added` and
+ * `--status-deleted`, which the diff's file list also marks a file's added
+ * and removed lines with, and `--diff-modified-accent`, the viewer's amber.
+ * Not `--status-modified`: on the light theme that is a dark gold picked to
+ * be read as text, and beside the amber tint it looks brown.
  */
 
 [data-note-diff='added'] {
-  --note-diff-color: var(--status-added);
+  --note-diff-rest: var(--diff-added-bg);
+  --note-diff-strong: var(--diff-added-bg-emphasis);
+  --note-diff-edge: var(--status-added);
 }
 
 [data-note-diff='removed'] {
-  --note-diff-color: var(--status-deleted);
+  --note-diff-rest: var(--diff-removed-bg);
+  --note-diff-strong: var(--diff-removed-bg-emphasis);
+  --note-diff-edge: var(--status-deleted);
 }
 
 [data-note-diff='modified'] {
-  --note-diff-color: var(--status-modified);
+  --note-diff-rest: var(--diff-modified-bg);
+  --note-diff-strong: var(--diff-modified-bg-emphasis);
+  --note-diff-edge: var(--diff-modified-accent);
 }
 
 .note-diff-all [data-note-diff] {
-  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 11%, transparent);
-  --note-diff-edge: color-mix(in srgb, var(--note-diff-color) 35%, transparent);
+  --note-diff-tint: var(--note-diff-rest);
 }
 
 [data-note-diff][data-note-diff-active],
 .note-diff-all [data-note-diff][data-note-diff-active] {
-  --note-diff-tint: color-mix(in srgb, var(--note-diff-color) 22%, transparent);
-  --note-diff-edge: color-mix(in srgb, var(--note-diff-color) 70%, transparent);
+  --note-diff-tint: var(--note-diff-strong);
 }
 
 .note-diff-all [data-note-diff],
@@ -63,8 +98,12 @@ li[data-note-diff][data-note-diff-active] {
   outline-width: 1.5px;
 }
 
-.note-diff-all figure[data-note-diff],
-figure[data-note-diff][data-note-diff-active] {
+.note-diff-all figure[data-note-diff] {
+  outline: 1px solid var(--note-diff-edge);
+}
+
+figure[data-note-diff][data-note-diff-active],
+.note-diff-all figure[data-note-diff][data-note-diff-active] {
   outline: 2px solid var(--note-diff-edge);
 }
 
@@ -85,11 +124,14 @@ tr[data-note-diff][data-note-diff-active] > * {
   box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
 }
 
-/* The words a modified block gained, and in the previous version the ones it lost. */
+/* The words that changed in a changed block: the ones it gained in the
+   note, the ones it lost in the previous version. One colour for both, as
+   the viewer paints `.char-changed` on either side. They are two highlights
+   because each pane registers its own ranges. */
 ::highlight(note-diff-added) {
-  background-color: color-mix(in srgb, var(--status-added) 32%, transparent);
+  background-color: var(--diff-modified-inline-bg);
 }
 
 ::highlight(note-diff-removed) {
-  background-color: color-mix(in srgb, var(--status-deleted) 32%, transparent);
+  background-color: var(--diff-modified-inline-bg);
 }

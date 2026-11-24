@@ -2,7 +2,8 @@
 
 When a note has been revised, the note viewer shows what the last revision
 changed. Each change has a marker in the note's right margin: green for
-added, red for removed, orange for modified. A marker stands beside its
+added, red for removed, amber for modified. The colours are the code diff
+viewer's (see [Colours](#colours)). A marker stands beside its
 change, as tall as the changed text, and scrolls with the note. Hovering a
 marker highlights that change in the note. Pressing one opens the previous
 version in a pane on the left, with the change lit in both panes and the two
@@ -66,6 +67,60 @@ A marker that scrolls under a pointer at rest is not hovered: only a pointer
 that moved onto it lights the change. Otherwise the change a press scrolled
 into the pointer's place would take the light from the one that was pressed.
 
+## Colours
+
+A note diff is painted from the code diff viewer's own tokens
+(`DiffViewer.svelte` in `packages/diff-viewer`), so the two read as one
+system. A block is to a note what a line is to a file:
+
+| In the note diff                      | Token                       | In the code diff                |
+| ------------------------------------- | --------------------------- | ------------------------------- |
+| An added block                        | `--diff-added-bg`           | An added line, in the new pane  |
+| A removed block                       | `--diff-removed-bg`         | A removed line, in the old pane |
+| A changed block, in both panes        | `--diff-modified-bg`        | A modified line, in both panes  |
+| The words that changed, in both panes | `--diff-modified-inline-bg` | `.char-changed`, in both panes  |
+
+- The viewer has a colour for a modified line: amber, the same on both sides,
+  with the changed characters in a stronger amber. It is not red on the old
+  side and green on the new. Red and green are for lines only one side has,
+  and the note diff follows that block by block: `data-note-diff` on a block
+  is its own change, not its hunk's. Where a revision replaced a paragraph
+  outright, or the comparing budget below ran out, the old block is red in
+  the previous version and the new one green in the note, and only the
+  change's marker is amber.
+- The tints above are the resting ones, on every changed block while the
+  previous version is open. The change being pointed at takes a stronger tint
+  of the same colour: `--diff-added-bg-emphasis`,
+  `--diff-removed-bg-emphasis` and `--diff-modified-bg-emphasis`. The viewer
+  has no such state, so these were added beside its tokens, the first two in
+  `theme.ts` and the amber one in `app.css`. The amber emphasis stays under
+  the inline colour, so changed words show on it.
+- Markers, a changed figure's edge and the gap line of the change being
+  pointed at are solid, in the colour the tint is made of: `--status-added`
+  and `--status-deleted` (which the diff's file list also uses for a file's
+  added and removed lines) and `--diff-modified-accent`, the amber at full
+  strength. `--status-modified` is not used: on the light theme it is a dark
+  gold meant to be read as text, and beside the amber tint it looks brown.
+  The other gap lines are the emphasised tint, and a pointed marker has a
+  2px halo of it.
+- The amber is one colour in every theme. `app.css` sets the modified tokens
+  and `theme.ts` does not, so they are the same in the light and dark chrome
+  and under every diff theme.
+- The green and red are the chrome's. The viewer's panes are themed apart
+  from the rest of the app, by the diff theme chosen in Settings
+  (`applyDiffTheme` in `preferences.svelte.ts` scopes a second set of the
+  same tokens onto the diff's container), and the note viewer is chrome. With
+  a diff theme that has the chrome's git colours (`github-light` on the light
+  chrome, `github-dark-default` on the dark) the tokens are equal. One that
+  brings its own, such as the default `laserwave`, whose added is teal and
+  removed purple, shows those in its panes, while a note diff, like the
+  diff's own file list, keeps the chrome's green and red.
+
+`noteDiffColours.test.ts` holds the note diff's stylesheets to these tokens,
+and the viewer's rules to the ones they are matched against, so a change to
+either side fails there. `theme.test.ts` checks that text keeps its contrast
+on the emphasised tints.
+
 ## Limits
 
 ### Media a revision dropped
@@ -96,8 +151,9 @@ that was largely rewritten has many such pairs and little to gain from them.
 The comparing is therefore given a budget of 12,000,000 table cells
 (`NOTE_DIFF_WORK_BUDGET` in `noteDiff.ts`), about 50 ms, and no one comparison
 may take more than an eighth of what is left. A comparison that does not fit
-is not made: the two blocks are shown as one removed and one added, in an
-orange change, without the changed words picked out. Cheap comparisons go on
+is not made: the two blocks are shown as one removed (red, in the previous
+version) and one added (green, in the note), in a change whose marker is
+amber, without changed words picked out. Cheap comparisons go on
 being made after a costly one is refused, so small edits among rewritten
 sections keep their words.
 
@@ -144,18 +200,18 @@ The last revision is the one the markers show. Down the note, it holds:
 
 | Marker | Change                             |
 | ------ | ---------------------------------- |
-| Orange | A reworded sentence in the summary |
-| Orange | An edited diagram                  |
+| Amber  | A reworded sentence in the summary |
+| Amber  | An edited diagram                  |
 | Red    | A removed paragraph                |
-| Orange | A changed list item                |
-| Orange | A changed table row                |
+| Amber  | A changed list item                |
+| Amber  | A changed table row                |
 | Green  | An added section, _Rollout_        |
 
 The second note's revision holds:
 
 | Marker | Change                               |
 | ------ | ------------------------------------ |
-| Orange | The screenshot, replaced by a line   |
+| Amber  | The screenshot, replaced by a line   |
 | Red    | The recording, removed               |
 | Green  | An added finding, the last in a list |
 
@@ -215,7 +271,7 @@ the time: `lsof -p <pid> | grep -F .staged` should list only paths under
 Open **Note diffs demo** from the projects grid and press the first note,
 **Upload retries: findings and plan**. The right margin of the note should
 carry the six markers above, in that order, each beside its change. Hover
-each one, press an orange one to open the previous version, scroll either
+each one, press an amber one to open the previous version, scroll either
 pane, and press Escape twice: once for the previous version, once for the
 note.
 
@@ -227,13 +283,15 @@ What to expect:
   its list. They move with the text as the note scrolls. In a window too
   short to show the whole note, the markers of changes further down are out
   of view until the note is scrolled to them.
-- Hovering tints the changed blocks and paints the changed words. A changed
-  diagram is tinted and edged in its marker's colour. The removed paragraph
+- Hovering tints the changed blocks and paints the changed words, in the
+  amber a code diff gives a modified line and its changed characters. A
+  changed diagram is tinted and edged in its marker's colour. The removed paragraph
   has no block in the note: its marker is a short red one above _Findings_,
   and hovering it draws a red line across the gap the paragraph left, level
   with the marker.
-- With the previous version open, it has markers of its own beside its
-  blocks: a tall red one beside the removed paragraph, and a short green one
+- With the previous version open, every changed block is tinted in both
+  panes, as the lines of a code diff are, and the pressed change more
+  strongly. The previous version has markers of its own beside its blocks: a tall red one beside the removed paragraph, and a short green one
   where the _Rollout_ section is not.
 - A press puts the change a third of the way down both panes, level in each.
   A change too near the top of the note to reach that line stays where it
@@ -248,9 +306,9 @@ previous version stays as it was. Otherwise one Escape closes the search and
 the note together, as it does in every other viewer.
 
 Then open the second note, **Settings redesign: review notes**, and press its
-orange marker. The previous version shows a placeholder where the screenshot
-was, lit as the changed block, level with the sentence that replaced it in
-the note. Press the red marker: the placeholder for the recording is lit, and
+amber marker. The previous version shows a placeholder where the screenshot
+was, lit red as a removed block, level with the sentence that replaced it,
+which is lit green in the note. Press the red marker: the placeholder for the recording is lit, and
 the note shows a red line across the gap it left.
 
 To make a version by hand instead, revise a note of your own. An agent

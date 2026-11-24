@@ -393,8 +393,9 @@ describe('the work budget', () => {
     expect(hunk.previousIndices).toHaveLength(120);
     expect(hunk.currentIndices).toHaveLength(120);
     expect(new Set(hunk.ops.map((op) => op.type))).toEqual(new Set(['removed', 'added']));
-    expect(hunkTextRanges(hunk, 'previous').every(({ ranges }) => ranges === null)).toBe(true);
-    expect(hunkTextRanges(hunk, 'current')).toHaveLength(120);
+    // Removed on one side and added on the other, with no words to point out.
+    expect(hunkTextRanges(hunk, 'previous')).toEqual([]);
+    expect(hunkTextRanges(hunk, 'current')).toEqual([]);
   });
 
   it('leaves a reworded block unpaired when there is no room to compare it', () => {
@@ -499,12 +500,14 @@ describe('hunkTextRanges', () => {
     expect(hunkTextRanges(hunk, 'current')).toEqual([{ unitIndex: 1, ranges: null }]);
   });
 
-  it('points out each side of a replaced paragraph whole', () => {
+  it('points out nothing in a replaced paragraph: each side is a whole change', () => {
     const replacement = unit('See the retention policy for how long logs are kept.');
     const [hunk] = computeNoteDiff([intro, middle, outro], [intro, replacement, outro]).hunks;
 
-    expect(hunkTextRanges(hunk, 'previous')).toEqual([{ unitIndex: 1, ranges: null }]);
-    expect(hunkTextRanges(hunk, 'current')).toEqual([{ unitIndex: 1, ranges: null }]);
+    expect(hunk.kind).toBe('modified');
+    expect(hunk.ops.map((op) => op.type)).toEqual(['removed', 'added']);
+    expect(hunkTextRanges(hunk, 'previous')).toEqual([]);
+    expect(hunkTextRanges(hunk, 'current')).toEqual([]);
   });
 
   it('points out nothing in a hunk of additions alone or removals alone', () => {

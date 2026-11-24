@@ -3,7 +3,7 @@
   text.
 
   One marker per hunk of the diff (noteDiff.ts): green for text that was
-  added, red for text that was removed, orange for text that was changed.
+  added, red for text that was removed, amber for text that was changed.
   A marker stands level with its change: as tall as the hunk's blocks on
   this side, from the top of the first to the bottom of the last. A hunk
   with no block here (in the note, text the revision removed) has a short
@@ -173,10 +173,9 @@
     border: none;
     border-radius: 2px;
     background-color: var(--marker-color);
-    opacity: 0.7;
     cursor: pointer;
     pointer-events: auto;
-    transition: opacity 0.1s;
+    transition: box-shadow 0.1s;
   }
 
   /* A short marker is still easy to hit. The room is taken above, below and
@@ -188,21 +187,30 @@
     inset: -3px -2px -3px -6px;
   }
 
+  /* The colours are the code diff's (see noteDiffStyles.css). A marker is
+     the solid colour its blocks' tint is made of, at full strength: washed
+     out over the page it muddies. The marker being pointed at gains a halo
+     in a tint of the same colour, the one its blocks are lit with (for a
+     modified change, the one its changed words are), kept to the 2px
+     between the marker and the scrollbar. */
   .note-change-marker[data-kind='added'] {
     --marker-color: var(--status-added);
+    --marker-halo: var(--diff-added-bg-emphasis);
   }
 
   .note-change-marker[data-kind='removed'] {
     --marker-color: var(--status-deleted);
+    --marker-halo: var(--diff-removed-bg-emphasis);
   }
 
   .note-change-marker[data-kind='modified'] {
-    --marker-color: var(--status-modified);
+    --marker-color: var(--diff-modified-accent);
+    --marker-halo: var(--diff-modified-inline-bg);
   }
 
   .note-change-marker:hover,
   .note-change-marker.is-pointed {
-    opacity: 1;
+    box-shadow: 0 0 0 2px var(--marker-halo);
   }
 
   .note-change-marker:focus-visible {

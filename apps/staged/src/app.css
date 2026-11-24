@@ -82,9 +82,20 @@
 
   --diff-added-bg: rgba(63, 185, 80, 0.08);
   --diff-removed-bg: rgba(248, 81, 73, 0.08);
+  --diff-added-bg-emphasis: rgba(63, 185, 80, 0.13);
+  --diff-removed-bg-emphasis: rgba(248, 81, 73, 0.13);
   --diff-changed-bg: rgba(255, 255, 255, 0.04);
+  /* A line (or a note's block) that was changed rather than added or removed,
+     and the words in it that changed. One amber in every theme: theme.ts does
+     not set these. The emphasis is the tint for the change being pointed at,
+     kept under the inline one so changed words still show on it, and the
+     accent is the amber itself, for a mark that stands for such a change (as
+     --status-added and --status-deleted are the colours the added and
+     removed tints are made of). */
   --diff-modified-bg: rgba(227, 179, 65, 0.08);
+  --diff-modified-bg-emphasis: rgba(227, 179, 65, 0.16);
   --diff-modified-inline-bg: rgba(227, 179, 65, 0.25);
+  --diff-modified-accent: rgb(227, 179, 65);
   --diff-range-border: #524d58;
   --diff-comment-highlight: rgba(167, 139, 250, 0.55);
   --diff-comment-bg: #1b181f;

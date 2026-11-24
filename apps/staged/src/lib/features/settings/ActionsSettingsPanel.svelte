@@ -26,6 +26,7 @@
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import { hueSliderGradient } from '../../shared/badgeColors';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import { matchesRepoSearch } from './repoContextSearch';
   import { toast } from 'svelte-sonner';
   import { getPreferredAgent } from './preferences.svelte';
@@ -645,6 +646,7 @@
                       class="badge-input"
                       class:badge-input-error={badgeError}
                       type="text"
+                      {...NO_SAFARI_AUTOFILL}
                       maxlength="6"
                       autocapitalize="off"
                       autocorrect="off"

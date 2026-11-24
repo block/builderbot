@@ -7,6 +7,7 @@
   import * as Popover from '$lib/components/ui/popover';
   import * as ToggleGroup from '$lib/components/ui/toggle-group';
   import { Input } from '$lib/components/ui/input';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import { Label } from '$lib/components/ui/label';
   import DiagramConfigSetting from './DiagramConfigSetting.svelte';
   import UpdateSettings from './UpdateSettings.svelte';
@@ -188,6 +189,7 @@
       <Input
         id="branch-prefix-input"
         type="text"
+        {...NO_SAFARI_AUTOFILL}
         placeholder="e.g. alice"
         class="max-w-[320px]"
         value={preferences.branchPrefix}

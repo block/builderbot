@@ -718,6 +718,26 @@ describe('ProjectSection inline rename', () => {
     unmount(section);
   });
 
+  // Safari offers the contact name on this field, and one tap on the offer
+  // renames the project. The field is exempt while it matches Safari's
+  // `search` keyword and `autocomplete` is `off` or absent.
+  it('carries the attributes that stop Safari offering AutoFill', async () => {
+    const section = mountSection({ onRenameProject: vi.fn() });
+    await settle();
+
+    const input = await openRename();
+    expect(input.getAttribute('name')).toBe('search');
+    expect(input.getAttribute('autocomplete')).toBe('off');
+    // The spread leaves the rest of the editor as it was.
+    expect(input.className.split(/\s+/)).toContain('project-name-input');
+    expect(input.getAttribute('aria-label')).toBe('Project name');
+    expect(input.getAttribute('title')).toBe('Project name');
+    expect(input.hasAttribute('enterkeyhint')).toBe(false);
+    expect(input.value).toBe('Project');
+
+    unmount(section);
+  });
+
   it('edits the current name in place and saves a changed name on Enter', async () => {
     const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
     const section = mountSection({ onRenameProject });

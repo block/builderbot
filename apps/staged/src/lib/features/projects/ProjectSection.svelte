@@ -8,6 +8,7 @@
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { toast } from 'svelte-sonner';
   import { listenToEvent } from '../../transport';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import FileText from '@lucide/svelte/icons/file-text';
   import Pencil from '@lucide/svelte/icons/pencil';
   import type {
@@ -1101,6 +1102,7 @@
               <input
                 bind:this={projectNameInput}
                 class="project-name-input"
+                {...NO_SAFARI_AUTOFILL}
                 class:error={!!renameProjectError}
                 bind:value={projectNameDraft}
                 disabled={renameProjectSaving || deleting}

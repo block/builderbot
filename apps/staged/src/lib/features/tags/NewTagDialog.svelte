@@ -14,6 +14,7 @@
   import { Label } from '$lib/components/ui/label';
   import Spinner from '../../shared/Spinner.svelte';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import { tagsStore } from '../../stores/tags.svelte';
   import { newTagDialog } from './newTagRequest.svelte';
   import { tagActions } from './tagActions.svelte';
@@ -91,11 +92,11 @@
         <Label for={inputId}>Name</Label>
         <Input
           id={inputId}
+          {...NO_SAFARI_AUTOFILL}
           bind:ref={inputElement}
           bind:value={draft}
           disabled={creating}
           placeholder="e.g. q4-launch"
-          autocomplete="off"
           autocorrect="off"
           autocapitalize="off"
           spellcheck="false"

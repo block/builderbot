@@ -16,6 +16,7 @@
 <script lang="ts">
   import { openUrl } from '../../api/commands';
   import { Button } from '$lib/components/ui/button';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import {
     agentLogin,
     agentLoginFor,
@@ -47,6 +48,7 @@
       <div class="login-code-row">
         <input
           class="login-code-input"
+          {...NO_SAFARI_AUTOFILL}
           aria-label="Authentication code"
           placeholder="Paste authentication code"
           bind:value={agentLogin.code}

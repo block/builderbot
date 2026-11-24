@@ -27,7 +27,7 @@ const DOCK_OVERLAP_PROPERTY = '--selection-dock-overlap';
 export interface NoteMediaAreaTracker {
   /** Measure again on the next frame if a measurement was skipped. */
   refresh: () => void;
-  /** Stop tracking and clear `--media-area-height`. */
+  /** Stop tracking and clear `--media-area-height`; `refresh()` does nothing after. */
   stop: () => void;
 }
 
@@ -77,7 +77,8 @@ function scrollAreaContentHeight(scrollArea: HTMLElement): number | null {
  * leaving doesn't always resize a box (in a full-screen dialog its overlap
  * can sit inside the safe-area padding), so a resize of the window or the
  * dialog while it showed would otherwise go unmeasured until the next one.
- * `refresh()` does nothing while no measurement is owed.
+ * `refresh()` does nothing while no measurement is owed, or once `stop()` has
+ * run (it would write the property back onto an area that may be gone).
  */
 export function trackNoteMediaArea(
   scrollArea: HTMLElement | null | undefined,
@@ -85,6 +86,7 @@ export function trackNoteMediaArea(
 ): NoteMediaAreaTracker | undefined {
   if (!scrollArea || !dialog || typeof ResizeObserver === 'undefined') return;
   let skipped = false;
+  let stopped = false;
   const update = () => {
     const height = scrollAreaContentHeight(scrollArea);
     skipped = height === null;
@@ -112,9 +114,10 @@ export function trackNoteMediaArea(
   window.addEventListener('resize', schedule);
   return {
     refresh: () => {
-      if (skipped) schedule();
+      if (skipped && !stopped) schedule();
     },
     stop: () => {
+      stopped = true;
       if (frame) cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener('resize', schedule);

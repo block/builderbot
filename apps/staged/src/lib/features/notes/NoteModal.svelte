@@ -1288,15 +1288,10 @@
      that too (`--selection-dock-overlap`, measured above), so a selection
      ending in the last lines can scroll out from behind it. */
   /* Positioned for the selection's Reply button, which scrolls with the text. */
-  /* An inline-size container for the media's minimum width (`cqw`, see
-     mediaStyles.css); the height its cap follows is measured instead
-     (`--media-area-height`, noteMediaArea.ts), since size containment would
-     leave this content-sized dialog nothing to grow from. */
   .modal-content {
     position: relative;
     flex: 1;
     overflow-y: auto;
-    container-type: inline-size;
     padding: 24px;
     padding-left: calc(24px + var(--dialog-safe-left, 0px));
     padding-right: calc(24px + var(--dialog-safe-right, 0px));

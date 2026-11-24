@@ -215,6 +215,23 @@ describe('trackNoteMediaArea', () => {
     expect(area.properties.has(MEDIA_AREA_PROPERTY)).toBe(false);
   });
 
+  it('ignores a refresh once stopped, even with a measurement owed', () => {
+    const area = element({ clientHeight: 400 });
+    const dialog = element({ offsetHeight: 600 });
+    const tracker = track(area, dialog);
+
+    // A resize while the dock shows leaves a measurement owed.
+    area.dockOverlap = '20px';
+    for (const listener of resizeListeners) listener();
+    runFrames();
+
+    tracker?.stop();
+    area.dockOverlap = '0px';
+    tracker?.refresh();
+    expect(frames).toHaveLength(0);
+    expect(area.properties.has(MEDIA_AREA_PROPERTY)).toBe(false);
+  });
+
   it('does nothing without both boxes', () => {
     expect(trackNoteMediaArea(undefined, null)).toBeUndefined();
     expect(observers).toHaveLength(0);

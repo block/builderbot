@@ -85,13 +85,13 @@ vi.mock('../../commands', async (importOriginal) => ({
   getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
   getLatestSessionMessages: async () => ({ data: transcript.current }),
   getSessionMessages: async () => ({ data: [] }),
-  getSessionMessagesSince: async () => [],
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],
 }));
 
 import SessionChatPane from './SessionChatPane.svelte';
+import { FALLBACK_POLL_MS } from './messagePoll';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
 
 /** A row created at the time its id names, so ids read as a clock. */
@@ -193,7 +193,7 @@ describe('SessionChatPane note card', () => {
   /** One poll of a running session, which picks up the rows and the status. */
   async function pollOnce() {
     const calls = pollSessionMock.mock.calls.length;
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(FALLBACK_POLL_MS);
     expect(pollSessionMock).toHaveBeenCalledTimes(calls + 1);
     await settle();
   }
@@ -398,7 +398,8 @@ describe('SessionChatPane note card', () => {
   });
 
   it('turns the running call from a row into the card when it completes', async () => {
-    // Only the poll's interval: Svelte's own scheduling stays real.
+    // Only the poll's interval: Svelte's own scheduling stays real. No session
+    // stream is started here, so the pane is on its fallback poll.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     sessionState.status = 'running';
     sessionState.completionReason = null;

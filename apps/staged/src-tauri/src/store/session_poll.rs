@@ -1,10 +1,12 @@
-//! One read per tick of the session pane's poll.
+//! Everything the session pane shows, in one read.
 //!
-//! While a session runs, the pane used to issue four requests every 500 ms:
-//! the session row, the follow-up queue, and the visible and metadata
-//! transcript increments. [`Store::poll_session`] answers all four from one
-//! lock and one read transaction, so the response is a single consistent
-//! snapshot. The runner writes an assistant row's final text before it flips
+//! The pane needs four things: the session row, the follow-up queue, and the
+//! visible and metadata transcript increments. [`Store::poll_session`]
+//! answers all four from one lock and one read transaction, so the response
+//! is a single consistent snapshot. The session stream's full level sends
+//! this read on change (`session_stream/full.rs`); the pane asks for it
+//! itself once when it reopens a session, and on a timer only while the
+//! stream is unavailable. The runner writes an assistant row's final text before it flips
 //! the session's status, so a snapshot whose status is terminal always holds
 //! that text too.
 

@@ -56,11 +56,16 @@
  *   showing, so it never competes with a start-over already under way.
  *
  * `availability` says whether consumers can rely on the stream. It is
- * `unavailable` until `start`, with the kill switch off, and once the stream
- * has gone `ESTABLISH_GRACE_MS` without being established; `liveSessionHints`
- * polls in that state. In between it is `connecting`, where what is shown
- * stays and nothing polls, so a dropped socket does not make every row reload
- * its transcript.
+ * `unavailable` until `start`, and once the stream has gone
+ * `ESTABLISH_GRACE_MS` without being established: the socket is down, the
+ * interest keeps being refused, the hub has stopped. In between it is
+ * `connecting`, where what is shown stays, so a dropped socket or one failed
+ * call changes nothing a user can see. Nothing else brings a row its title
+ * and subtitle, so when the stream is given up on the owner drops what the
+ * frames brought, and a row shows its static label and not a subtitle that
+ * has stopped moving. It goes on trying, and starts over when the stream is
+ * back, which brings snapshots. An open chat is the one thing that polls
+ * while the stream is unavailable (`SessionChatPane.svelte`).
  *
  * A second Staged process writing the same database is the backend's to
  * notice (`session_stream/watch.rs`): its changes arrive as deltas like any
@@ -101,44 +106,14 @@ import type {
   SessionSummaryRow,
 } from '../types';
 
-// ── Kill switch ─────────────────────────────────────────────────────────────
-
-/**
- * Whether the titles and subtitles of running sessions, and what an open
- * chat shows, come from the session stream. `false` puts them back on
- * polling (`liveSessionHints.ts`, and the chat pane's `poll_session` tick),
- * which is kept whole as the fallback.
- */
-const SESSION_STREAM_ENABLED = true;
-
-/**
- * `localStorage` key that overrides `SESSION_STREAM_ENABLED` for this profile,
- * so the two paths can be compared without a rebuild: `'off'` or `'on'`. Read
- * once when the page starts, so reload after changing it:
- *
- *     localStorage.setItem('staged:session-stream', 'off')
- */
-export const SESSION_STREAM_OVERRIDE_KEY = 'staged:session-stream';
-
-export function sessionStreamEnabled(): boolean {
-  try {
-    const override =
-      typeof localStorage === 'undefined'
-        ? null
-        : localStorage.getItem(SESSION_STREAM_OVERRIDE_KEY);
-    if (override === 'on') return true;
-    if (override === 'off') return false;
-  } catch {
-    // No storage to read (a private window can refuse): the constant decides.
-  }
-  return SESSION_STREAM_ENABLED;
-}
-
 // ── Timing ──────────────────────────────────────────────────────────────────
 
 /** How long a claim nobody holds any more stays declared, with its state. */
 export const LINGER_MS = 30_000;
-/** How long the stream may go unestablished before consumers fall back to polling. */
+/**
+ * How long the stream may go unestablished before it counts as unavailable:
+ * rows drop what it brought, and an open chat polls.
+ */
 export const ESTABLISH_GRACE_MS = 5_000;
 /** How long changes to the interest gather before one call declares them. */
 export const INTEREST_DELAY_MS = 10;
@@ -314,6 +289,13 @@ function hintKey(sessionId: string, rootsKey: string): string {
  */
 type Cells<V> = SvelteMap<string, V | undefined>;
 
+/**
+ * A subtitle's cell. `undefined` until the subtitle has been derived (no
+ * summary frame yet, or its roots are still being resolved), then the
+ * subtitle, or `null` for a session with nothing to show.
+ */
+type HintCells = Cells<string | null>;
+
 /** Assign a cell only when its value changes. */
 function setCell<V>(cells: Cells<V>, key: string, value: V | undefined): void {
   if (cells.get(key) !== value) cells.set(key, value);
@@ -358,7 +340,7 @@ export class SessionStreamOwner {
   readonly #statuses: Cells<SessionStatus> = new SvelteMap();
   readonly #titles: Cells<string> = new SvelteMap();
   /** By `hintKey`. */
-  readonly #hints: Cells<string> = new SvelteMap();
+  readonly #hints: HintCells = new SvelteMap();
 
   readonly #entries = new Map<string, Entry>();
   /** The sessions open as chats. Held apart from `#entries`: see `Chat`. */
@@ -505,7 +487,16 @@ export class SessionStreamOwner {
    * consumer gave when it asked for the session's summary.
    */
   hint(sessionId: string, displayRoots?: DisplayRootInput): string | undefined {
-    return this.#hints.get(hintKey(sessionId, displayRootKey(displayRoots)));
+    return this.#hints.get(hintKey(sessionId, displayRootKey(displayRoots))) ?? undefined;
+  }
+
+  /**
+   * Whether `hint` is the session's subtitle against `displayRoots` as the
+   * frames have it. False while it has not been derived yet, where `hint`
+   * is `undefined` for want of rows and not for want of anything to show.
+   */
+  hintDerived(sessionId: string, displayRoots?: DisplayRootInput): boolean {
+    return this.#hints.get(hintKey(sessionId, displayRootKey(displayRoots))) !== undefined;
   }
 
   // ── Consumers ─────────────────────────────────────────────────────────────
@@ -572,7 +563,7 @@ export class SessionStreamOwner {
    * Take a session at the full level for a pane that shows it as a chat.
    * The pane is sent a snapshot read from its cursor, then deltas, for as
    * long as the stream is established; it is the pane's to watch
-   * `availability` and poll when it is not.
+   * `availability` and poll while the stream is unavailable.
    */
   openChat(sessionId: string, handlers: SessionChatHandlers): SessionChat {
     let chat = this.#chats.get(sessionId);
@@ -628,7 +619,11 @@ export class SessionStreamOwner {
       return { status, title, hint: undefined };
     }
     if (!entry.summarized || !entry.views.get(consumer.rootsKey)?.ready) return undefined;
-    return { status, title, hint: this.#hints.get(hintKey(sessionId, consumer.rootsKey)) };
+    return {
+      status,
+      title,
+      hint: this.#hints.get(hintKey(sessionId, consumer.rootsKey)) ?? undefined,
+    };
   }
 
   #notify(sessionId: string): void {
@@ -736,8 +731,7 @@ export class SessionStreamOwner {
   /**
    * Derive one view's subtitle from the rows held. The first time, and when
    * the session's working directory changes, the aliases of its roots are
-   * resolved first, as the poller does, so a tool path is not shown long and
-   * then shortened.
+   * resolved first, so a tool path is not shown long and then shortened.
    */
   #refreshView(sessionId: string, entry: Entry, rootsKey: string): void {
     const view = entry.views.get(rootsKey);
@@ -765,7 +759,7 @@ export class SessionStreamOwner {
     const hint =
       deriveHint(entry.rows, view.displayRoots, entry.openingPromptId) ??
       (entry.rows.length === 0 ? derivePipelineHint(entry.pipeline) : undefined);
-    setCell(this.#hints, hintKey(sessionId, rootsKey), hint);
+    setCell(this.#hints, hintKey(sessionId, rootsKey), hint ?? null);
   }
 
   // ── Frames ────────────────────────────────────────────────────────────────
@@ -1019,6 +1013,19 @@ export class SessionStreamOwner {
     if (this.#availability === 'established') this.#setAvailability('connecting');
   }
 
+  /**
+   * The grace period ran out. What the frames brought is not being kept
+   * current any more and nothing else brings it, so it goes: a row falls
+   * back to its static label. Starting over means that whatever establishes
+   * the stream next (a socket opening, a retry that is accepted, a call
+   * that was only slow) is answered with snapshots.
+   */
+  #giveUp(): void {
+    for (const [sessionId, entry] of this.#entries) this.#forget(sessionId, entry);
+    this.#restart();
+    this.#setAvailability('unavailable');
+  }
+
   #setAvailability(next: SessionStreamAvailability): void {
     if (this.#availability === next) return;
     this.#availability = next;
@@ -1027,7 +1034,7 @@ export class SessionStreamOwner {
     if (next === 'connecting') {
       this.#graceTimer = setTimeout(() => {
         this.#graceTimer = null;
-        this.#setAvailability('unavailable');
+        this.#giveUp();
       }, ESTABLISH_GRACE_MS);
     }
     for (const listener of [...this.#availabilityListeners]) listener(next);
@@ -1037,12 +1044,8 @@ export class SessionStreamOwner {
 /** This window's owner. */
 export const sessionStream = new SessionStreamOwner();
 
-/**
- * Start this window's session stream unless the kill switch is off. Returns
- * the function that stops it.
- */
+/** Start this window's session stream. Returns the function that stops it. */
 export function startSessionStream(): () => void {
-  if (!sessionStreamEnabled()) return () => {};
   sessionStream.start();
   return () => sessionStream.stop();
 }

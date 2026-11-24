@@ -75,7 +75,6 @@ vi.mock('../../commands', async (importOriginal) => ({
   getLatestSessionMessages: async () => ({ data: [] }),
   getSessionMessages: async () => ({ data: [] }),
   getFreshSessionMessages: async () => [],
-  getSessionMessagesSince: async () => [],
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],

@@ -48,7 +48,7 @@
   } from '../../shared/relativeTime.svelte';
   import {
     collectRunningSessionIds,
-    createLiveSessionHints,
+    createLiveSessionRows,
     fallbackHintForPendingType,
     type PendingHintItemType,
   } from './liveSessionHints';
@@ -291,17 +291,16 @@
     return slide(node, { duration: 200 });
   }
 
-  let liveSessionHints = $state<Record<string, string>>({});
-  let liveSessionTitles = $state<Record<string, string>>({});
-  const liveSessionHintPoller = createLiveSessionHints(
-    (nextHints) => {
-      liveSessionHints = nextHints;
-    },
-    () => repoDir,
-    (nextTitles) => {
-      liveSessionTitles = nextTitles;
-    }
-  );
+  // The hints and titles of the running rows, read from the session stream,
+  // each row its own session's. The card stays mounted while home covers its
+  // project (and while the workspace is parked under settings / the diff
+  // view), where its sessions are let go of and the rows keep what they
+  // showed.
+  const layer = useWorkspaceLayer();
+  const liveSessionRows = createLiveSessionRows({
+    visible: () => layer.visible,
+    displayRoots: () => repoDir,
+  });
 
   // Unified timeline item for display
   type DisplayItem = {
@@ -387,6 +386,21 @@
   };
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
+  let runningSessionIdSet = $derived(new Set(runningSessionIds));
+
+  // Only for a session the stream was asked for: a read of any other waits
+  // on every session's changes (see `createLiveSessionRows`).
+  function liveHintFor(sessionId: string | null | undefined): string | undefined {
+    return sessionId && runningSessionIdSet.has(sessionId)
+      ? liveSessionRows.hint(sessionId)
+      : undefined;
+  }
+
+  function liveTitleFor(sessionId: string | null | undefined): string | undefined {
+    return sessionId && runningSessionIdSet.has(sessionId)
+      ? liveSessionRows.title(sessionId)
+      : undefined;
+  }
 
   /** True when there is at least one non-queued active session (running in timeline or pending-but-not-queued). */
   let hasActiveSession = $derived.by(() => {
@@ -436,20 +450,11 @@
   });
 
   $effect(() => {
-    liveSessionHintPoller.syncRunningSessionIds(runningSessionIds);
-  });
-
-  // The card stays mounted while home covers its project (and while the
-  // workspace is parked under settings / the diff view); the hint poller's
-  // get_session* round trips are for rows nobody can see, so pause it there
-  // and resume — polling at once — on return.
-  const layer = useWorkspaceLayer();
-  $effect(() => {
-    liveSessionHintPoller.setPaused(!layer.visible);
+    liveSessionRows.sync(runningSessionIds);
   });
 
   onDestroy(() => {
-    liveSessionHintPoller.destroy();
+    liveSessionRows.destroy();
   });
 
   /** Timestamp that sorts the git status rows below every timeline artifact. */
@@ -757,7 +762,7 @@
       const isDeleting =
         (!!commit.id && deletingCommitIds.has(commit.id)) ||
         (!!commit.sha && deletingCommitIds.has(commit.sha));
-      const liveHint = commit.sessionId ? liveSessionHints[commit.sessionId] : undefined;
+      const liveHint = liveHintFor(commit.sessionId);
 
       let phase: SessionRowPhase;
       let type: TimelineItemType;
@@ -788,10 +793,7 @@
       }
 
       const showAuthor = type === 'commit' && !isDeleting && !!commit.author && !commit.isOwnCommit;
-      const liveTitle =
-        type === 'pending-commit' && commit.sessionId
-          ? liveSessionTitles[commit.sessionId]
-          : undefined;
+      const liveTitle = type === 'pending-commit' ? liveTitleFor(commit.sessionId) : undefined;
 
       all.push({
         key: commit.sha || `pending-${commit.sessionId || commit.timestamp}`,
@@ -832,7 +834,7 @@
       const phase = noteRowPhase(note);
       const isDisconnected = note.sessionStatus === 'disconnected';
       const isDeleting = deletingNoteIds.has(note.id);
-      const liveHint = note.sessionId ? liveSessionHints[note.sessionId] : undefined;
+      const liveHint = liveHintFor(note.sessionId);
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -898,7 +900,7 @@
         totalCount,
       });
       const isDeleting = deletingReviewIds.has(review.id);
-      const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
+      const liveHint = liveHintFor(review.sessionId);
 
       const badges = reviewBadges(review);
 
@@ -930,10 +932,7 @@
         meta = formatRelativeTime(review.completedAt ?? review.createdAt, nowMs);
       }
 
-      const liveTitle =
-        type === 'generating-review' && review.sessionId
-          ? liveSessionTitles[review.sessionId]
-          : undefined;
+      const liveTitle = type === 'generating-review' ? liveTitleFor(review.sessionId) : undefined;
 
       all.push({
         key: `review-${review.id}`,
@@ -1362,7 +1361,7 @@
               ? renderHashtagTokens(item.title, hashtagItems, { interactive: false })
               : undefined}
             secondaryMeta={item.sessionId
-              ? (liveSessionHints[item.sessionId] ??
+              ? (liveHintFor(item.sessionId) ??
                 item.secondaryMeta ??
                 fallbackHintForPendingType(item.type))
               : item.secondaryMeta}

@@ -89,11 +89,11 @@
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
-  // The session stream: running sessions' titles and subtitles are pushed to
-  // this window over it (see sessionStream.svelte.ts). Started here and not
-  // in onMount, which runs after every child has mounted: a view that mounts
-  // before the stream is started takes it for unavailable and polls, loading
-  // each running session's whole transcript.
+  // The session stream: running sessions' titles and subtitles, and what an
+  // open chat shows, are pushed to this window over it (see
+  // sessionStream.svelte.ts). Started here and not in onMount, which runs
+  // after every child has mounted: a chat pane that mounts before the stream
+  // is started takes it for unavailable and starts its fallback poll.
   const stopSessionStream = startSessionStream();
   let unlistenMenu: UnlistenFn | undefined;
   let unlistenReferenceCopy: (() => void) | undefined;

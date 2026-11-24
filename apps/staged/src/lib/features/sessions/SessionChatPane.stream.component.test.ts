@@ -11,8 +11,9 @@ import type {
 } from '../../types';
 
 /**
- * The chat pane fed by the session stream: frames in place of the 500 ms
- * tick while the stream is established, and the tick whenever it is not.
+ * The chat pane fed by the session stream: frames and no fetching on a timer
+ * while the stream is established, nothing while it is being established,
+ * and the fallback's `poll_session` tick once it has been given up on.
  *
  * The owner is the real one, on a link the test plays the backend of, so a
  * frame takes the route it takes in the app: link, owner, pane.
@@ -89,7 +90,6 @@ vi.mock('../../commands', async (importOriginal) => ({
   getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
   getLatestSessionMessages: async () => ({ data: transcript.current }),
   getSessionMessages: async () => ({ data: [] }),
-  getSessionMessagesSince: async () => [],
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],
@@ -117,9 +117,14 @@ vi.mock('../../stores/sessionStream.svelte', async (importOriginal) => {
 
 import SessionChatPane from './SessionChatPane.svelte';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
+import { FALLBACK_POLL_MS } from './messagePoll';
 import { STATUS_HOLD_MS } from './statusHold';
 import { TRANSCRIPT_PAGE_ROWS } from './transcriptWindow';
-import { INTEREST_DELAY_MS, sessionStream } from '../../stores/sessionStream.svelte';
+import {
+  ESTABLISH_GRACE_MS,
+  INTEREST_DELAY_MS,
+  sessionStream,
+} from '../../stores/sessionStream.svelte';
 
 function session(status: SessionStatus, overrides: Partial<Session> = {}): Session {
   return {
@@ -191,8 +196,8 @@ const rowCount = (root: ParentNode = document) => root.querySelectorAll('.messag
 describe('SessionChatPane on the session stream', () => {
   const panes: ReturnType<typeof mount>[] = [];
   let intervals: MockInstance<typeof setInterval>;
-  /** How many times the poll's interval has been started. */
-  const ticking = () => intervals.mock.calls.filter(([, ms]) => ms === 500).length;
+  /** How many times the fallback poll's interval has been started. */
+  const ticking = () => intervals.mock.calls.filter(([, ms]) => ms === FALLBACK_POLL_MS).length;
 
   beforeEach(() => {
     document.body.innerHTML = '';
@@ -236,7 +241,7 @@ describe('SessionChatPane on the session stream', () => {
     return { props, target, pane: panes[panes.length - 1] as { park(): void; unpark(): void } };
   }
 
-  /** Whether `ms` of the poll's interval pass with no tick. */
+  /** Whether `ms` pass with no `poll_session` fetch. */
   async function quietFor(ms: number) {
     const calls = pollSessionMock.mock.calls.length;
     await vi.advanceTimersByTimeAsync(ms);
@@ -244,7 +249,7 @@ describe('SessionChatPane on the session stream', () => {
     return pollSessionMock.mock.calls.length === calls;
   }
 
-  it('asks the stream for a running session from what it loaded, and does not tick', async () => {
+  it('asks the stream for a running session from what it loaded, and fetches nothing', async () => {
     await establish();
     await mountPane();
 
@@ -398,33 +403,108 @@ describe('SessionChatPane on the session stream', () => {
     expect(text()).toContain('Then tidy the tests');
   });
 
-  it('polls as it always did while the stream is not established', async () => {
-    // The kill switch is off, or the stream could not be opened.
+  it('falls back to the poll while the stream is unavailable', async () => {
+    // The stream could not be opened.
     expect(sessionStream.availability).toBe('unavailable');
     await mountPane();
     expect(link.interests).toHaveLength(0);
+    // The load has just read the session, so the first fetch is a tick away.
+    expect(pollSessionMock).not.toHaveBeenCalled();
 
     transcript.current = [...transcript.current, row(3, 'assistant', 'It is two maps')];
-    expect(await quietFor(500)).toBe(false);
+    expect(await quietFor(FALLBACK_POLL_MS / 2)).toBe(true);
+    expect(await quietFor(FALLBACK_POLL_MS / 2)).toBe(false);
     expect(text()).toContain('It is two maps');
-    expect(await quietFor(500)).toBe(false);
+    expect(await quietFor(FALLBACK_POLL_MS)).toBe(false);
     expect(ticking()).toBe(1);
   });
 
-  it('goes back to the poll when the stream is lost, and to the stream when it returns', async () => {
+  it('falls back for a session that is not running too, so its next turn arrives', async () => {
+    sessionRow.current = session('completed');
+    await mountPane();
+    expect(thinking()).toBe(false);
+
+    // Started from elsewhere. In the web build the status event travels on
+    // the socket that is down, so nothing but the fetch can say so.
+    sessionRow.current = session('running', { updatedAt: 2 });
+    transcript.current = [...transcript.current, row(3, 'user', 'And the eviction?')];
+    await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
+    await settle();
+
+    expect(thinking()).toBe(true);
+    expect(text()).toContain('And the eviction?');
+  });
+
+  it('reads at once on a status event while it is on the fallback', async () => {
+    await mountPane();
+    await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
+    await settle();
+    const calls = pollSessionMock.mock.calls.length;
+
+    // The turn ends: its final text was written just before the status.
+    sessionRow.current = session('completed', { updatedAt: 2 });
+    transcript.current = [transcript.current[0], row(2, 'assistant', 'The cache is two maps.')];
+    emit('session-status-changed', { sessionId: SESSION_ID, status: 'completed' });
+    await settle();
+
+    expect(pollSessionMock).toHaveBeenCalledTimes(calls + 1);
+    expect(text()).toContain('The cache is two maps.');
+    expect(thinking()).toBe(false);
+  });
+
+  it('stops the fallback for a session that no longer exists', async () => {
+    await mountPane();
+    sessionRow.current = null;
+    expect(await quietFor(FALLBACK_POLL_MS)).toBe(false);
+
+    expect(await quietFor(FALLBACK_POLL_MS * 5)).toBe(true);
+  });
+
+  it('waits out a lost stream with what it shows, and is read again when it returns', async () => {
     await establish();
     await mountPane();
-    expect(pollSessionMock).not.toHaveBeenCalled();
+    await frame('snapshot', { session: session('running'), queuedMessages: [] });
 
     // The socket drops, and with it whatever had not been delivered.
     transcript.current = [...transcript.current, row(3, 'assistant', 'It is two maps')];
     link.handlers?.onClose();
     await settle();
+    expect(sessionStream.availability).toBe('connecting');
+    expect(await quietFor(ESTABLISH_GRACE_MS - 1_000)).toBe(true);
+    expect(text()).toContain('The cache');
+    expect(ticking()).toBe(0);
+
+    // Back within the grace period: the pane never left the stream, and the
+    // owner gives its cursor again for a snapshot of what it missed.
+    link.handlers?.onOpen();
+    await declared();
+    expect(sessionStream.availability).toBe('established');
+    expect(chat()?.cursor?.sinceId).toBe(2);
+    await frame('snapshot', {
+      session: session('running'),
+      queuedMessages: [],
+      messages: [row(2, 'assistant', 'The cache'), row(3, 'assistant', 'It is two maps')],
+    });
+    expect(text()).toContain('It is two maps');
+    expect(pollSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('goes to the poll when the stream is given up on, and back to the stream when it returns', async () => {
+    await establish();
+    await mountPane();
+    expect(pollSessionMock).not.toHaveBeenCalled();
+
+    transcript.current = [...transcript.current, row(3, 'assistant', 'It is two maps')];
+    link.handlers?.onClose();
+    await vi.advanceTimersByTimeAsync(ESTABLISH_GRACE_MS);
+    await settle();
+    expect(sessionStream.availability).toBe('unavailable');
     // One read from the cursor at once, then the tick.
     expect(pollSessionMock).toHaveBeenCalledTimes(1);
     expect(pollSessionMock.mock.calls[0][1].sinceId).toBe(2);
     expect(text()).toContain('It is two maps');
-    expect(await quietFor(500)).toBe(false);
+    expect(await quietFor(FALLBACK_POLL_MS)).toBe(false);
+    expect(ticking()).toBe(1);
 
     link.handlers?.onOpen();
     await declared();
@@ -439,14 +519,43 @@ describe('SessionChatPane on the session stream', () => {
     expect(text()).toContain('Both are LRU');
   });
 
-  it('waits for a tick that is out before it takes frames', async () => {
+  it('opened while the stream is being established, waits for it and fetches nothing', async () => {
+    sessionStream.start();
+    expect(sessionStream.availability).toBe('connecting');
+    await mountPane();
+    expect(await quietFor(ESTABLISH_GRACE_MS - 1_000)).toBe(true);
+    expect(ticking()).toBe(0);
+
+    link.handlers?.onOpen();
+    await declared();
+    await declared();
+    expect(chat()?.cursor?.sinceId).toBe(2);
+    expect(pollSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('opened while the stream is being established, reads at once when that is given up on', async () => {
+    sessionStream.start();
+    await mountPane();
+    transcript.current = [...transcript.current, row(3, 'assistant', 'It is two maps')];
+
+    await vi.advanceTimersByTimeAsync(ESTABLISH_GRACE_MS);
+    await settle();
+
+    // Nothing fed the pane while it waited, so it does not wait for a tick.
+    expect(sessionStream.availability).toBe('unavailable');
+    expect(pollSessionMock).toHaveBeenCalledTimes(1);
+    expect(text()).toContain('It is two maps');
+    expect(ticking()).toBe(1);
+  });
+
+  it('waits for a fetch that is out before it takes frames', async () => {
     await mountPane();
     // A tick goes out and does not come back yet.
     let answer: (value: Awaited<ReturnType<typeof pollSessionMock>>) => void = () => {};
     pollSessionMock.mockImplementationOnce(
       () => new Promise((resolve) => (answer = resolve)) as ReturnType<typeof pollSessionMock>
     );
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
     expect(pollSessionMock).toHaveBeenCalledTimes(1);
 
     await establish();
@@ -527,6 +636,34 @@ describe('SessionChatPane on the session stream', () => {
       messages: [row(2, 'assistant', 'The cache'), row(3, 'assistant', 'Stopped halfway.')],
     });
     expect(text()).toContain('Stopped halfway.');
+  });
+
+  it('asks the stream for the slow re-fetch of a disconnected session', async () => {
+    sessionRow.current = session('disconnected');
+    await establish();
+    await mountPane();
+    await frame('snapshot', { session: session('disconnected'), queuedMessages: [] });
+    const calls = link.interests.length;
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await declared();
+    expect(link.interests).toHaveLength(calls + 1);
+    expect(chat()?.cursor?.sinceId).toBe(2);
+    expect(pollSessionMock).not.toHaveBeenCalled();
+
+    // Reconcile settled it, and the status event was missed.
+    await frame('snapshot', {
+      session: session('completed', { updatedAt: 2 }),
+      queuedMessages: [],
+      messages: [row(2, 'assistant', 'The cache'), row(3, 'assistant', 'Caught up.')],
+    });
+    expect(text()).toContain('Caught up.');
+
+    // Settled: nothing more is asked.
+    const settled = link.interests.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await declared();
+    expect(link.interests).toHaveLength(settled);
   });
 
   it('feeds two panes showing one session from the same frames', async () => {

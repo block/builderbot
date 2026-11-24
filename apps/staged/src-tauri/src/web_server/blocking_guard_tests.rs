@@ -215,7 +215,6 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     ("session_commands.rs", "poll_session"),
     ("session_commands.rs", "get_session"),
     ("session_commands.rs", "get_session_messages"),
-    ("session_commands.rs", "get_session_messages_since"),
     ("session_commands.rs", "get_active_sessions"),
     ("note_commands.rs", "list_project_notes"),
     ("project_search.rs", "get_project_search_index"),

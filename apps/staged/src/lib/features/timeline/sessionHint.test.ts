@@ -24,9 +24,8 @@ type Fixture = {
 };
 
 /**
- * The opening prompt as the poller (`liveSessionHints.ts`) and the backend
- * (`opening_prompt_id` in `session_summary.rs`) both find it: the first
- * `user` row.
+ * The opening prompt as the backend finds it (`opening_prompt_id` in
+ * `session_summary.rs`): the first `user` row.
  */
 function openingPromptId(transcript: readonly HintRow[]): number | null {
   return transcript.find((message) => message.role === 'user')?.id ?? null;

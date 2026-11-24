@@ -48,7 +48,7 @@
   import { forgetDeletedNote, setNoteReadState } from '../notes/noteReadActions';
   import { noteChatState } from '../sessions/noteFreshness';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
-  import { createLiveSessionHints } from '../timeline/liveSessionHints';
+  import { createLiveSessionRows } from '../timeline/liveSessionHints';
   import { canResumeRow, noteRowPhase } from '../timeline/sessionRowState';
   import { resumeSessionFromRow } from '../timeline/resumeSessionFromRow';
   import { buildChildSessionBadges, runningChildSessionIds } from '../timeline/childSessionBadges';
@@ -282,17 +282,15 @@
   }
 
   // ── Live session hints/titles (newest message + ACP title for running notes) ──
-  let liveSessionHints = $state<Record<string, string>>({});
-  let liveSessionTitles = $state<Record<string, string>>({});
-  const liveSessionHintPoller = createLiveSessionHints(
-    (nextHints) => {
-      liveSessionHints = nextHints;
-    },
-    () => projectDisplayRootCandidates,
-    (nextTitles) => {
-      liveSessionTitles = nextTitles;
-    }
-  );
+  // Read from the session stream, each row its own session's. This section
+  // stays mounted while home covers its project (and while the workspace is
+  // parked under settings / the diff view), where its sessions are let go of
+  // and the rows keep what they showed.
+  const layer = useWorkspaceLayer();
+  const liveSessionRows = createLiveSessionRows({
+    visible: () => layer.visible,
+    displayRoots: () => projectDisplayRootCandidates,
+  });
 
   /** Collect session IDs from running project notes + activeSessionIds. */
   let runningNoteSessionIds = $derived.by(() => {
@@ -309,26 +307,14 @@
   });
 
   // Running children ride along for their ACP title only: a child badge
-  // reads `liveSessionTitles`, nothing reads a child's hint, so each child
-  // costs one `getSession` per tick and never a transcript poll.
+  // reads its title and nothing reads a child's hint, so a child is asked
+  // for at the stream's title level, which carries no transcript rows.
   $effect(() => {
-    liveSessionHintPoller.syncRunningSessionIds(
-      runningNoteSessionIds,
-      runningChildSessionIds(childSessionsBySession)
-    );
-  });
-
-  // This section stays mounted while home covers its project (and while the
-  // workspace is parked under settings / the diff view); the hint poller's
-  // get_session* round trips are for rows nobody can see, so pause it there
-  // and resume — polling at once — on return.
-  const layer = useWorkspaceLayer();
-  $effect(() => {
-    liveSessionHintPoller.setPaused(!layer.visible);
+    liveSessionRows.sync(runningNoteSessionIds, runningChildSessionIds(childSessionsBySession));
   });
 
   onDestroy(() => {
-    liveSessionHintPoller.destroy();
+    liveSessionRows.destroy();
     void projectDraftWriter.flush();
   });
 
@@ -1151,13 +1137,13 @@
             {@const isRunning = isSessionActive(note.sessionStatus)}
             {@const isDeleting = deletingNoteIds.has(note.id)}
             {@const liveHint =
-              isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
+              isRunning && note.sessionId ? liveSessionRows.hint(note.sessionId) : undefined}
             {@const liveTitle =
-              isRunning && note.sessionId ? liveSessionTitles[note.sessionId] : undefined}
+              isRunning && note.sessionId ? liveSessionRows.title(note.sessionId) : undefined}
             {@const childBadges = buildChildSessionBadges(
               (isRunning && note.sessionId ? childSessionsBySession[note.sessionId] : undefined) ??
                 [],
-              liveSessionTitles
+              liveSessionRows.title
             )}
             {@const row = projectNoteRow(note, {
               deleting: isDeleting,

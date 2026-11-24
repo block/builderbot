@@ -200,9 +200,8 @@ fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
     .with_single_cert(certs, key)
     .map_err(|e| format!("failed to configure TLS certificate/key pair: {e}"))?;
     // Browsers only speak HTTP/2 when the server offers it over ALPN; without
-    // this they stay on HTTP/1.1 and its six-connection cap, which the 500 ms
-    // session poll (four requests per tick) shares with multi-MB transcript
-    // bodies. `axum::serve` already runs hyper's auto h1/h2 builder.
+    // this they stay on HTTP/1.1 and its six-connection cap, which every
+    // command request shares with multi-MB transcript bodies. `axum::serve` already runs hyper's auto h1/h2 builder.
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(TlsAcceptor::from(Arc::new(config)))
@@ -3303,18 +3302,6 @@ pub(crate) async fn dispatch(
             blocking_store_json(move || store.get_session_messages_window(&session_id, window))
                 .await
         }
-        "get_session_messages_since" => {
-            let store = get_store(store_mutex)?;
-            let session_id: String = arg(&args, "sessionId")?;
-            let since_id: i64 = arg(&args, "sinceId")?;
-            // Optional so an older frontend bundle keeps working against a
-            // newer server.
-            let refetch_ids: Vec<i64> = opt_arg(&args, "refetchIds")?.unwrap_or_default();
-            blocking_store_json(move || {
-                store.get_session_messages_since(&session_id, since_id, &refetch_ids)
-            })
-            .await
-        }
         "count_assistant_messages_after" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
@@ -3348,8 +3335,8 @@ pub(crate) async fn dispatch(
             })
             .await
         }
-        // The session pane's whole tick in one request. The standalone arms
-        // above stay for the timeline's live hints and other callers.
+        // Everything the session pane shows in one request. The standalone
+        // arms above stay for their other callers.
         "poll_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
@@ -5279,9 +5266,9 @@ mod tests {
         }
     }
 
-    /// The poll runs twice a second per open running pane and carries the
-    /// transcript tail; keep it off the runtime thread like the reads it
-    /// replaced.
+    /// The read carries the transcript tail, and a pane without the session
+    /// stream repeats it once a second; keep it off the runtime thread like
+    /// the reads it replaced.
     #[test]
     fn web_poll_session_reads_under_spawn_blocking() {
         let arm = dispatch_arm_body(include_str!("web_server.rs"), "poll_session");

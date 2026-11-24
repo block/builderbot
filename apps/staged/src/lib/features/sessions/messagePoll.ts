@@ -1,22 +1,31 @@
 /**
- * Incremental transcript polling for a running session.
+ * Incremental transcript reads for an open session.
  *
- * Each tick re-fetches the last known message (it may still be streaming) plus
- * anything newer. That tail re-fetch is not enough on its own: a mid-message
+ * A `pollSession` fetch re-fetches the last known message (it may still be
+ * streaming) plus anything newer. That tail re-fetch is not enough on its own: a mid-message
  * tool call (e.g. one forwarded from a background subagent) inserts tool rows
  * after the assistant row the writer is still extending, so that row falls
  * behind the cursor. The pane asks for it by id alongside the tail.
  *
  * The session stream sends the same rows when they are written instead of
- * when they are asked for (`sessionStream.svelte.ts`). The cursors here are
- * then what the pane gives the stream to be read from
- * (`unionSessionPollRequests` when two panes show one session), and a frame's
- * rows are merged by `mergeFrameMessages`.
+ * when they are asked for (`sessionStream.svelte.ts`), and is what keeps an
+ * open pane current. The cursors here are what the pane gives the stream to
+ * be read from (`unionSessionPollRequests` when two panes show one session),
+ * and a frame's rows are merged by `mergeFrameMessages`. The pane fetches
+ * with them itself when it is reopened, when it re-reads a reconciled
+ * session with no chat open, and every `FALLBACK_POLL_MS` while the stream
+ * is unavailable.
  */
 
 import type { SessionMessage, SessionPollRequest } from '../../types';
 import { isToolMetadataSettled } from './acpTranscript';
 import { retainInlineToolBodies } from './toolCallBodies';
+
+/**
+ * How often an open pane reads `pollSession` while the session stream is
+ * unavailable. There is no such tick while the stream is established.
+ */
+export const FALLBACK_POLL_MS = 1_000;
 
 /**
  * The cursors for one `pollSession` tick, from what the pane has loaded.
@@ -99,11 +108,11 @@ export interface MergedSinceMessages {
  * cutting the last row alone would duplicate the rows both fetches returned.
  * When that happens the tail may also end before the cached one (the older
  * fetch landed last); the cached rows past its last id are kept rather than
- * dropped until a next tick that, after the final poll, never comes.
+ * dropped until a next fetch that may never come.
  *
  * That is as far as the merge can go: for a row both the cache and the fetch
  * hold it cannot tell which copy is newer, so it relies on the pane
- * serialising since-fetches (`pollInFlight` / `finalPollPending`) and is not
+ * serialising since-fetches (`pollInFlight`) and is not
  * a full defence against out-of-order fetches.
  *
  * A tool row that settled since the last tick comes back with its large
@@ -226,24 +235,4 @@ function findIndexFromEnd(messages: readonly SessionMessage[], id: number): numb
     if (messages[i].id === id) return i;
   }
   return -1;
-}
-
-/**
- * Whether the tick that fetched `fetched` should end the poll loop.
- *
- * A `null` session is terminal: the store no longer has it, so nothing will
- * ever flip its status and the loop would run until the dialog closes. That
- * is the reopen of a deleted session — the pane still holds the last status
- * it saw, possibly `running`, and must not keep asking after it. Otherwise
- * the loop ends on a terminal status unless a status event landed during the
- * fetch (backend-owned queue drain can emit a fresh `running` while a tick is
- * in flight; that event is fresher than this fetch and keeps polling alive).
- */
-export function pollShouldStop(
-  fetched: { status: string } | null,
-  statusEventDuringFetch: boolean,
-  currentStatus: string | undefined
-): boolean {
-  if (!fetched) return true;
-  return fetched.status !== 'running' && !statusEventDuringFetch && currentStatus !== 'running';
 }

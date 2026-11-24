@@ -114,9 +114,10 @@ use tokio::sync::broadcast;
 /// mutation already had in scope; secondary ids are filled best-effort and
 /// may be `None`, in which case consumers fall back to a broader refetch.
 ///
-/// Sessions are deliberately absent: chat polls at 500ms and session
-/// lifecycle already flows through `session-status-changed` & friends, so
-/// session-family writes (sessions, messages, queued messages, session-scoped
+/// Sessions are deliberately absent: what a session's rows hold reaches the
+/// frontend over the session stream (`session_stream.rs`), which has its own
+/// record of session writes, and session lifecycle already flows through
+/// `session-status-changed` & friends, so session-family writes (sessions, messages, queued messages, session-scoped
 /// images, repo actions) publish nothing here. The exception is
 /// [`Store::mark_session_chat_read`], which publishes [`StoreChange::Notes`]
 /// because note rows show whether their chat has unread replies.

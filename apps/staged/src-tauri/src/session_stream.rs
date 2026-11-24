@@ -89,12 +89,14 @@
 //! The hub task runs for the life of the app. Should it ever end (a panic),
 //! the hub drops its clients and refuses every interest from then on, so a
 //! client's `check_session_stream` and its next interest both fail and it
-//! goes back to polling.
+//! shows what it can without the stream: a chat pane reads `poll_session`
+//! on a timer, a row drops its live subtitle.
 //!
 //! This sits beside the change feed (`store_events.rs`), which still leaves
-//! sessions out. Polling (`poll_session` and the standalone reads) is
-//! untouched. Nothing asks for the full level yet: the chat pane still
-//! polls, and takes the stream in its place in a later change.
+//! sessions out. It is the only way a running session's subtitle, title and
+//! transcript reach a window that is showing them; `poll_session` remains as
+//! the read a chat pane makes when it reopens a session and while the stream
+//! is unavailable.
 
 pub mod commands;
 mod frames;

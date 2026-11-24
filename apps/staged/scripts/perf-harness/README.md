@@ -6,8 +6,8 @@ be re-run on any branch and two runs compared. No model, no network, no credenti
 ```sh
 # from apps/staged, in the repo's hermit environment
 just perf-harness --label before --projects 4 --sessions-per-project 6 --duration 60
-just perf-harness --label after  --projects 4 --sessions-per-project 6 --duration 60 --skip-build \
-    --local-storage staged:session-stream=off
+just perf-harness --label after  --projects 4 --sessions-per-project 6 --duration 60 \
+    --app-dir <other checkout>/apps/staged
 just perf-harness compare <results>/before-<stamp>.json <results>/after-<stamp>.json
 ```
 

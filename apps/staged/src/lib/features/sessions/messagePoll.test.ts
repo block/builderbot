@@ -3,7 +3,6 @@ import {
   mergeFrameMessages,
   mergeSinceMessages,
   openAssistantRefetchIds,
-  pollShouldStop,
   sessionPollRequest,
   unionSessionPollRequests,
 } from './messagePoll';
@@ -543,31 +542,5 @@ describe('unionSessionPollRequests', () => {
       metadataSinceId: 35,
       metadataRefetchIds: [33, 89],
     });
-  });
-});
-
-describe('pollShouldStop', () => {
-  it('keeps polling a running session', () => {
-    expect(pollShouldStop({ status: 'running' }, false, 'running')).toBe(false);
-  });
-
-  it('stops once the fetched status is terminal and nothing fresher arrived', () => {
-    expect(pollShouldStop({ status: 'completed' }, false, 'completed')).toBe(true);
-  });
-
-  it('stops on a disconnected session: it has no live connection to stream from', () => {
-    expect(pollShouldStop({ status: 'disconnected' }, false, 'disconnected')).toBe(true);
-  });
-
-  it('defers to a status event that landed during the fetch', () => {
-    expect(pollShouldStop({ status: 'completed' }, true, 'running')).toBe(false);
-    expect(pollShouldStop({ status: 'completed' }, false, 'running')).toBe(false);
-  });
-
-  it('treats a missing session as terminal even when the pane last saw it running', () => {
-    // A pooled pane reopened on a session deleted while it was parked: the
-    // stale status says running, poll_session answers `session: null`.
-    expect(pollShouldStop(null, false, 'running')).toBe(true);
-    expect(pollShouldStop(null, true, 'running')).toBe(true);
   });
 });

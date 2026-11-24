@@ -39,17 +39,22 @@ function asRowKind(sessionType: string): SessionRowKind {
  * Project in-flight children onto badge props.
  *
  * Each badge is titled the way the branch timeline would title the same
- * session (`sessionRowTitle`), with `liveTitles` — the hint poller's live ACP
- * titles, keyed by session id — layered on top exactly as BranchTimeline
- * layers them on its rows.
+ * session (`sessionRowTitle`), with `liveTitle` — a session's live ACP title
+ * from the session stream — layered on top exactly as BranchTimeline layers
+ * it on its rows. It is asked only for the children `runningChildSessionIds`
+ * names, which are the ones the stream was asked for.
  */
 export function buildChildSessionBadges(
   children: ChildSessionInfo[],
-  liveTitles: Record<string, string> = {}
+  liveTitle: (sessionId: string) => string | undefined = () => undefined
 ): ChildSessionBadgeProps[] {
   return children.map((child) => {
     const kind = asRowKind(child.sessionType);
-    const title = sessionRowTitle(kind, child.title, liveTitles[child.sessionId]);
+    const title = sessionRowTitle(
+      kind,
+      child.title,
+      hasLiveTitle(child) ? liveTitle(child.sessionId) : undefined
+    );
     return {
       key: child.sessionId,
       sessionType: kind,
@@ -60,17 +65,22 @@ export function buildChildSessionBadges(
   });
 }
 
+/** A child whose title can still change. A queued one has no agent yet. */
+function hasLiveTitle(child: ChildSessionInfo): boolean {
+  return child.status === 'running';
+}
+
 /**
- * The children whose titles can still change: the hint poller tracks these
- * title-only (one `getSession` per tick, no transcript fetch) alongside their
- * parents so a badge picks up an ACP title the way the branch card's row
- * does. Queued children have no agent yet, so nothing to poll.
+ * The children whose titles can still change: these are asked of the session
+ * stream at its title level (status and title, no transcript rows) alongside
+ * their parents, so a badge picks up an ACP title the way the branch card's
+ * row does.
  */
 export function runningChildSessionIds(childrenBySession: Record<string, ChildSessionInfo[]>) {
   const ids: string[] = [];
   for (const children of Object.values(childrenBySession)) {
     for (const child of children) {
-      if (child.status === 'running') ids.push(child.sessionId);
+      if (hasLiveTitle(child)) ids.push(child.sessionId);
     }
   }
   return ids;

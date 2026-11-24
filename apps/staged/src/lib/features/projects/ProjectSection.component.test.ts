@@ -73,9 +73,10 @@ vi.mock('../branches/dragDrop', () => ({ subscribeDragDrop: () => () => {} }));
 vi.mock('../agents/agent.svelte', () => ({ agentState: { providers: [] } }));
 vi.mock('../settings/preferences.svelte', () => ({ getPreferredAgent: () => undefined }));
 vi.mock('../timeline/liveSessionHints', () => ({
-  createLiveSessionHints: () => ({
-    syncRunningSessionIds: () => {},
-    setPaused: () => {},
+  createLiveSessionRows: () => ({
+    sync: () => {},
+    hint: () => undefined,
+    title: () => undefined,
     destroy: () => {},
   }),
 }));

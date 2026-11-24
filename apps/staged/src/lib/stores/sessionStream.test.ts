@@ -22,9 +22,7 @@ import {
   INTEREST_DELAY_MS,
   LINGER_MS,
   RETRY_BASE_MS,
-  SESSION_STREAM_OVERRIDE_KEY,
   SessionStreamOwner,
-  sessionStreamEnabled,
   type SessionStreamConsumer,
 } from './sessionStream.svelte';
 
@@ -83,6 +81,8 @@ function createHarness(
     hidden: boolean;
     closed: boolean;
     failing: boolean;
+    /** An interest call waits on this before it is answered. */
+    gate: Promise<void> | null;
     seq: number;
     generation?: number;
     /** What the backend answers a health check, given what it was asked. */
@@ -91,6 +91,7 @@ function createHarness(
     hidden: false,
     closed: false,
     failing: false,
+    gate: null,
     seq: 0,
     // The backend's own rule, with the harness as the backend: the frames
     // it has sent in the generation of the last interest it accepted.
@@ -107,6 +108,7 @@ function createHarness(
       return {
         setInterest: async (interest) => {
           interests.push(interest);
+          await state.gate;
           if (state.failing) throw new Error('No session stream is open for client');
         },
         check: async (generation, lastSeq) => {
@@ -283,6 +285,70 @@ describe('SessionStreamOwner', () => {
 
       await vi.advanceTimersByTimeAsync(ESTABLISH_GRACE_MS);
       expect(h.owner.availability).toBe('unavailable');
+    });
+
+    it('drops what the frames brought when it gives up, and reads it again when the stream is back', async () => {
+      await h.open();
+      await show(['s1']);
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Working')]));
+      const generation = h.last().generation;
+
+      // Through the grace period what is held stays, for whoever shows it.
+      h.close();
+      await vi.advanceTimersByTimeAsync(ESTABLISH_GRACE_MS - 1);
+      expect(h.owner.status('s1')).toBe('running');
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Working');
+
+      // Given up on: nothing keeps it current, so it is not shown as if
+      // something did.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.owner.availability).toBe('unavailable');
+      expect(h.owner.status('s1')).toBeUndefined();
+      expect(h.owner.title('s1')).toBeUndefined();
+      expect(h.owner.hint('s1', ['/repo'])).toBeUndefined();
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(false);
+
+      // The session is still wanted, and is read again in a new generation.
+      h.reopen();
+      await h.settle();
+      expect(h.owner.availability).toBe('established');
+      expect(h.last().generation).toBeGreaterThan(generation);
+      expect(levels(h.last())).toEqual({ s1: 'summary' });
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Still working')]));
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Still working');
+    });
+
+    it('starts over when a call that outlasted the grace period is accepted', async () => {
+      h.owner.start();
+      let release = () => {};
+      h.state.gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.reopen();
+      h.owner.consume().sync({ summary: ['s1'], title: [], displayRoots: ['/repo'] });
+      await h.settle();
+      const slow = h.last().generation;
+
+      // The backend has the interest and answers it with a snapshot, but the
+      // call itself has not returned when the grace period runs out.
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Working')]));
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Working');
+      await vi.advanceTimersByTimeAsync(ESTABLISH_GRACE_MS);
+      expect(h.owner.availability).toBe('unavailable');
+      expect(h.owner.hint('s1', ['/repo'])).toBeUndefined();
+
+      // It returns. What its snapshot brought was dropped, so it is not
+      // what establishes the stream: a new generation is declared, and its
+      // snapshots are.
+      h.state.gate = null;
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.owner.availability).toBe('unavailable');
+      await h.settle();
+      expect(h.last().generation).toBeGreaterThan(slow);
+      expect(h.owner.availability).toBe('established');
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Working')]));
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Working');
     });
 
     it('stays off a closed stream until it reopens', async () => {
@@ -580,6 +646,25 @@ describe('SessionStreamOwner', () => {
         })
       );
       expect(h.owner.hint('s1', ['/repo'])).toBe('Also cover eviction');
+    });
+
+    it('says whether a subtitle has been derived, apart from whether there is one', async () => {
+      await h.open();
+      await show(['s1']);
+      // Asked for, and nothing has arrived.
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(false);
+
+      // Derived, with nothing to show: the opening prompt is not a reply.
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT]));
+      expect(h.owner.hint('s1', ['/repo'])).toBeUndefined();
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(true);
+
+      await h.frame('delta', 's1', summary([assistant(2, 'Working')]));
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Working');
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(true);
+
+      // Against roots nobody asked for there is nothing to derive.
+      expect(h.owner.hintDerived('s1', ['/elsewhere'])).toBe(false);
     });
 
     it('shows the pipeline step of a session whose transcript is still empty', async () => {
@@ -1473,41 +1558,5 @@ describe('SessionStreamOwner', () => {
       expect(h.owner.hint('s1', ['/repo'])).toBeUndefined();
       expect(h.owner.status('s1')).toBeUndefined();
     });
-  });
-});
-
-describe('sessionStreamEnabled', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  function stubStorage(value: string | null) {
-    vi.stubGlobal('localStorage', {
-      getItem: (key: string) => (key === SESSION_STREAM_OVERRIDE_KEY ? value : null),
-    });
-  }
-
-  it('is on by default', () => {
-    stubStorage(null);
-    expect(sessionStreamEnabled()).toBe(true);
-  });
-
-  it('is on with no storage to read', () => {
-    expect(sessionStreamEnabled()).toBe(true);
-    vi.stubGlobal('localStorage', {
-      getItem: () => {
-        throw new Error('denied');
-      },
-    });
-    expect(sessionStreamEnabled()).toBe(true);
-  });
-
-  it('follows the override', () => {
-    stubStorage('off');
-    expect(sessionStreamEnabled()).toBe(false);
-    stubStorage('on');
-    expect(sessionStreamEnabled()).toBe(true);
-    stubStorage('something else');
-    expect(sessionStreamEnabled()).toBe(true);
   });
 });

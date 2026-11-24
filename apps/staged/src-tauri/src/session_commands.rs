@@ -9,7 +9,10 @@
 //! - `start_session` / `resume_session` — kick off agent work
 //! - `start_or_queue_branch_session` — start or enqueue branch-scoped agent work
 //! - `cancel_session` / `delete_session` — lifecycle control
-//! - `get_session` / `get_session_messages` / `get_session_messages_since` — reads for polling
+//! - `get_session` / `get_session_messages` / `poll_session` — reads for loading a
+//!   session and for the chat pane's fallback when the session stream is
+//!   unavailable; what changes while a session is shown is pushed over the
+//!   stream (`session_stream.rs`)
 //!
 //! Internal-only operations (creating bare sessions, inserting messages,
 //! updating status) are **not** exposed as Tauri commands. They're used
@@ -1227,7 +1230,7 @@ pub async fn discover_acp_config(
 }
 
 // =============================================================================
-// Read-only queries (used by frontend polling)
+// Read-only queries
 // =============================================================================
 
 /// A running or queued session projected to its branch/project context.
@@ -1370,7 +1373,7 @@ pub async fn list_child_sessions(
 }
 
 /// A store read, run on the blocking pool like [`get_active_sessions`]: the
-/// timeline's live hints and the PR, push and pull buttons poll it.
+/// PR, push and pull buttons poll it.
 #[tauri::command]
 pub async fn get_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1406,25 +1409,6 @@ pub async fn get_session_messages(
     .map_err(|e| format!("get_session_messages task failed: {e}"))?
 }
 
-/// A store read, run on the blocking pool like [`get_active_sessions`]: the
-/// timeline's live hints poll it for every running session in a visible list.
-#[tauri::command]
-pub async fn get_session_messages_since(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    session_id: String,
-    since_id: i64,
-    refetch_ids: Vec<i64>,
-) -> Result<Vec<store::SessionMessage>, String> {
-    let store = get_store(&store)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        store
-            .get_session_messages_since(&session_id, since_id, &refetch_ids)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("get_session_messages_since task failed: {e}"))?
-}
-
 #[tauri::command]
 pub async fn get_session_acp_metadata_messages(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1457,12 +1441,15 @@ pub async fn get_session_acp_metadata_messages_since(
     .map_err(|e| format!("get_session_acp_metadata_messages_since task failed: {e}"))?
 }
 
-/// One tick of the session pane's poll: status, follow-up queue and both
-/// transcript increments from a single snapshot (see `store/session_poll.rs`).
+/// What the session pane shows, read at once: status, follow-up queue and
+/// both transcript increments from a single snapshot (see
+/// `store/session_poll.rs`). A pane sends this when it reopens a session and,
+/// once a second, while the session stream is unavailable; otherwise the
+/// stream brings it the same read on change.
 ///
-/// Runs on the blocking pool like [`get_active_sessions`]: an open running
-/// chat sends this twice a second, so as a synchronous command it kept a
-/// store read on the main thread whenever a session was running.
+/// Runs on the blocking pool like [`get_active_sessions`]: it carries the
+/// transcript tail, so as a synchronous command it kept a store read on the
+/// main thread.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn poll_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,

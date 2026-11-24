@@ -44,9 +44,9 @@ describe('buildChildSessionBadges', () => {
   });
 
   it('lets a live ACP title replace a commit title, as the branch row does', () => {
-    const [badge] = buildChildSessionBadges([child({ title: 'make the change' })], {
-      'session-1': 'Refactor the session store',
-    });
+    const [badge] = buildChildSessionBadges([child({ title: 'make the change' })], (sessionId) =>
+      sessionId === 'session-1' ? 'Refactor the session store' : undefined
+    );
 
     expect(badge.title).toBe('Refactor the session store');
   });
@@ -54,10 +54,27 @@ describe('buildChildSessionBadges', () => {
   it('never applies a live title to a note', () => {
     const [badge] = buildChildSessionBadges(
       [child({ sessionType: 'note', title: 'investigate the queue' })],
-      { 'session-1': 'Live title' }
+      () => 'Live title'
     );
 
     expect(badge.title).toBe('investigate the queue');
+  });
+
+  it('asks for the live title of a running child only: the stream holds no other', () => {
+    const asked: string[] = [];
+    buildChildSessionBadges(
+      [
+        child({ sessionId: 'running' }),
+        child({ sessionId: 'queued', status: 'queued' }),
+        child({ sessionId: 'disconnected', status: 'disconnected' }),
+      ],
+      (sessionId) => {
+        asked.push(sessionId);
+        return undefined;
+      }
+    );
+
+    expect(asked).toEqual(['running']);
   });
 
   it('falls back to the branch row placeholder for an untitled review', () => {
@@ -119,7 +136,7 @@ describe('runningChildSessionIds', () => {
     ).toEqual(['a', 'c']);
   });
 
-  it('skips disconnected children, which have no live agent to poll', () => {
+  it('skips disconnected children, which have no live agent to retitle them', () => {
     expect(
       runningChildSessionIds({
         'parent-1': [child({ sessionId: 'a', status: 'disconnected' })],

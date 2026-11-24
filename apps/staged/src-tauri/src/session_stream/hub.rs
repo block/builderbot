@@ -84,8 +84,8 @@ pub struct SessionStreamHub {
     /// The hub task has ended. It runs for the life of the app, so this
     /// means it panicked. Nobody would send a frame again, so from then on
     /// the hub holds no client and refuses every interest: a client's health
-    /// check finds no stream, its interest fails, and it falls back to
-    /// polling instead of showing what it last received for ever.
+    /// check finds no stream, its interest fails, and it stops showing what
+    /// it last received (an open chat reads `poll_session` instead).
     stopped: AtomicBool,
 }
 

@@ -140,8 +140,8 @@
   } from './backgroundHold';
   import {
     mergeFrameMessages,
+    FALLBACK_POLL_MS,
     mergeSinceMessages,
-    pollShouldStop,
     sessionPollRequest,
     type MergedSinceMessages,
   } from './messagePoll';
@@ -404,7 +404,8 @@
   let messagesEl: HTMLDivElement;
   let inputEl: HTMLElement | null = $state(null);
   let composerView = $state<ReturnType<typeof ChatComposer>>();
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** The fallback's tick, while the session stream is unavailable (`syncUpdateSource`). */
+  let fallbackTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   /**
    * The follow-up queue is read by the load, by each poll and by a refresh
@@ -413,23 +414,21 @@
    * the one sent behind a delete would put the deleted message back.
    */
   const queuedReadOrder = new LatestWins<'queue'>();
-  /** A terminal status arrived while a tick was in flight; poll once more
-   *  when that tick settles. */
-  let finalPollPending = false;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenBackgroundHold: UnlistenFn | null = null;
   let statusEventVersion = 0;
   let closed = false;
   /**
-   * The pane shows a loaded session and wants what is written to it, from
-   * the session stream when that is established and from the poll otherwise
-   * (`syncUpdateSource`). False while it is closed, parked or loading.
+   * The pane shows a loaded session and wants what is written to it: from
+   * the session stream, or from the fallback poll while the stream is
+   * unavailable (`syncUpdateSource`). False while it is closed, parked or
+   * loading.
    */
   let following = false;
   /**
    * This pane's hold on the session at the stream's full level, while the
-   * stream is what feeds it. Open and the poll are exclusive: a tick never
-   * starts while the chat is open, and the chat is not opened while a tick
+   * stream is what feeds it. Open and the poll are exclusive: a fetch never
+   * starts while the chat is open, and the chat is not opened while a fetch
    * is in flight, so a fetch and a frame never race for the same row.
    */
   let chat: SessionChat | null = null;
@@ -440,7 +439,7 @@
   let backgroundHold = $state<SessionBackgroundHold | null>(null);
   /**
    * What the backend has said about this running session taking a message
-   * now (owned by this process, agent connection up). Asked on each poll tick
+   * now (owned by this process, agent connection up). Asked on each update
    * until the answer is settled: a yes, or a no that cannot change during this
    * run (another Staged instance owns the row). A retryable no — the
    * connection comes up a few seconds into a run — is asked again. Forgotten
@@ -844,7 +843,7 @@
    * least as new as the call; otherwise its row stays and the follow-up
    * button below the transcript offers the update. The same object is kept
    * across rebuilds that change no delivery, so the tool groups that read it
-   * are not re-evaluated on every poll tick.
+   * are not re-evaluated on every update.
    */
   let previousNoteDeliveries: NoteDeliveries | null = null;
   let noteDeliveries = $derived.by(() => {
@@ -1198,7 +1197,7 @@
     // A restore still waiting on its frame has nothing to scroll once the pane
     // is gone; cancel it here rather than rely on the pool parking first.
     deferredRestore.take();
-    stopPolling();
+    stopFollowing();
     stopWatchingStream();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
@@ -1220,7 +1219,7 @@
     const id = sessionId;
     if (!isActive || !id) {
       closed = true;
-      stopPolling();
+      stopFollowing();
       return;
     }
     // Reset the teardown guard deterministically before loading, in the same
@@ -1228,7 +1227,7 @@
     // does not retrigger this effect — which is exactly why relying on a
     // separately-declared reset effect raced ahead of this load.
     closed = false;
-    stopPolling();
+    stopFollowing();
     const mode = untrack(() =>
       reopenMode({
         loadedSessionId: session?.id,
@@ -1379,14 +1378,14 @@
         statusLoadedForSessionId = id;
       }
       refreshQueuedMessages();
-      if (payload.status === 'running') {
-        startPolling();
-      } else {
+      if (payload.status !== 'running') {
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
         liveDelivery = LIVE_DELIVERY_UNKNOWN;
-        finishPolling();
       }
+      // On the stream there is nothing to fetch: the frame that agrees with
+      // this status comes, and holds what was written before it.
+      pollNow();
     });
     unlistenStatus = unlisten;
 
@@ -1435,10 +1434,7 @@
       chat.resync();
       return;
     }
-    void poll().then(() => {
-      // A live reattach took the session back to running.
-      if (!closed && sessionId === id && session?.status === 'running') startPolling();
-    });
+    void poll();
   }
 
   // The session stays `running` while its agent is held open for background
@@ -1600,7 +1596,7 @@
       // the reverted value current for this open — the marker the hold's
       // freshness guard trusts. Leave both to the event, which set them itself.
       // The rest of the row is skipped with them, the same trade the poll path
-      // makes; a session left running is re-fetched by the poll it just started.
+      // makes; the stream's snapshot, or the fallback's next tick, brings it.
       if (!statusEventSupersededLoad(statusVersionBeforeFetch, statusEventVersion, session, s.id)) {
         session = s;
         statusLoadedForSessionId = s.id;
@@ -1629,7 +1625,7 @@
             scrollToBottomIfNear(true);
             // This copy of the window was read on its own, perhaps before
             // rows a frame has brought since, and a delta is not repeated.
-            // The poll's next tick re-reads the tail; ask the stream to.
+            // The fallback's next tick re-reads the tail; ask the stream to.
             chat?.resync();
           })
           .catch(() => {});
@@ -1731,18 +1727,26 @@
     }
   }
 
-  /** Incremental poll — one `pollSession` request per tick returns the status,
-   *  the follow-up queue, the last message (may have grown) + any new ones, and
-   *  the metadata rows past the cursor, all from one backend snapshot.
+  /**
+   * One `pollSession` request: the status, the follow-up queue, the last
+   * message (may have grown) + any new ones, and the metadata rows past the
+   * cursor, all from one backend snapshot.
    *
-   *  State assignments are skipped whenever a tick brings no actual change:
-   *  reassigning the same data under a fresh identity would invalidate the
-   *  grouped transcript and re-render the entire message list twice a second.
+   * The session stream brings the same things as they are written, so this
+   * is not how an open pane is kept current. It is what a reopened pane
+   * catches up with before it gives the stream its cursor, what the
+   * re-fetches of a reconciled session use when no chat is open, and the
+   * fallback's tick while the stream is unavailable (`syncUpdateSource`).
+   *
+   * State assignments are skipped whenever a fetch brings no actual change:
+   * reassigning the same data under a fresh identity would invalidate the
+   * grouped transcript and re-render the entire message list.
    */
   async function poll(): Promise<PollOutcome> {
     // Not while the stream feeds the pane: a fetch cannot be ordered against
     // the frames, and a delta is not repeated to mend what an older fetch
-    // put back.
+    // put back. One at a time: two fetches from one cursor would both
+    // return the rows past it, and the merges would duplicate them.
     if (!session || closed || pollInFlight || chat) return 'skipped';
     pollInFlight = true;
     try {
@@ -1752,8 +1756,8 @@
       const request = sessionPollRequest(messages, acpMetadataMessages);
       const queuedTicket = queuedReadOrder.issue();
       const result = await pollSession(sessionId, request);
-      // `chat`: a tick abandoned by `stopPolling` can answer after the pane
-      // has gone on to the stream.
+      // `chat`: a fetch abandoned by `stopFollowing` can answer after the
+      // pane has gone on to the stream.
       if (closed || chat) return 'skipped';
       const s = result.session;
       const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
@@ -1765,13 +1769,12 @@
         mergeMessages: (existing) => mergeSinceMessages(existing, result.messages, request.sinceId),
       });
 
-      // Stop polling when the session is done or gone (`pollShouldStop`). The
-      // snapshot that reports a terminal status already holds the rows written
-      // before the flip, so the last text is in `merged` above. A missing
-      // session ends the loop whatever the stale local status says: nothing
-      // will ever flip it back.
-      if (pollShouldStop(s, statusEventDuringFetch, session?.status)) {
-        clearPollTimer();
+      // A missing session ends the pane's updates whatever the stale local
+      // status says: the store no longer has it, so nothing will ever be
+      // written to it. That is a session deleted while this pane showed it.
+      if (!s) {
+        following = false;
+        clearFallbackTimer();
       }
       return s ? 'applied' : 'missing';
     } catch {
@@ -1779,13 +1782,8 @@
       return 'failed';
     } finally {
       pollInFlight = false;
-      if (finalPollPending) {
-        finalPollPending = false;
-        void poll();
-      } else {
-        // The stream may have been established while this tick was out.
-        syncUpdateSource();
-      }
+      // The stream may have been established while this fetch was out.
+      syncUpdateSource();
     }
   }
 
@@ -1829,39 +1827,53 @@
 
   // ── The session stream ───────────────────────────────────────────────────
   //
-  // While the window's session stream is established it feeds the pane in
-  // place of the 500 ms tick: the backend sends a snapshot read from this
-  // pane's cursor, then what is written, as it is written
-  // (`sessionStream.svelte.ts`, `session_stream/full.rs`). Whenever it is not
-  // established (the kill switch is off, it could not be opened, its socket
-  // dropped) the pane polls exactly as before.
+  // The window's session stream is what keeps an open pane current: the
+  // backend sends a snapshot read from this pane's cursor, then what is
+  // written, as it is written (`sessionStream.svelte.ts`,
+  // `session_stream/full.rs`). While it is established nothing is fetched on
+  // a timer.
+  //
+  // The stream can be out of reach: its socket is down, its interest keeps
+  // being refused, the hub has stopped. The owner allows a grace period
+  // (`connecting`), in which the pane waits and what it shows stays, and
+  // then calls the stream `unavailable`. From then until it is established
+  // again the pane reads `poll_session` every `FALLBACK_POLL_MS`, whatever
+  // the session's status: in the web build the status events travel on the
+  // socket that is down, so a status-driven poll would never start.
 
   const stopWatchingStream = sessionStream.onAvailability(() => syncUpdateSource());
 
   /** The load is in: start taking the session's updates. */
   function followSession() {
     following = session !== null;
-    syncUpdateSource();
-    // On the stream this does nothing.
-    if (session?.status === 'running') startPolling();
+    syncUpdateSource(true);
   }
 
-  /** Put the pane on the source its updates should come from now. */
-  function syncUpdateSource() {
+  /**
+   * Put the pane on the source its updates should come from now. `caughtUp`:
+   * the pane has just read the session, so a fallback that starts here has
+   * nothing to fetch until its first tick.
+   */
+  function syncUpdateSource(caughtUp = false) {
     if (closed || !following) return;
-    if (sessionStream.availability === 'established') {
-      clearPollTimer();
-      // A tick still out read the session before the frames will have; its
+    const availability = sessionStream.availability;
+    if (availability !== 'unavailable') clearFallbackTimer();
+    if (availability === 'established') {
+      // A fetch still out read the session before the frames will have; its
       // end comes back here.
       if (!chat && !pollInFlight) openChat();
       return;
     }
-    if (!chat) return;
-    // The stream went away, and with it whatever it had not delivered. One
-    // read from the cursor catches up, and a running session ticks again.
+    // Being (re)established: wait. A chat that is open stays open, and the
+    // owner gives its cursor again when the stream is back, which catches
+    // the pane up in order.
+    if (availability === 'connecting' || fallbackTimer) return;
+    // The stream was given up on, and with it whatever it had not delivered
+    // (or would have, to a pane that waited out the grace period). One read
+    // from the cursor catches up, and the tick carries on from there.
     closeChat();
-    void poll();
-    if (session?.status === 'running') startPolling();
+    if (!caughtUp) void poll();
+    fallbackTimer = setInterval(poll, FALLBACK_POLL_MS);
   }
 
   function openChat() {
@@ -1954,7 +1966,7 @@
 
   /**
    * Learn whether the running session can take a message now. One cheap
-   * registry lookup per poll tick while the answer is a retryable no; nothing
+   * registry lookup per update while the answer is a retryable no; nothing
    * once it is settled (see `liveDelivery`). A status other than `running`
    * forgets the answer at once, so the next run asks afresh.
    */
@@ -1974,7 +1986,7 @@
         liveDelivery = liveDeliveryKnowledge(capability);
       })
       .catch(() => {
-        // Best-effort: the next tick asks again.
+        // Best-effort: the next update asks again.
       })
       .finally(() => {
         liveDeliveryInFlight = false;
@@ -1999,53 +2011,28 @@
   }
 
   /**
-   * Tick while the session runs. Not while the session stream is
-   * established: its frames bring what a tick would, as it is written, and
-   * `syncUpdateSource` starts the tick again should the stream go away.
+   * Read the session now where the fallback poll is what feeds the pane,
+   * without waiting for its next tick: after a status event or a send. On
+   * the stream this does nothing, as the frames bring what was written.
    */
-  function startPolling() {
-    if (pollTimer || sessionStream.availability === 'established') return;
-    pollTimer = setInterval(poll, 500);
+  function pollNow() {
+    if (fallbackTimer) void poll();
   }
 
   /** Abandon the session's updates: the pane is closing or switching session. */
-  function stopPolling() {
+  function stopFollowing() {
     following = false;
     closeChat();
-    clearPollTimer();
+    clearFallbackTimer();
+    // A fetch still out is abandoned: its answer is dropped (`closed`), or
+    // lands on the session the pane has moved to having read nothing of it.
     pollInFlight = false;
-    finalPollPending = false;
   }
 
-  /**
-   * Stop the interval and poll once more. Teardown writes the final text of an
-   * open assistant row just before the status flips, which the last interval
-   * tick may have missed. A tick still in flight read the same cursor this
-   * poll would, and the two merges would duplicate the rows both fetched, so
-   * the final poll is deferred until that tick settles instead.
-   *
-   * `pollInFlight` is left alone: it belongs to the tick's `finally`. Resetting
-   * it here would reopen the guard while that tick is still awaiting, and a
-   * `startPolling()` in the gap (a queue-drain running event right after the
-   * terminal status, or a send) could run a tick concurrently against the
-   * same cursor.
-   */
-  function finishPolling() {
-    clearPollTimer();
-    // On the stream there is nothing to fetch: the frame that reports the
-    // status that ended the turn holds that text, or it was sent before.
-    if (chat) return;
-    if (pollInFlight) {
-      finalPollPending = true;
-    } else {
-      void poll();
-    }
-  }
-
-  function clearPollTimer() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+  function clearFallbackTimer() {
+    if (fallbackTimer) {
+      clearInterval(fallbackTimer);
+      fallbackTimer = null;
     }
   }
 
@@ -2171,9 +2158,9 @@
         case 'injected':
         case 'interrupted_and_reprompted':
         case 'started_new_turn':
-          // The user row is persisted by the delivery itself; the poll picks
-          // it up.
-          startPolling();
+          // The user row is persisted by the delivery itself; the stream (or
+          // the fallback poll) brings it.
+          pollNow();
           scrollToBottom();
           return true;
         case 'resumed':
@@ -2183,7 +2170,7 @@
           session = { ...session, status: 'running' };
           clearBackgroundHold();
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
-          startPolling();
+          pollNow();
           scrollToBottom();
           return true;
         case 'not_running':
@@ -2294,7 +2281,7 @@
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;
       observedDisconnect = null;
-      startPolling();
+      pollNow();
       scrollToBottom();
       return true;
     } catch (e) {
@@ -2529,7 +2516,7 @@
       if (session) session = { ...session, status: 'running' };
       // The queued message starts a new turn — see sendMessage.
       clearBackgroundHold();
-      startPolling();
+      pollNow();
       scrollToBottom();
     } catch (e) {
       sendError = `Failed to send queued message: ${e instanceof Error ? e.message : String(e)}`;
@@ -3318,7 +3305,7 @@
   export function close() {
     if (closed) return;
     closed = true;
-    stopPolling();
+    stopFollowing();
   }
 
   /** Scroll state saved by `park` for the next `unpark`. */

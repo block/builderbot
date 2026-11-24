@@ -6,9 +6,9 @@ import { isStagedResumePrompt } from './stagedResumePrompts';
 
 // The one-line subtitle of a running session, derived from data handed in.
 // Nothing here fetches, polls or keeps state, so whatever holds a session's
-// rows can call it: the poller in `liveSessionHints.ts`, which holds whole
-// `SessionMessage`s, and the session stream's owner
-// (`stores/sessionStream.svelte.ts`), which holds summary rows.
+// rows can call it. The session stream's owner
+// (`stores/sessionStream.svelte.ts`) does, with the summary rows the backend
+// pushes; whole `SessionMessage`s derive to the same hint.
 
 const MAX_HINT_LENGTH = 72;
 

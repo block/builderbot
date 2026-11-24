@@ -151,12 +151,6 @@ describe('NewProjectForm location', () => {
   });
 });
 
-// Return creates the project through a form that owns only the Name field
-// and Create: from the Name field the browser submits it, and a Return on
-// the fields' container (where WebKit puts the focus after a click on one of
-// its buttons) presses Create. There is no listener on the window, which
-// used to create the project for a Return on a focused Cancel, and under any
-// dialog opened over the splash screen.
 describe('NewProjectForm Name field', () => {
   afterEach(() => {
     if (component) unmount(component);
@@ -186,6 +180,12 @@ describe('NewProjectForm Name field', () => {
   });
 });
 
+// Return creates the project through a form that owns only the Name field
+// and Create: from the Name field the browser submits it, and a Return on
+// the fields' container (where WebKit puts the focus after a click on one of
+// its buttons) presses Create. There is no listener on the window, which
+// used to create the project for a Return on a focused Cancel, and under any
+// dialog opened over the splash screen.
 describe('NewProjectForm Return key', () => {
   beforeEach(() => {
     createProject.mockReset().mockResolvedValue(created);

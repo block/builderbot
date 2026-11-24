@@ -149,6 +149,10 @@
 
       <div class="field">
         <Label for={commandId}>Command</Label>
+        <!-- No NO_SAFARI_AUTOFILL here on purpose. Safari's "AutoFill Contact"
+             button on this field goes away only because the Name field above
+             carries the constant, so taking the spread off Name brings it
+             back here too. -->
         <Input
           id={commandId}
           class="bg-[var(--bg-primary)] dark:bg-[var(--bg-primary)]"

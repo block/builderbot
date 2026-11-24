@@ -12,9 +12,23 @@ import type { HTMLInputAttributes } from 'svelte/elements';
  * place of the keyboard once a login is saved for the host.
  *
  * Safari exempts a field when one of those sources matches its `search`
- * keyword, but only while `autocomplete` is `off` or absent. Any other
- * token, including a made-up one, switches the exemption off. So the two
- * attributes belong together, and a caller must not override either.
+ * keyword, but only while `autocomplete` is `off` or absent. On the iOS
+ * simulator, `name="search"` with `autocomplete="off"` removed the offers.
+ * The rest was read from the script Safari injects into the page and not
+ * tried on a device: that an absent `autocomplete` does as well as `off`,
+ * and that any other token, including a made-up one, switches the exemption
+ * off.
+ *
+ * So the two attributes belong together, and a caller must not override
+ * either. There is a second reason. A browser's form history, which offers
+ * what was typed before into a field, is keyed by `name`, so inputs that
+ * share `name="search"` would offer each other's old values. Only
+ * `autocomplete="off"` keeps that from happening. This one is from how
+ * browsers are known to behave, and was not run either.
+ *
+ * The types cannot stop a call site writing its own `name` or
+ * `autocomplete` beside the spread, so safariAutofill.guard.test.ts reads
+ * every call site's source for one.
  *
  * `name="search"` is a workaround keyed to Safari's keyword list, which Apple
  * can change. It lives here so that there is one place to change with it. The

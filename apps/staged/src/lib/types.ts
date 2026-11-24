@@ -1026,6 +1026,80 @@ export interface SessionPoll {
   acpMetadataMessages: SessionMessage[];
 }
 
+// ── Session stream ──────────────────────────────────────────────────────
+// What the backend pushes instead of being polled for it. These mirror
+// `session_stream/frames.rs` and `store/session_summary.rs`.
+
+/**
+ * How much of a session a client asks the stream for. The backend also has a
+ * `full` level (everything the chat view shows) and refuses an interest that
+ * names it until it is served, so it is left out here: the type check then
+ * keeps the frontend from asking.
+ */
+export type SessionStreamLevel = 'title' | 'summary';
+
+/** One session a client wants, and at which level. */
+export interface SessionStreamSessionInterest {
+  sessionId: string;
+  level: SessionStreamLevel;
+}
+
+/** A client's whole interest. Each one sent replaces the one before. */
+export interface SessionStreamInterest {
+  /**
+   * Chosen by the client and echoed on every frame. A new value starts the
+   * stream over: the sequence restarts at 1 and every session gets a snapshot.
+   */
+  generation: number;
+  /** Nothing is showing (a hidden window): the interest is kept, nothing is sent. */
+  paused: boolean;
+  /** How many of a session's newest visible rows a summary snapshot carries. */
+  summaryWindow: number;
+  sessions: SessionStreamSessionInterest[];
+}
+
+/**
+ * One visible transcript row, as far as a subtitle reads it. `deriveHint`
+ * takes these as they arrive: `sessionHint.ts` holds this type to its
+ * `HintRow`, and the type check fails if the two drift apart.
+ */
+export interface SessionSummaryRow {
+  id: number;
+  role: MessageRole;
+  /** Left out for a `tool_result` row and for the opening prompt. */
+  content?: string;
+  /** Attachment ids of a `user` row. Left out when there are none. */
+  imageIds?: string[];
+}
+
+/** What a row showing a session needs of it. */
+export interface SessionSummary {
+  status: SessionStatus;
+  acpTitle: string | null;
+  /** Left out at the title level, as are the next three. */
+  workingDir?: string;
+  pipeline?: PipelineExecution;
+  /** The id of the prompt that opened the session, once it has one. */
+  openingPromptId: number | null;
+  /** In id order. Empty at the title level. */
+  rows: SessionSummaryRow[];
+}
+
+/** One session's update for this client. */
+export interface SessionStreamFrame {
+  generation: number;
+  /** Counts this client's frames within the generation, from 1. */
+  seq: number;
+  sessionId: string;
+  /**
+   * `snapshot`: the session's state, which replaces what the client holds.
+   * `delta`: the current session fields and the current version of each
+   * changed row, to upsert by id.
+   */
+  kind: 'snapshot' | 'delta';
+  summary?: SessionSummary;
+}
+
 /**
  * Whether a message typed for a session can reach its agent now (the chat
  * composer's "Send" mode) instead of waiting in the queue. Computed by the

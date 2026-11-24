@@ -9,6 +9,8 @@
  *
  */
 
+import type { SessionStreamFrame, SessionStreamInterest } from './types';
+
 // ---------------------------------------------------------------------------
 // Environment detection
 // ---------------------------------------------------------------------------
@@ -255,6 +257,19 @@ interface WebSocketListener {
   callback: (payload: unknown) => void;
   onEstablished?: () => void;
   onRegistrationFailed?: (error: unknown) => void;
+  socket?: SocketHooks;
+}
+
+/**
+ * For a listener whose backend state belongs to one socket and goes with it
+ * (the session stream), where `onEstablished` is not enough: that also fires
+ * for a gap in the broadcast events, which leaves the socket open.
+ */
+interface SocketHooks {
+  /** A socket opened, or was already open when the listener registered. */
+  onOpen: () => void;
+  /** The current socket closed, whether or not it ever opened. */
+  onClose: () => void;
 }
 
 const WEB_SOCKET_HEARTBEAT_MS = 30_000;
@@ -379,6 +394,14 @@ function notifyListenersRegistrationFailed(error: unknown): void {
   }
 }
 
+/** As `notifyListenersEstablished`, for the listeners that follow the socket itself. */
+function notifySocketHooks(hook: keyof SocketHooks): void {
+  for (const listener of [...wsListeners]) {
+    if (!wsListeners.includes(listener)) continue;
+    listener.socket?.[hook]();
+  }
+}
+
 async function ensureWebSocket(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -414,6 +437,7 @@ async function ensureWebSocket(): Promise<void> {
       wsReconnectTimer = null;
     }
     notifyListenersEstablished();
+    notifySocketHooks('onOpen');
   };
 
   socket.onmessage = (messageEvent) => {
@@ -441,6 +465,9 @@ async function ensureWebSocket(): Promise<void> {
     stopHeartbeat();
     if (ws === socket) {
       ws = null;
+      // Not for a socket that was already replaced: the listeners are on the
+      // new one, which this close says nothing about.
+      notifySocketHooks('onClose');
     }
     if (wsListeners.length > 0 && !wsReconnectTimer) {
       wsReconnectTimer = setTimeout(() => {
@@ -460,7 +487,8 @@ async function ensureWebSocket(): Promise<void> {
 function webSocketListen<T>(
   event: string,
   callback: (payload: T) => void,
-  opts: ListenOptions | undefined
+  opts: ListenOptions | undefined,
+  socket?: SocketHooks
 ): UnlistenFn {
   const onEstablished = opts?.onEstablished;
   const listener: WebSocketListener = {
@@ -468,6 +496,7 @@ function webSocketListen<T>(
     callback: callback as (payload: unknown) => void,
     onEstablished,
     onRegistrationFailed: opts?.onRegistrationFailed,
+    socket,
   };
 
   wsListeners.push(listener);
@@ -487,9 +516,11 @@ function webSocketListen<T>(
   // establishment is announced here. Deferred to a microtask so the callback
   // can never run before the caller has stored the unlisten below, and skipped
   // if that unlisten has already been called.
-  if (onEstablished && ws?.readyState === WebSocket.OPEN) {
+  if ((onEstablished || socket) && ws?.readyState === WebSocket.OPEN) {
     queueMicrotask(() => {
-      if (wsListeners.includes(listener)) onEstablished();
+      if (!wsListeners.includes(listener)) return;
+      onEstablished?.();
+      socket?.onOpen();
     });
   }
 
@@ -507,6 +538,123 @@ function webSocketListen<T>(
         socket.close();
       }
     }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Session stream
+// ---------------------------------------------------------------------------
+
+/** The name frames arrive under on the web socket (`session_stream/web.rs`). */
+const SESSION_STREAM_EVENT = 'session-stream';
+const SESSION_STREAM_INTEREST_COMMAND = 'set_session_stream_interest';
+
+export interface SessionStreamHandlers {
+  /** A frame, in the order the backend sent it. */
+  onFrame: (frame: SessionStreamFrame) => void;
+  /**
+   * The stream can take an interest and the backend holds none for it, so
+   * whatever was declared before has to be declared again. Called once in
+   * Tauri mode, and in web mode for every socket that opens: the backend
+   * drops a browser client's interest with its socket and refuses one until
+   * the next socket is open. Always asynchronous.
+   */
+  onOpen: () => void;
+  /**
+   * The stream is gone and nothing arrives until the next `onOpen`. Web mode
+   * only (the socket closed, or never opened).
+   */
+  onClose: () => void;
+}
+
+export interface SessionStreamLink {
+  /**
+   * Declare what this client wants from the stream, replacing what it
+   * declared before. Rejects when the backend refuses it (a browser client
+   * whose socket the backend has not seen yet) or cannot be reached. One call
+   * at a time: wait for the last one to settle before the next.
+   */
+  setInterest(interest: SessionStreamInterest): Promise<void>;
+  close(): void;
+}
+
+/**
+ * Open this page's session stream (`session_stream.rs`): the one ordered
+ * stream of session updates the backend pushes to this window or tab.
+ *
+ * In Tauri mode the frames come over a channel handed to the backend with
+ * the interest; in web mode over the shared events socket, addressed by the
+ * client id that socket connected with. Which one is in use, and what the
+ * interest command needs to find it, stays in here.
+ */
+export function openSessionStream(handlers: SessionStreamHandlers): SessionStreamLink {
+  return isTauri ? openTauriSessionStream(handlers) : openWebSessionStream(handlers);
+}
+
+function openTauriSessionStream(handlers: SessionStreamHandlers): SessionStreamLink {
+  let closed = false;
+  // The channel the backend sends on, once an interest call has handed it
+  // one. `null` means the next call has to hand it a new one.
+  let channel: object | null = null;
+
+  queueMicrotask(() => {
+    if (!closed) handlers.onOpen();
+  });
+
+  return {
+    async setInterest(interest) {
+      const { invoke, Channel } = await import('@tauri-apps/api/core');
+      if (closed) throw new Error('The session stream is closed');
+      // The backend takes a channel on the call that opens the stream and
+      // none afterwards: one passed again would open a new stream and drop
+      // the interest. It has to be a new `Channel` each time one is passed,
+      // because the backend numbers a stream's messages from zero and a
+      // channel that has already received some would hold the new ones back
+      // as out of order.
+      let opening: object | undefined;
+      if (channel === null) {
+        const opened = new Channel<SessionStreamFrame>((frame) => {
+          // A channel that was given up on can still deliver.
+          if (!closed && channel === opened) handlers.onFrame(frame);
+        });
+        opening = opened;
+        channel = opened;
+      }
+      try {
+        await invoke(
+          SESSION_STREAM_INTEREST_COMMAND,
+          opening ? { interest, channel: opening } : { interest }
+        );
+      } catch (e) {
+        // Refused or lost, the backend may hold no stream for this window
+        // now, so the next call opens one.
+        channel = null;
+        throw e;
+      }
+    },
+    close() {
+      closed = true;
+      channel = null;
+    },
+  };
+}
+
+function openWebSessionStream(handlers: SessionStreamHandlers): SessionStreamLink {
+  const unlisten = webSocketListen<SessionStreamFrame>(
+    SESSION_STREAM_EVENT,
+    handlers.onFrame,
+    undefined,
+    { onOpen: handlers.onOpen, onClose: handlers.onClose }
+  );
+  return {
+    async setInterest(interest) {
+      const { getPrPollClientId } = await import('./services/prPollingService');
+      await invokeCommand(SESSION_STREAM_INTEREST_COMMAND, {
+        clientId: getPrPollClientId(),
+        interest,
+      });
+    },
+    close: unlisten,
   };
 }
 

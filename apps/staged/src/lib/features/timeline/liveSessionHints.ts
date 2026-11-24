@@ -6,11 +6,26 @@ import {
   resolveDisplayRoots,
   type DisplayRootInput,
 } from '../sessions/pathDisplayRoots';
-import { stripXmlTags } from '../sessions/sessionModalHelpers';
-import { deriveHint, derivePipelineHint } from './sessionHint';
+import { sessionStream } from '../../stores/sessionStream.svelte';
+import {
+  deriveHint,
+  derivePipelineHint,
+  HINT_ROW_WINDOW,
+  normalizeSessionTitle,
+} from './sessionHint';
+
+// The hints and titles of running sessions, for the view that shows them.
+//
+// They come from the session stream (`stores/sessionStream.svelte.ts`) while
+// it is there: the view's sessions are handed to the stream's owner, which
+// derives each hint from the rows the backend pushes, and nothing is fetched
+// here. When the stream is unavailable (the kill switch is off, or it could
+// not be established) the poller below does the work as it always has:
+// `getSession` plus the transcript's increment per session, every
+// `HINT_POLL_INTERVAL_MS`. Both write the same two records, so the view
+// cannot tell which one it is on.
 
 const HINT_POLL_INTERVAL_MS = 750;
-const MAX_HINT_MESSAGES = 40;
 
 type HintTracker = {
   lastMessageId: number | null;
@@ -38,12 +53,6 @@ export type PendingHintItem = {
   sessionId?: string;
 };
 
-function normalizeTitleText(title: string | null | undefined): string | undefined {
-  if (!title) return undefined;
-  const cleaned = stripXmlTags(title).replace(/\s+/g, ' ').trim();
-  return cleaned || undefined;
-}
-
 function mergeHintMessages(
   previous: SessionMessage[],
   updated: SessionMessage[],
@@ -51,7 +60,7 @@ function mergeHintMessages(
 ): SessionMessage[] {
   if (updated.length === 0) return previous;
   const merged = hadPrevious ? [...previous.slice(0, -1), ...updated] : updated;
-  return merged.slice(-MAX_HINT_MESSAGES);
+  return merged.slice(-HINT_ROW_WINDOW);
 }
 
 export function fallbackHintForPendingType(type: string): string {
@@ -108,6 +117,13 @@ export function createLiveSessionHints(
   // rows don't blank; only the interval stops.
   let paused = false;
   let destroyed = false;
+  // What the view last asked for, whichever source is serving it.
+  let fullIds = new Set<string>();
+  let titleOnlyIds = new Set<string>();
+  // Polling only while the stream cannot be relied on. While it is being
+  // (re)established neither source runs and what is shown stays, so a
+  // dropped socket does not make every row reload its transcript.
+  let polling = sessionStream.availability === 'unavailable';
 
   function setHint(sessionId: string, hint: string) {
     if (destroyed) return;
@@ -145,7 +161,9 @@ export function createLiveSessionHints(
     if (destroyed) return;
     try {
       const session = await commands.getSession(sessionId);
-      if (destroyed) return;
+      // Not the tracker's any more: the view dropped the session, or the
+      // stream took over while this was in flight.
+      if (destroyed || hintTrackers.get(sessionId) !== tracker) return;
       if (!session || session.status !== 'running') {
         hintTrackers.delete(sessionId);
         clearHint(sessionId);
@@ -153,7 +171,7 @@ export function createLiveSessionHints(
         return;
       }
 
-      const acpTitle = normalizeTitleText(session.acpTitle);
+      const acpTitle = normalizeSessionTitle(session.acpTitle);
       if (acpTitle) {
         setTitle(sessionId, acpTitle);
       } else {
@@ -175,7 +193,13 @@ export function createLiveSessionHints(
         tracker.displayRoots = normalizeDisplayRoots(rootCandidates);
         if (nextRootKey) {
           const resolvedRoots = await resolveDisplayRoots(rootCandidates);
-          if (destroyed || !hintTrackers.has(sessionId) || tracker.rootKey !== nextRootKey) return;
+          if (
+            destroyed ||
+            hintTrackers.get(sessionId) !== tracker ||
+            tracker.rootKey !== nextRootKey
+          ) {
+            return;
+          }
           tracker.displayRoots = resolvedRoots;
         }
       }
@@ -185,7 +209,7 @@ export function createLiveSessionHints(
           ? (await commands.getSessionMessages(sessionId)).data
           : await commands.getSessionMessagesSince(sessionId, tracker.lastMessageId);
 
-      if (destroyed || !hintTrackers.has(sessionId)) return;
+      if (destroyed || hintTrackers.get(sessionId) !== tracker) return;
 
       if (updatedMessages.length > 0) {
         if (tracker.openingPromptId === null) {
@@ -245,61 +269,153 @@ export function createLiveSessionHints(
     hintPollInFlight = false;
   }
 
+  /** Bring the poller's trackers in line with what the view asked for. */
+  function syncTrackers() {
+    const activeIds = new Set([...fullIds, ...titleOnlyIds]);
+
+    for (const sessionId of activeIds) {
+      const titleOnly = !fullIds.has(sessionId);
+      const tracker = hintTrackers.get(sessionId);
+      if (tracker) {
+        tracker.titleOnly = titleOnly;
+      } else {
+        hintTrackers.set(sessionId, {
+          lastMessageId: null,
+          messages: [],
+          openingPromptId: null,
+          rootKey: '',
+          displayRoots: [],
+          titleOnly,
+        });
+      }
+    }
+
+    for (const sessionId of Array.from(hintTrackers.keys())) {
+      if (!activeIds.has(sessionId)) {
+        hintTrackers.delete(sessionId);
+        clearHint(sessionId);
+        clearTitle(sessionId);
+      }
+    }
+
+    if (hintTrackers.size === 0) {
+      stopPolling();
+    } else if (!paused) {
+      startPolling();
+      void pollHints();
+    }
+  }
+
+  // ── From the session stream ───────────────────────────────────────────────
+
+  const streamConsumer = sessionStream.consume(applyStreamState);
+
+  /** Show what the stream holds for one session, by the rules the poller follows. */
+  function applyStreamState(sessionId: string) {
+    if (destroyed || polling || paused) return;
+    const full = fullIds.has(sessionId);
+    if (!full && !titleOnlyIds.has(sessionId)) return;
+    const state = streamConsumer.read(sessionId);
+    // Nothing has arrived for it yet, so what the row shows stays.
+    if (!state) return;
+    if (state.status !== 'running') {
+      clearHint(sessionId);
+      clearTitle(sessionId);
+      return;
+    }
+    if (state.title) {
+      setTitle(sessionId, state.title);
+    } else {
+      clearTitle(sessionId);
+    }
+    if (full && state.hint) {
+      setHint(sessionId, state.hint);
+    } else {
+      clearHint(sessionId);
+    }
+  }
+
+  /** Hand the view's sessions to the stream's owner. */
+  function syncStream() {
+    const activeIds = new Set([...fullIds, ...titleOnlyIds]);
+    for (const sessionId of [...Object.keys(hints), ...Object.keys(titles)]) {
+      if (!activeIds.has(sessionId)) {
+        clearHint(sessionId);
+        clearTitle(sessionId);
+      }
+    }
+    if (paused) {
+      // Off screen: let go of the sessions. The owner keeps them for a
+      // while, and the hints and titles stay here so the rows don't blank.
+      streamConsumer.sync({ summary: [], title: [] });
+      return;
+    }
+    streamConsumer.sync({
+      summary: [...fullIds],
+      title: [...titleOnlyIds],
+      displayRoots: getDisplayRootCandidates?.(),
+    });
+    // The owner may already hold some of them, for another view or from
+    // before this one was covered.
+    for (const sessionId of activeIds) applyStreamState(sessionId);
+  }
+
+  function syncSource() {
+    if (polling) {
+      streamConsumer.sync({ summary: [], title: [] });
+      syncTrackers();
+    } else {
+      // The trackers go, and with them any poll still in flight. What they
+      // found stays on the rows until the stream's snapshot replaces it.
+      stopPolling();
+      hintTrackers.clear();
+      syncStream();
+    }
+  }
+
+  const stopWatchingStream = sessionStream.onAvailability((availability) => {
+    const next = availability === 'unavailable';
+    if (destroyed || polling === next) return;
+    polling = next;
+    syncSource();
+  });
+
   return {
     /**
      * Track `runningSessionIds` for hints and titles, and `titleOnlySessionIds`
-     * for their ACP title alone (one `getSession` per tick, no transcript
-     * fetch). An id in both lists is tracked in full. A tracker's mode follows
-     * the lists on every sync: promoting an id to full leaves `lastMessageId`
-     * at `null`, so its next tick fetches the whole transcript.
+     * for their ACP title alone. An id in both lists is tracked in full.
+     *
+     * On the stream that is its summary and its title level. When polling, a
+     * title-only id costs one `getSession` per tick and no transcript fetch,
+     * and a tracker's mode follows the lists on every sync: promoting an id
+     * to full leaves `lastMessageId` at `null`, so its next tick fetches the
+     * whole transcript.
      */
     syncRunningSessionIds(runningSessionIds: string[], titleOnlySessionIds: string[] = []) {
       if (destroyed) return;
-      const fullIds = new Set(runningSessionIds);
-      const activeIds = new Set([...runningSessionIds, ...titleOnlySessionIds]);
-
-      for (const sessionId of activeIds) {
-        const titleOnly = !fullIds.has(sessionId);
-        const tracker = hintTrackers.get(sessionId);
-        if (tracker) {
-          tracker.titleOnly = titleOnly;
-        } else {
-          hintTrackers.set(sessionId, {
-            lastMessageId: null,
-            messages: [],
-            openingPromptId: null,
-            rootKey: '',
-            displayRoots: [],
-            titleOnly,
-          });
-        }
-      }
-
-      for (const sessionId of Array.from(hintTrackers.keys())) {
-        if (!activeIds.has(sessionId)) {
-          hintTrackers.delete(sessionId);
-          clearHint(sessionId);
-          clearTitle(sessionId);
-        }
-      }
-
-      if (hintTrackers.size === 0) {
-        stopPolling();
-      } else if (!paused) {
-        startPolling();
-        void pollHints();
+      fullIds = new Set(runningSessionIds);
+      titleOnlyIds = new Set(titleOnlySessionIds.filter((id) => !fullIds.has(id)));
+      if (polling) {
+        syncTrackers();
+      } else {
+        syncStream();
       }
     },
     /**
-     * Stop the interval without dropping trackers or hints, and pick up where
-     * it left off (polling at once) when unpaused. `syncRunningSessionIds([])`
-     * is not a substitute: it clears the hints and forgets `lastMessageId`,
-     * so every session would re-fetch its whole message list on return.
+     * Stop updating without dropping the hints, and pick up where it left off
+     * when unpaused. On the stream the sessions are let go of, which the
+     * owner outlasts for a while. When polling the interval stops and the
+     * trackers are kept, and unpausing polls at once.
+     * `syncRunningSessionIds([])` is not a substitute: it clears the hints,
+     * and when polling forgets `lastMessageId`, so every session would
+     * re-fetch its whole message list on return.
      */
     setPaused(next: boolean) {
       if (destroyed || paused === next) return;
       paused = next;
-      if (paused) {
+      if (!polling) {
+        syncStream();
+      } else if (paused) {
         stopPolling();
       } else if (hintTrackers.size > 0) {
         startPolling();
@@ -309,6 +425,8 @@ export function createLiveSessionHints(
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      stopWatchingStream();
+      streamConsumer.release();
       stopPolling();
       hintTrackers.clear();
       if (Object.keys(hints).length > 0) {

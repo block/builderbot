@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Session } from '../../types';
+import { normalizeDisplayRoots } from '../sessions/pathDisplayRoots';
+import type { SessionStreamHandlers } from '../../transport';
+import type {
+  Session,
+  SessionStreamInterest,
+  SessionSummary,
+  SessionSummaryRow,
+} from '../../types';
 
 type LiveSessionHintsModule = typeof import('./liveSessionHints');
 type LiveSessionHintPoller = ReturnType<LiveSessionHintsModule['createLiveSessionHints']>;
@@ -503,5 +510,391 @@ describe('createLiveSessionHints user replies', () => {
 
     await tick([text, row(4, 'tool_call', 'Read')]);
     expect(latestHints).toEqual({ s1: 'Reading…' });
+  });
+});
+
+describe('createLiveSessionHints on the session stream', () => {
+  type StreamModule = typeof import('../../stores/sessionStream.svelte');
+  type StreamOwner = InstanceType<StreamModule['SessionStreamOwner']>;
+
+  let getSession: ReturnType<typeof vi.fn>;
+  let getSessionMessages: ReturnType<typeof vi.fn>;
+  let getSessionMessagesSince: ReturnType<typeof vi.fn>;
+  let createLiveSessionHints: LiveSessionHintsModule['createLiveSessionHints'];
+  let owner: StreamOwner;
+  let handlers: SessionStreamHandlers;
+  let interests: SessionStreamInterest[];
+  let seq: { generation: number; next: number };
+  let pollers: LiveSessionHintPoller[];
+  let latestHints: Record<string, string>;
+  let latestTitles: Record<string, string>;
+
+  const OPENING: SessionSummaryRow = { id: 1, role: 'user' };
+  const reading = (id: number, path: string): SessionSummaryRow => ({
+    id,
+    role: 'tool_call',
+    content: JSON.stringify({ name: 'Read', arguments: { file_path: path } }),
+  });
+  const says = (id: number, content: string): SessionSummaryRow => ({
+    id,
+    role: 'assistant',
+    content,
+  });
+
+  function summary(
+    rows: SessionSummaryRow[],
+    overrides: Partial<SessionSummary> = {}
+  ): SessionSummary {
+    return {
+      status: 'running',
+      acpTitle: null,
+      workingDir: '/repo',
+      openingPromptId: 1,
+      rows,
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    getSession = vi.fn().mockResolvedValue(session({ acpTitle: 'Polled title' }));
+    getSessionMessages = vi.fn().mockResolvedValue({
+      data: [
+        { id: 1, role: 'user', content: 'Opening prompt', createdAt: 1 },
+        { id: 2, role: 'assistant', content: 'Polled text', createdAt: 2 },
+      ],
+    });
+    getSessionMessagesSince = vi.fn().mockResolvedValue([]);
+    vi.doMock('../../api/commands', () => ({
+      getSession,
+      getSessionMessages,
+      getSessionMessagesSince,
+      resolvePathAliases: vi.fn().mockResolvedValue([]),
+    }));
+    interests = [];
+    seq = { generation: 0, next: 1 };
+    // The real owner over a stream these tests drive, in place of the app's.
+    vi.doMock('../../stores/sessionStream.svelte', async (importOriginal) => {
+      const original = await importOriginal<StreamModule>();
+      owner = new original.SessionStreamOwner({
+        open: (given) => {
+          handlers = given;
+          return {
+            setInterest: async (interest) => {
+              interests.push(interest);
+            },
+            close: () => {},
+          };
+        },
+        resolveRoots: async (roots) => normalizeDisplayRoots(roots),
+        onStoreReset: () => () => {},
+        visibility: { hidden: () => false, listen: () => () => {} },
+      });
+      return { ...original, sessionStream: owner };
+    });
+    ({ createLiveSessionHints } = await import('./liveSessionHints'));
+    pollers = [];
+    latestHints = {};
+    latestTitles = {};
+  });
+
+  afterEach(() => {
+    for (const poller of pollers) poller.destroy();
+    owner.stop();
+    vi.doUnmock('../../api/commands');
+    vi.doUnmock('../../stores/sessionStream.svelte');
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function create(roots: string[] = ['/repo']): LiveSessionHintPoller {
+    const poller = createLiveSessionHints(
+      (hints) => {
+        latestHints = hints;
+      },
+      () => roots,
+      (titles) => {
+        latestTitles = titles;
+      }
+    );
+    pollers.push(poller);
+    return poller;
+  }
+
+  /** Let a declared interest go out and be accepted. */
+  const settle = () => vi.advanceTimersByTimeAsync(10);
+
+  /** Start the app's stream and have the backend accept its first interest. */
+  async function establish(): Promise<void> {
+    owner.start();
+    handlers.onOpen();
+    await settle();
+    expect(owner.availability).toBe('established');
+  }
+
+  /** Deliver a frame in the latest generation with its next sequence number. */
+  async function frame(
+    kind: 'snapshot' | 'delta',
+    sessionId: string,
+    given: SessionSummary
+  ): Promise<void> {
+    const { generation } = interests[interests.length - 1];
+    if (seq.generation !== generation) seq = { generation, next: 1 };
+    handlers.onFrame({ generation, seq: seq.next++, sessionId, kind, summary: given });
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  function levels(): Record<string, string> {
+    const last = interests[interests.length - 1];
+    return Object.fromEntries(last.sessions.map((s) => [s.sessionId, s.level]));
+  }
+
+  function fetches(): number {
+    return (
+      getSession.mock.calls.length +
+      getSessionMessages.mock.calls.length +
+      getSessionMessagesSince.mock.calls.length
+    );
+  }
+
+  it('takes hints and titles from the stream and fetches nothing', async () => {
+    await establish();
+    create().syncRunningSessionIds(['s1']);
+    await settle();
+    expect(levels()).toEqual({ s1: 'summary' });
+
+    await frame('snapshot', 's1', summary([OPENING, reading(2, '/repo/src/a.ts')]));
+    expect(latestHints).toEqual({ s1: 'Reading src/a.ts…' });
+    expect(latestTitles).toEqual({});
+
+    await frame('delta', 's1', summary([says(3, 'Looking at the cache')], { acpTitle: 'Caching' }));
+    expect(latestHints).toEqual({ s1: 'Looking at the cache' });
+    expect(latestTitles).toEqual({ s1: 'Caching' });
+
+    // Well past several poll intervals.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fetches()).toBe(0);
+  });
+
+  it('shows a reply as soon as its row arrives', async () => {
+    await establish();
+    create().syncRunningSessionIds(['s1']);
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Done')]));
+    expect(latestHints).toEqual({ s1: 'Done' });
+
+    await frame('delta', 's1', summary([{ id: 3, role: 'user', content: 'Also cover eviction' }]));
+
+    expect(latestHints).toEqual({ s1: 'Also cover eviction' });
+  });
+
+  it('asks for the title alone for a title-only session and shows no hint for it', async () => {
+    await establish();
+    create().syncRunningSessionIds(['s1'], ['child', 's1']);
+    await settle();
+    // An id in both lists is tracked in full.
+    expect(levels()).toEqual({ s1: 'summary', child: 'title' });
+
+    await frame('snapshot', 'child', {
+      status: 'running',
+      acpTitle: '  Child <action>x</action>  title ',
+      openingPromptId: null,
+      rows: [],
+    });
+
+    expect(latestTitles).toEqual({ child: 'Child title' });
+    expect(latestHints).toEqual({});
+  });
+
+  it('clears the hint and title of a session that stops running', async () => {
+    await establish();
+    create().syncRunningSessionIds(['s1']);
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Working')], { acpTitle: 'Title' }));
+    expect(latestHints).toEqual({ s1: 'Working' });
+
+    await frame('delta', 's1', summary([], { status: 'completed', acpTitle: 'Title' }));
+
+    expect(latestHints).toEqual({});
+    expect(latestTitles).toEqual({});
+  });
+
+  it('clears the hint and title of a session the view no longer lists', async () => {
+    await establish();
+    const poller = create();
+    poller.syncRunningSessionIds(['s1', 's2']);
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'One')], { acpTitle: 'First' }));
+    await frame('snapshot', 's2', summary([OPENING, says(2, 'Two')], { acpTitle: 'Second' }));
+
+    poller.syncRunningSessionIds(['s2']);
+
+    expect(latestHints).toEqual({ s2: 'Two' });
+    expect(latestTitles).toEqual({ s2: 'Second' });
+    // Later frames for it are not shown either, while the owner still holds it.
+    await frame('delta', 's1', summary([says(3, 'More')]));
+    expect(latestHints).toEqual({ s2: 'Two' });
+  });
+
+  it('formats tool paths against the roots the view gives', async () => {
+    await establish();
+    create(['/repo/apps/staged']).syncRunningSessionIds(['s1']);
+    await settle();
+
+    await frame('snapshot', 's1', summary([OPENING, reading(2, '/repo/apps/staged/src/a.ts')]));
+
+    expect(latestHints).toEqual({ s1: 'Reading src/a.ts…' });
+  });
+
+  it('has the hint at once for a view that comes back to a session', async () => {
+    await establish();
+    const first = create();
+    first.syncRunningSessionIds(['s1']);
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Working')], { acpTitle: 'Title' }));
+    first.destroy();
+    expect(latestHints).toEqual({});
+
+    // The card scrolled out and back: a new view, the same session.
+    create().syncRunningSessionIds(['s1']);
+
+    expect(latestHints).toEqual({ s1: 'Working' });
+    expect(latestTitles).toEqual({ s1: 'Title' });
+    expect(fetches()).toBe(0);
+  });
+
+  it('keeps what it shows while paused and catches up on unpause', async () => {
+    await establish();
+    const poller = create();
+    poller.syncRunningSessionIds(['s1']);
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Before')]));
+
+    poller.setPaused(true);
+    await settle();
+    await frame('delta', 's1', summary([says(3, 'While covered')]));
+    expect(latestHints).toEqual({ s1: 'Before' });
+
+    poller.setPaused(false);
+
+    expect(latestHints).toEqual({ s1: 'While covered' });
+    expect(fetches()).toBe(0);
+  });
+
+  it('lets go of its sessions while paused, which the owner outlasts for a while', async () => {
+    await establish();
+    const poller = create();
+    poller.syncRunningSessionIds(['s1']);
+    await settle();
+    expect(levels()).toEqual({ s1: 'summary' });
+
+    poller.setPaused(true);
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(levels()).toEqual({});
+    expect(fetches()).toBe(0);
+  });
+
+  it('neither polls nor blanks while the stream is being established', async () => {
+    owner.start();
+    create().syncRunningSessionIds(['s1']);
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(owner.availability).toBe('connecting');
+    expect(fetches()).toBe(0);
+    expect(latestHints).toEqual({});
+  });
+
+  it('polls when the stream cannot be established, and stops when it can', async () => {
+    owner.start();
+    create().syncRunningSessionIds(['s1']);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(owner.availability).toBe('unavailable');
+    expect(getSession).toHaveBeenCalledWith('s1');
+    expect(getSessionMessages).toHaveBeenCalledWith('s1');
+    expect(latestHints).toEqual({ s1: 'Polled text' });
+    expect(latestTitles).toEqual({ s1: 'Polled title' });
+
+    handlers.onOpen();
+    await settle();
+    expect(owner.availability).toBe('established');
+    expect(levels()).toEqual({ s1: 'summary' });
+    const polled = fetches();
+
+    // What the poller found stays until the snapshot replaces it.
+    expect(latestHints).toEqual({ s1: 'Polled text' });
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Streamed text')]));
+    expect(latestHints).toEqual({ s1: 'Streamed text' });
+    expect(latestTitles).toEqual({});
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fetches()).toBe(polled);
+  });
+
+  it('drops a poll that was in flight when the stream took over', async () => {
+    owner.start();
+    create().syncRunningSessionIds(['s1']);
+    let answer: (value: unknown) => void = () => {};
+    getSession.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(getSession).toHaveBeenCalled();
+
+    handlers.onOpen();
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Streamed text')]));
+    answer(session({ status: 'completed' }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(latestHints).toEqual({ s1: 'Streamed text' });
+    expect(getSessionMessages).not.toHaveBeenCalled();
+  });
+
+  it('holds what it shows when the stream is lost, then polls if it stays lost', async () => {
+    await establish();
+    create().syncRunningSessionIds(['s1']);
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Streamed text')]));
+
+    handlers.onClose();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(owner.availability).toBe('connecting');
+    expect(latestHints).toEqual({ s1: 'Streamed text' });
+    expect(fetches()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(owner.availability).toBe('unavailable');
+    expect(getSession).toHaveBeenCalledWith('s1');
+    expect(latestHints).toEqual({ s1: 'Polled text' });
+  });
+
+  it('polls as it always has when the stream is switched off', async () => {
+    // Never started: what the kill switch leaves.
+    create().syncRunningSessionIds(['s1'], ['child']);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getSession).toHaveBeenCalledWith('s1');
+    expect(getSession).toHaveBeenCalledWith('child');
+    expect(latestHints).toEqual({ s1: 'Polled text' });
+    expect(interests).toEqual([]);
+  });
+
+  it('releases its sessions and clears what it showed when destroyed', async () => {
+    await establish();
+    const poller = create();
+    poller.syncRunningSessionIds(['s1']);
+    await settle();
+    await frame('snapshot', 's1', summary([OPENING, says(2, 'Working')], { acpTitle: 'Title' }));
+
+    poller.destroy();
+    expect(latestHints).toEqual({});
+    expect(latestTitles).toEqual({});
+
+    await frame('delta', 's1', summary([says(3, 'More')]));
+    expect(latestHints).toEqual({});
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(levels()).toEqual({});
   });
 });

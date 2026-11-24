@@ -1,4 +1,4 @@
-import type { MessageRole, PipelineExecution } from '../../types';
+import type { MessageRole, PipelineExecution, SessionSummaryRow } from '../../types';
 import { parseQuotedMessage } from '../sessions/composerDraft';
 import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
 import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
@@ -6,10 +6,18 @@ import { isStagedResumePrompt } from './stagedResumePrompts';
 
 // The one-line subtitle of a running session, derived from data handed in.
 // Nothing here fetches, polls or keeps state, so whatever holds a session's
-// rows can call it: the poller in `liveSessionHints.ts` today, which holds
-// whole `SessionMessage`s, and the session stream's summary rows later.
+// rows can call it: the poller in `liveSessionHints.ts`, which holds whole
+// `SessionMessage`s, and the session stream's owner
+// (`stores/sessionStream.svelte.ts`), which holds summary rows.
 
 const MAX_HINT_LENGTH = 72;
+
+/**
+ * How many of a session's newest visible rows are kept to derive its hint
+ * from. The poller trims its transcript to this, and the session stream's
+ * owner sends it as the summary window and trims to it.
+ */
+export const HINT_ROW_WINDOW = 40;
 
 /**
  * One visible transcript row, as far as the hint reads it. A whole
@@ -29,6 +37,23 @@ export type HintRow = {
   /** Attachment ids of a `user` row. Absent when there are none. */
   imageIds?: string[];
 };
+
+type Assert<Holds extends true> = Holds;
+
+/**
+ * Holds the stream's wire row to `HintRow`. If `SessionSummaryRow`
+ * (`types.ts`) stops being assignable to `HintRow`, whichever of the two
+ * changed, this alias fails the type check: a field `deriveHint` reads that a
+ * summary row does not carry, or one it carries in another shape.
+ */
+export type SummaryRowIsHintRow = Assert<SessionSummaryRow extends HintRow ? true : false>;
+
+/** A session's ACP title as a row shows it, or nothing when it has none. */
+export function normalizeSessionTitle(title: string | null | undefined): string | undefined {
+  if (!title) return undefined;
+  const cleaned = stripXmlTags(title).replace(/\s+/g, ' ').trim();
+  return cleaned || undefined;
+}
 
 function normalizeHintText(text: string): string | undefined {
   const cleaned = stripXmlTags(text)

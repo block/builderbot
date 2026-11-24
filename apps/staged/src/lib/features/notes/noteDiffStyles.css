@@ -16,14 +16,27 @@
  *   changed words      --diff-modified-inline-bg, on both sides, as the
  *                      viewer's `.char-changed`
  *
+ * A change is painted as one rectangle behind its text, by
+ * NoteDiffBlocks.svelte, which is not in this markup: from the top of the
+ * change's first block to the bottom of its last, square, with one left
+ * edge and one right edge. A block of the markup therefore paints nothing
+ * of its own for the diff: no tint, no outline, no rounding.
+ *
+ * What is here is the exception to that. A block with an opaque background
+ * of its own hides what is behind it: a code block, a table's header cells,
+ * a diagram's drawing. Those take the tint themselves, so the rectangle
+ * reads through them. It is an inset shadow, not a background: it lies over
+ * the background the block has instead of competing with the rule that sets
+ * it. Nothing else is tinted here, or it would be tinted twice.
+ *
  * `data-note-diff` is the block's own change, not its hunk's: in a change
  * that holds both versions' blocks, a block with a counterpart is amber and
  * one without is red in the previous version or green in the note, as the
- * viewer's lines are.
+ * viewer's lines are. The rectangle is filled the same way, block by block.
  *
- * Every changed block is tinted inside a `.note-diff-all` container (the two
- * panes of the side-by-side view), in exactly the viewer's tints. The blocks
- * of the change being pointed at (`data-note-diff-active`) take the
+ * Every change is tinted inside a `.note-diff-all` container (the two panes
+ * of the side-by-side view), in exactly the viewer's tints. The blocks of
+ * the change being pointed at (`data-note-diff-active`) take the
  * `-emphasis` token of the same colour, wherever they are. The viewer has
  * one strength only; the stronger ones are defined beside its tokens, in
  * theme.ts and app.css, not mixed here. No colour is, and
@@ -35,39 +48,26 @@
  * colours of its own shows other greens and reds in its panes than the
  * chrome's, here and in the diff's own file list alike.
  *
- * The tint is an inset shadow, not a background: it lies over whatever
- * background the block has (a code block's, a table header's) instead of
- * competing with the rule that sets it. The outline carries it a little
- * past the text.
- *
- * A figure is the exception. What it holds covers its inside, so the
- * shadow does not show: a diagram's drawing takes the tint itself, and an
- * image or a video, whose colours are the thing to compare, is left as it
- * is. Both get an edge in the solid colour of the change, which is all that
- * marks an image: a hairline at rest, and 2px while pointed at. The solid
- * colours are the ones the tints are made of: `--status-added` and
- * `--status-deleted`, which the diff's file list also marks a file's added
- * and removed lines with, and `--diff-modified-accent`, the viewer's amber.
- * Not `--status-modified`: on the light theme that is a dark gold picked to
- * be read as text, and beside the amber tint it looks brown.
+ * A diagram or a media figure is a card with a border and rounded corners
+ * of its own, which it keeps: they are the card's, not the change's. The
+ * change is the square rectangle the card stands on, which shows beside it
+ * and in its corners. A diagram's drawing takes the tint; an image or a
+ * video, whose colours are the thing to compare, is left as it is.
  */
 
 [data-note-diff='added'] {
   --note-diff-rest: var(--diff-added-bg);
   --note-diff-strong: var(--diff-added-bg-emphasis);
-  --note-diff-edge: var(--status-added);
 }
 
 [data-note-diff='removed'] {
   --note-diff-rest: var(--diff-removed-bg);
   --note-diff-strong: var(--diff-removed-bg-emphasis);
-  --note-diff-edge: var(--status-deleted);
 }
 
 [data-note-diff='modified'] {
   --note-diff-rest: var(--diff-modified-bg);
   --note-diff-strong: var(--diff-modified-bg-emphasis);
-  --note-diff-edge: var(--diff-modified-accent);
 }
 
 .note-diff-all [data-note-diff] {
@@ -79,48 +79,14 @@
   --note-diff-tint: var(--note-diff-strong);
 }
 
-.note-diff-all [data-note-diff],
-[data-note-diff][data-note-diff-active] {
-  outline: 3px solid var(--note-diff-tint);
-  box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
-}
-
-/* Rounded a little, unless the block has corners of its own (a code block,
-   a figure): `:where` keeps this under any rule that rounds it. */
-:where(.note-diff-all [data-note-diff], [data-note-diff][data-note-diff-active]) {
-  border-radius: 2px;
-}
-
-/* List items are 3px apart, so outlines that wide would lie over each other
-   between two changed items and show as a darker seam. Half that meets. */
-.note-diff-all li[data-note-diff],
-li[data-note-diff][data-note-diff-active] {
-  outline-width: 1.5px;
-}
-
-.note-diff-all figure[data-note-diff] {
-  outline: 1px solid var(--note-diff-edge);
-}
-
-figure[data-note-diff][data-note-diff-active],
-.note-diff-all figure[data-note-diff][data-note-diff-active] {
-  outline: 2px solid var(--note-diff-edge);
-}
-
+/* The blocks that cover the rectangle behind them. A row's header cells
+   do; its other cells have no background, and show it. */
+.note-diff-all pre[data-note-diff],
+pre[data-note-diff][data-note-diff-active],
+.note-diff-all tr[data-note-diff] > th,
+tr[data-note-diff][data-note-diff-active] > th,
 .note-diff-all figure[data-note-diff] > .markdown-diagram-preview,
 figure[data-note-diff][data-note-diff-active] > .markdown-diagram-preview {
-  box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
-}
-
-/* A table row paints neither; its cells take the tint. */
-.note-diff-all tr[data-note-diff],
-tr[data-note-diff][data-note-diff-active] {
-  outline: none;
-  box-shadow: none;
-}
-
-.note-diff-all tr[data-note-diff] > *,
-tr[data-note-diff][data-note-diff-active] > * {
   box-shadow: inset 0 0 0 100vmax var(--note-diff-tint);
 }
 

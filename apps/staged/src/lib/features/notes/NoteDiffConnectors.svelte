@@ -4,25 +4,34 @@
   the two panes.
 
   They are the code diff viewer's spine connectors: the same outline, from
-  the viewer's own geometry (noteDiffConnectors.ts), and at rest the same
-  paint, a neutral fill with a hairline along the top and the bottom. The
-  band of the change being pointed at is painted in its kind's colour, as
-  that change's blocks, marker and gap line are.
+  the viewer's own geometry (noteDiffConnectors.ts), with a line along the
+  top and the bottom. A band is the middle of one shape. Each pane paints a
+  rectangle behind the change's text that runs to the gutter
+  (NoteDiffBlocks.svelte), and the band starts at one rectangle's edge and
+  ends at the other's, at their tops and bottoms, in their colour: the tint
+  of a line of that kind at rest, with the viewer's hairline along it, and
+  for the change being pointed at the stronger tint, lined in the solid
+  colour of its marker. Where the two rectangles are not one colour (text
+  replaced outright is red in the previous version and green in the note)
+  the band shades from one to the other. On a side with no text of the
+  change the band tapers to the end of the line drawn there.
 
   Mounted over the gutter, in a positioned element as tall as the panes'
-  scroll areas and ending at the previous version's right edge. A band runs
-  from that pane's markers to the tint of the note's blocks, so the gutter
-  lies over the padding either side of the seam (the `CONNECTOR_*_REACH`
-  constants). The bands are placed from the blocks as measured
-  (`noteDiff.boxes`, the measurements the markers stand on) and from how
+  scroll areas and ending at the previous version's right edge. The gutter
+  lies over half the padding either side of the seam (the
+  `CONNECTOR_*_REACH` constants), which is where the rectangles stop. The
+  bands are placed from the blocks as measured (`noteDiff.boxes`, the
+  measurements the rectangles and the markers are placed from) and from how
   far each pane is scrolled (`scrollTops`), and are cut off at the gutter's
   edges: a change scrolled out of one pane leads off the top or the bottom.
 
   A band is part of its change. Hovering it lights the change in both
-  panes, and pressing it selects the change (`onSelect`). It is there for
-  the pointer only: the markers name the changes and take the keyboard, so
-  the drawing is hidden from a screen reader and has no Tab stop. Only the
-  bands take the pointer; a press between them is the text's.
+  panes, and pressing it selects the change (`onSelect`). It is the one
+  thing in the previous version's reach that does: that pane has no
+  markers. It is there for the pointer only: the note's markers name the
+  changes and take the keyboard, so the drawing is hidden from a screen
+  reader and has no Tab stop. Only the bands take the pointer; a press
+  between them is the text's.
 -->
 <script lang="ts">
   import {
@@ -48,6 +57,9 @@
   }
 
   let { noteDiff, scrollTops, height, onSelect, onWheel }: Props = $props();
+
+  /** Names this drawing's gradients, which the document looks up by id. */
+  const uid = $props.id();
 
   let svgEl = $state<SVGSVGElement>();
   const pointer = new RestingPointer();
@@ -121,16 +133,33 @@
     onwheel={wheel}
   >
     {#each connectors as connector (connector.hunkId)}
+      {@const blend = connector.before !== connector.after}
       <g
         class="note-diff-connector"
         class:is-pointed={connector.hunkId === noteDiff.pointedHunkId}
         data-kind={connector.kind}
+        data-before={connector.before}
+        data-after={connector.after}
         data-hunk-id={connector.hunkId}
       >
+        {#if blend}
+          <linearGradient
+            id="{uid}-{connector.hunkId}"
+            gradientUnits="userSpaceOnUse"
+            x1="0"
+            x2={CONNECTOR_WIDTH}
+            y1="0"
+            y2="0"
+          >
+            <stop class="connector-stop-before" offset="0" />
+            <stop class="connector-stop-after" offset="1" />
+          </linearGradient>
+        {/if}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <path
           class="connector-fill"
+          style:fill={blend ? `url(#${uid}-${connector.hunkId})` : undefined}
           d={connector.fill}
           onpointerenter={(event) => pointerOver(event, connector.hunkId)}
           onpointermove={(event) => pointerOver(event, connector.hunkId)}
@@ -157,13 +186,25 @@
     pointer-events: none;
   }
 
-  /* At rest, the code diff viewer's connector (`readThemeColors` in
-     connectorRendererCanvas.ts): the neutral fill of a changed range, and
-     the hairline that bounds one. */
+  /* A band is painted as the rectangles it joins are (NoteDiffBlocks): at
+     each end the tint of the change's blocks in that pane, which is one
+     colour across it unless the two ends differ, when it shades from the
+     one to the other. The lines along its top and bottom run on from the
+     rectangles' own: at rest the hairline the code diff viewer bounds a
+     changed range and its connector with (`readThemeColors` in
+     connectorRendererCanvas.ts). */
   .connector-fill {
-    fill: var(--connector-fill, var(--diff-changed-bg));
+    fill: var(--connector-before);
     cursor: pointer;
     pointer-events: auto;
+  }
+
+  .connector-stop-before {
+    stop-color: var(--connector-before);
+  }
+
+  .connector-stop-after {
+    stop-color: var(--connector-after);
   }
 
   .connector-stroke {
@@ -173,22 +214,67 @@
     pointer-events: none;
   }
 
+  .note-diff-connector[data-before='added'] {
+    --connector-before: var(--diff-added-bg);
+  }
+
+  .note-diff-connector[data-before='removed'] {
+    --connector-before: var(--diff-removed-bg);
+  }
+
+  .note-diff-connector[data-before='modified'] {
+    --connector-before: var(--diff-modified-bg);
+  }
+
+  .note-diff-connector[data-after='added'] {
+    --connector-after: var(--diff-added-bg);
+  }
+
+  .note-diff-connector[data-after='removed'] {
+    --connector-after: var(--diff-removed-bg);
+  }
+
+  .note-diff-connector[data-after='modified'] {
+    --connector-after: var(--diff-modified-bg);
+  }
+
   /* The band of the change being pointed at, in the code diff's colours as
-     its blocks and its marker have them (see noteDiffStyles.css): the fill
-     is the tint its blocks are lit with, and the lines the solid colour of
-     its marker. */
+     its blocks and its marker have them (see noteDiffStyles.css): filled
+     with the tints its rectangles are lit with, and lined in the solid
+     colour of its marker, as they are. */
+  .note-diff-connector.is-pointed[data-before='added'] {
+    --connector-before: var(--diff-added-bg-emphasis);
+  }
+
+  .note-diff-connector.is-pointed[data-before='removed'] {
+    --connector-before: var(--diff-removed-bg-emphasis);
+  }
+
+  .note-diff-connector.is-pointed[data-before='modified'] {
+    --connector-before: var(--diff-modified-bg-emphasis);
+  }
+
+  .note-diff-connector.is-pointed[data-after='added'] {
+    --connector-after: var(--diff-added-bg-emphasis);
+  }
+
+  .note-diff-connector.is-pointed[data-after='removed'] {
+    --connector-after: var(--diff-removed-bg-emphasis);
+  }
+
+  .note-diff-connector.is-pointed[data-after='modified'] {
+    --connector-after: var(--diff-modified-bg-emphasis);
+  }
+
   .note-diff-connector.is-pointed[data-kind='added'] {
-    --connector-fill: var(--diff-added-bg-emphasis);
     --connector-stroke: var(--status-added);
   }
 
   .note-diff-connector.is-pointed[data-kind='removed'] {
-    --connector-fill: var(--diff-removed-bg-emphasis);
     --connector-stroke: var(--status-deleted);
   }
 
   .note-diff-connector.is-pointed[data-kind='modified'] {
-    --connector-fill: var(--diff-modified-bg-emphasis);
     --connector-stroke: var(--diff-modified-accent);
   }
 </style>

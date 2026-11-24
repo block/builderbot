@@ -7,24 +7,26 @@
  * be woven through theirs. So a change is shown two ways that leave the
  * nodes alone:
  *
- * - Blocks carry attributes, for a stylesheet to tint: `data-note-diff` (how
- *   the block itself changed, which is its colour), `data-note-diff-hunk`
- *   (which hunk it is in) and `data-note-diff-active` (it is the hunk being
- *   pointed at). The markup is rebuilt on every render, so they are put
- *   back then.
+ * - Blocks carry attributes: `data-note-diff` (how the block itself
+ *   changed, which is its colour), `data-note-diff-hunk` (which hunk it is
+ *   in) and `data-note-diff-active` (it is the hunk being pointed at). The
+ *   markup is rebuilt on every render, so they are put back then. A change
+ *   is painted behind its blocks, as one rectangle that is not in the markup
+ *   (NoteDiffBlocks.svelte); the attributes are for the stylesheet to tint
+ *   the few blocks whose own background would hide it (noteDiffStyles.css).
  * - Words are painted through the CSS Custom Highlight API: ranges
  *   registered under a name and styled with `::highlight()`. The ranges are
  *   built when a hunk is pointed at, from the text as it then stands: a
  *   range kept from before a quote was wrapped would end in the wrong node.
- *   A runtime without the API shows the block tint alone.
+ *   A runtime without the API shows the change's rectangle alone.
  *
  * `pointAtNoteDiffHunk` does both for the hunk being pointed at, and is what
  * the viewer's two panes call.
  */
 
 import {
+  changeUnitIndex,
   hunkTextRanges,
-  type NoteDiffChange,
   type NoteDiffHunk,
   type NoteDiffSide,
   type NoteDiffTextRange,
@@ -79,19 +81,13 @@ export function applyNoteDiffMarks(
   clearNoteDiffMarks(root);
   for (const hunk of hunks) {
     for (const op of hunk.ops) {
-      const index = unitIndexOn(op, side);
+      const index = changeUnitIndex(op, side);
       const element = index === null ? undefined : units[index]?.element;
       if (!element) continue;
       element.setAttribute(NOTE_DIFF_ATTRIBUTE, op.type);
       element.setAttribute(NOTE_DIFF_HUNK_ATTRIBUTE, hunk.id);
     }
   }
-}
-
-/** The block a change has on one side, or `null` where only the other version has one. */
-function unitIndexOn(op: NoteDiffChange, side: NoteDiffSide): number | null {
-  if (side === 'previous') return op.type === 'added' ? null : op.previousIndex;
-  return op.type === 'removed' ? null : op.currentIndex;
 }
 
 /** Make `hunkId`'s blocks under `root` the active ones, or none with `null`. */

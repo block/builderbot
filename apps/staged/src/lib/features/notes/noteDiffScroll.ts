@@ -15,12 +15,20 @@
  * stretch only one version has, the other pane holds still, so a change is
  * scrolled to from the pane that has its first block (`hunkLead`).
  *
- * The markers and gap lines drawn beside a version are placed in the same
- * coordinate, inside the element that scrolls it, so they move with the
- * text (`hunkMarkerBox`, `hunkGapOffset`).
+ * What is drawn for a change in a version is placed in the same coordinate,
+ * inside the element that scrolls it, so it moves with the text: the block
+ * painted behind the change's text (`hunkBlock`), the line where the other
+ * version has text this one has not (`hunkGapOffset`), and the marker beside
+ * either (`hunkMarkerBox`).
  */
 
-import type { NoteDiffHunk, NoteDiffOp, NoteDiffSide } from './noteDiff';
+import {
+  changeUnitIndex,
+  type NoteDiffBlockKind,
+  type NoteDiffHunk,
+  type NoteDiffOp,
+  type NoteDiffSide,
+} from './noteDiff';
 
 /** A unit's place in its pane's content. */
 export interface NoteDiffUnitBox {
@@ -71,6 +79,109 @@ export function hunkExtent(
   return last ? { top: last.top + last.height, height: 0 } : null;
 }
 
+/** A stretch of a change's block that is one kind of change, and so one colour. */
+export interface NoteDiffBlockPart {
+  kind: NoteDiffBlockKind;
+  height: number;
+}
+
+/** The one rectangle painted behind a change's text on a side. */
+export interface NoteDiffBlock extends NoteDiffUnitBox {
+  /** Its stretches from the top down, which fill it: their heights add up to its own. */
+  parts: NoteDiffBlockPart[];
+}
+
+/**
+ * How far a change's rectangle reaches past its first and its last block,
+ * into the margin there: a heading's box ends at its letters, and a
+ * rectangle cut off at them reads as cramped.
+ */
+export const BLOCK_BLEED = 4;
+
+/**
+ * How far a rectangle reaches into the room between its end block and the
+ * block next to it: `BLOCK_BLEED`, and never past half-way, so it stays off
+ * the neighbour. Blocks with nothing between them (the rows of a table)
+ * leave no room, and the rectangle ends at the block's own edge. At either
+ * end of the note there is no neighbour to stay off.
+ */
+function blockBleed(edge: number, neighbourEdge: number | undefined): number {
+  if (neighbourEdge === undefined) return BLOCK_BLEED;
+  return Math.min(BLOCK_BLEED, Math.max(0, Math.abs(edge - neighbourEdge) / 2));
+}
+
+/**
+ * The box of the rectangle painted behind a hunk's text on one side: from
+ * the top of its first block there to the bottom of its last
+ * (`hunkExtent`), and a little into the margin above and below
+ * (`BLOCK_BLEED`). `null` for a hunk with no block on that side, and when
+ * the side is not measured.
+ *
+ * This is the one box everything drawn for the change on that side shares:
+ * the rectangle (`hunkBlock`), the marker at its end (`hunkMarkerBox`) and
+ * the end of the band that joins it to the other version
+ * (`hunkConnectorSpan` in noteDiffConnectors.ts).
+ */
+export function hunkBlockExtent(
+  hunk: NoteDiffHunk,
+  side: NoteDiffSide,
+  boxes: readonly NoteDiffUnitBox[]
+): NoteDiffUnitBox | null {
+  const indices = side === 'previous' ? hunk.previousIndices : hunk.currentIndices;
+  if (indices.length === 0) return null;
+  const extent = hunkExtent(hunk, side, boxes);
+  if (!extent) return null;
+  const before = boxes[indices[0] - 1];
+  const after = boxes[indices[indices.length - 1] + 1];
+  const bottom = extent.top + extent.height;
+  const top = extent.top - blockBleed(extent.top, before && before.top + before.height);
+  return { top, height: bottom + blockBleed(bottom, after?.top) - top };
+}
+
+/**
+ * The rectangle to paint behind a hunk's text on one side
+ * (`hunkBlockExtent`): whole, so the margins between its blocks are painted
+ * with them. `null` for a hunk with no block on that side, which has a line
+ * instead (`hunkGapOffset`), and when the side is not measured.
+ *
+ * Each block keeps the colour of its own change (see `NOTE_DIFF_ATTRIBUTE`),
+ * so the rectangle is cut into parts, one per run of blocks of a kind. Two
+ * runs meet half-way across the margin between them.
+ */
+export function hunkBlock(
+  hunk: NoteDiffHunk,
+  side: NoteDiffSide,
+  boxes: readonly NoteDiffUnitBox[]
+): NoteDiffBlock | null {
+  const extent = hunkBlockExtent(hunk, side, boxes);
+  if (!extent) return null;
+
+  const bottom = extent.top + extent.height;
+  const parts: NoteDiffBlockPart[] = [];
+  /** Where the part being filled started, and the bottom of the last block in it. */
+  let partTop = extent.top;
+  let lastBottom = extent.top;
+  for (const op of hunk.ops) {
+    const index = changeUnitIndex(op, side);
+    const box = index === null ? undefined : boxes[index];
+    if (!box) continue;
+    const open = parts[parts.length - 1];
+    if (!open) {
+      parts.push({ kind: op.type, height: 0 });
+    } else if (open.kind !== op.type) {
+      const seam = Math.min(Math.max((lastBottom + box.top) / 2, partTop), bottom);
+      open.height = seam - partTop;
+      partTop = seam;
+      parts.push({ kind: op.type, height: 0 });
+    }
+    lastBottom = box.top + box.height;
+  }
+  const last = parts[parts.length - 1];
+  if (!last) return null;
+  last.height = bottom - partTop;
+  return { ...extent, parts };
+}
+
 /** How far from a version's first or last block a gap at that end is drawn. */
 const GAP_EDGE_OFFSET = 4;
 
@@ -101,11 +212,11 @@ export function hunkGapOffset(
 }
 
 /**
- * Where a hunk's marker stands beside one side's text: level with the
- * hunk's blocks there, from the top of the first to the bottom of the last.
- * A hunk with no block on that side gets a short marker centred on its gap
- * line (`hunkGapOffset`). `null` when there is nothing measured to place it
- * by.
+ * Where a hunk's marker stands beside one side's text: at the end of the
+ * rectangle painted behind the hunk's blocks there, and as tall as it
+ * (`hunkBlockExtent`). A hunk with no block on that side gets a short
+ * marker centred on its gap line (`hunkGapOffset`). `null` when there is
+ * nothing measured to place it by.
  */
 export function hunkMarkerBox(
   hunk: NoteDiffHunk,
@@ -117,7 +228,7 @@ export function hunkMarkerBox(
     const gap = hunkGapOffset(hunk, side, boxes);
     return gap === null ? null : { top: gap - GAP_MARKER_HEIGHT / 2, height: GAP_MARKER_HEIGHT };
   }
-  const extent = hunkExtent(hunk, side, boxes);
+  const extent = hunkBlockExtent(hunk, side, boxes);
   if (!extent || extent.height >= MIN_MARKER_HEIGHT) return extent;
   // Too short to see or press: kept centred on the block.
   return {

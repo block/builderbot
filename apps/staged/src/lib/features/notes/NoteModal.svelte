@@ -35,11 +35,14 @@
 
   A note that has been revised shows what the revision changed
   (`NoteDiffState`): markers beside the note (`NoteChangeBar`), each level
-  with its change and scrolling with it, and lighting it on hover. Pressing
-  one opens the note's previous version on the left (`NotePreviousPane`),
-  the two scrolling together, where the window has room for two panes;
-  elsewhere it scrolls to the change and keeps it lit. The previous version takes the place the chat would, so
-  opening either closes the other. Escape closes the previous version before
+  with its change and scrolling with it, and lighting it on hover, as one
+  rectangle painted behind the change's text and ending at its marker.
+  Pressing one opens the note's previous version on the left
+  (`NotePreviousPane`), the two scrolling together, where the window has
+  room for two panes; elsewhere it scrolls to the change and keeps it lit.
+  There every change has its rectangle in both panes, running to the gutter
+  between them, where a band joins the two. The previous version takes the
+  place the chat would, so opening either closes the other. Escape closes the previous version before
   it closes the note, and until it has, Escape in the find field closes the
   search and nothing else.
 -->
@@ -122,9 +125,9 @@
   import NoteTransferMenu from './NoteTransferMenu.svelte';
   import NoteReplyQuotes from './NoteReplyQuotes.svelte';
   import NoteChangeBar from './NoteChangeBar.svelte';
-  import NoteDiffGaps from './NoteDiffGaps.svelte';
   import NoteDiffPaneHeader from './NoteDiffPaneHeader.svelte';
   import NotePreviousPane from './NotePreviousPane.svelte';
+  import { CONNECTOR_CURRENT_REACH } from './noteDiffConnectors';
   import { NoteDiffState } from './noteDiffState.svelte';
   import './noteDiffStyles.css';
   import { highlightNoteMatches } from './noteQuoteHighlights';
@@ -1141,6 +1144,7 @@
             class="modal-content"
             class:ends-pane={!showBottomBar}
             class:note-diff-all={splitDiffOpen}
+            style:--note-diff-blocks-reach="{CONNECTOR_CURRENT_REACH}px"
             bind:this={contentEl}
             onclick={handleContentClick}
             {@attach openMediaOnPinch}
@@ -1176,13 +1180,13 @@
               />
             {/if}
             {#if hasNoteContent}
-              <NoteDiffGaps {noteDiff} side="current" showAll={splitDiffOpen} />
               <NoteChangeBar
                 {noteDiff}
                 contentEl={markdownEl}
                 scrollEl={contentEl}
                 renderKey={renderedNoteHtml}
                 previousHtml={renderedPreviousHtml}
+                showAll={splitDiffOpen}
                 onSelect={handleDiffSelect}
               />
             {/if}
@@ -1453,12 +1457,26 @@
      is docked and reaches up over the note's bottom edge the text clears
      that too (`--selection-dock-overlap`, measured above), so a selection
      ending in the last lines can scroll out from behind it. */
-  /* Positioned for the selection's Reply button and the diff's markers and
-     gap lines, which scroll with the text. The markers stand in the right
-     padding, as far in as the text's inset. */
+  /* Positioned for the selection's Reply button and for what the diff
+     draws, which scrolls with the text: its markers, and the rectangle
+     behind each change (NoteDiffBlocks), which is painted under the text
+     and so needs the scroll area to be a stacking context. The markers
+     stand in the right padding, as far in as the text's inset. A rectangle
+     starts half-way across the left padding, which is where the band from
+     the previous version lands when that is open
+     (`--note-diff-blocks-reach`, set above), and ends at its marker's left
+     edge: the markers are 8px from the edge and 10px wide. Both hold still
+     when a wide table makes the note scroll sideways, for which they are
+     told the left padding (`--note-diff-scroll-padding`). */
   .modal-content {
     --note-diff-markers-inset: var(--dialog-safe-right, 0px);
+    --note-diff-scroll-padding: calc(24px + var(--dialog-safe-left, 0px));
+    --note-diff-blocks-left: calc(
+      var(--note-diff-blocks-reach, 12px) + var(--dialog-safe-left, 0px)
+    );
+    --note-diff-blocks-right: calc(18px + var(--dialog-safe-right, 0px));
     position: relative;
+    isolation: isolate;
     flex: 1;
     overflow-y: auto;
     padding: 24px;
@@ -1492,9 +1510,12 @@
      change can reach the line the two panes are kept level on, a third of
      the way down (NotePreviousPane has the same). It is not at the dialog's
      left edge there, so it has no inset to clear on that side: its left
-     padding is the fixed width the diff's connectors cross to reach its
-     blocks (NoteDiffConnectors). */
+     padding is a fixed width, the first half of which the diff's
+     connectors cross to reach the rectangles behind its changes
+     (NoteDiffConnectors). */
   .modal-body.split-diff-open .modal-content {
+    --note-diff-blocks-left: var(--note-diff-blocks-reach, 12px);
+    --note-diff-scroll-padding: 24px;
     padding-bottom: 60vh;
     padding-left: 24px;
   }

@@ -484,3 +484,30 @@ export function hunkTextRanges(hunk: NoteDiffHunk, side: NoteDiffSide): NoteDiff
   }
   return result;
 }
+
+/** How one block changed: the kinds a block can be painted in. */
+export type NoteDiffBlockKind = NoteDiffChange['type'];
+
+/** The block a change has on one side, or `null` where only the other version has one. */
+export function changeUnitIndex(op: NoteDiffChange, side: NoteDiffSide): number | null {
+  if (side === 'previous') return op.type === 'added' ? null : op.previousIndex;
+  return op.type === 'removed' ? null : op.currentIndex;
+}
+
+/**
+ * The one kind a hunk's blocks on a side are, which is the colour that side
+ * of the change is painted in: `modified` where every block there has a
+ * counterpart, `removed` or `added` where none has (text a revision
+ * replaced outright is removed in the previous version and added in the
+ * note). A side whose blocks are of more than one kind, or that has no
+ * block of the hunk, answers with the hunk's own kind.
+ */
+export function hunkSideKind(hunk: NoteDiffHunk, side: NoteDiffSide): NoteDiffBlockKind {
+  let kind: NoteDiffBlockKind | null = null;
+  for (const op of hunk.ops) {
+    if (changeUnitIndex(op, side) === null) continue;
+    if (kind !== null && kind !== op.type) return hunk.kind;
+    kind = op.type;
+  }
+  return kind ?? hunk.kind;
+}

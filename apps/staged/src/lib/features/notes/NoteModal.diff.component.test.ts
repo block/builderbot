@@ -144,7 +144,7 @@ const dialog = () => document.querySelector<HTMLElement>('[data-slot="dialog-con
 const previousPane = () => document.querySelector<HTMLElement>('.previous-pane');
 const chatPane = () => document.querySelector('#note-modal-chat-pane');
 const notePane = () => document.querySelector<HTMLElement>('#note-modal-note-pane')!;
-// The note's own bar and markers; its previous version carries a set too.
+// The note's own bar and markers; its previous version has none.
 const bar = () => document.querySelector('#note-modal-note-pane .note-change-bar');
 const markersIn = (pane: Element) => [
   ...pane.querySelectorAll<HTMLButtonElement>('.note-change-marker'),
@@ -155,6 +155,25 @@ const note = () => notePane().querySelector<HTMLElement>('.markdown-content')!;
 const lit = (el: Element) =>
   [...el.querySelectorAll(`[${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`)].map((block) => block.textContent);
 const connectors = () => [...document.querySelectorAll<SVGGElement>('.note-diff-connector')];
+/** The rectangles and gap lines painted behind the changes of the version in `pane`. */
+const paintedIn = (pane: Element) =>
+  [...pane.querySelectorAll<HTMLElement>('.note-diff-block, .note-diff-gap')].map((el) => [
+    el.classList.contains('note-diff-block') ? 'block' : 'gap',
+    el.dataset.kind,
+    el.classList.contains('is-active'),
+  ]);
+/** Lay both versions out, in panes that show all of their blocks, as a layout would report. */
+async function layOutBoth() {
+  const pane = previousPane()!;
+  layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, 700);
+  layOut(
+    pane.querySelector('.markdown-content')!,
+    pane.querySelector<HTMLElement>('.previous-scroll')!,
+    700
+  );
+  resize();
+  await settle();
+}
 const button = (label: string) =>
   document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
 
@@ -388,22 +407,101 @@ describe('NoteModal previous version', () => {
     expect(marker('modified').getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('carries the markers beside the previous version too, and selects a change from them', async () => {
+  it('has no markers beside the previous version: the note’s are the only ones', async () => {
     await open();
     await press(marker('modified'));
     const pane = previousPane()!;
 
-    expect(markersIn(pane).map((el) => el.dataset.kind)).toEqual(HUNK_KINDS);
-    expect(markersIn(pane).every((el) => el.closest('.previous-scroll') !== null)).toBe(true);
+    expect(markersIn(pane)).toEqual([]);
+    expect(pane.querySelector('.note-change-bar')).toBeNull();
+    // The note keeps one for each change, in the split as in the single pane.
+    expect(markers().map((el) => el.dataset.kind)).toEqual(HUNK_KINDS);
+    expect(bar()!.closest('.modal-content')).not.toBeNull();
+  });
 
-    await press(markersIn(pane)[0]);
+  it('paints every change as one rectangle in each version, or a line where it has no text', async () => {
+    await open();
+    await press(marker('modified'));
+    await layOutBoth();
 
-    // The removed paragraph: lit where it is, a line where it was.
+    // Removed, modified, added: the selected one lit in both versions.
+    expect(paintedIn(previousPane()!)).toEqual([
+      ['block', 'removed', false],
+      ['block', 'modified', true],
+      ['gap', 'added', false],
+    ]);
+    expect(paintedIn(notePane())).toEqual([
+      ['gap', 'removed', false],
+      ['block', 'modified', true],
+      ['block', 'added', false],
+    ]);
+    // Behind the text of each version, in what scrolls it: nothing is put
+    // into the rendered markdown.
+    for (const pane of [previousPane()!, notePane()]) {
+      const layer = pane.querySelector('.note-diff-blocks')!;
+      expect(layer.getAttribute('aria-hidden')).toBe('true');
+      expect(layer.closest('.markdown-content')).toBeNull();
+      expect(pane.querySelector('.markdown-content .note-diff-block')).toBeNull();
+    }
+    expect(notePane().querySelector('.note-diff-blocks')!.parentElement).toBe(
+      notePane().querySelector('.modal-content')
+    );
+  });
+
+  it('reaches every change from the note’s markers and from its band, by pointer and by keyboard', async () => {
+    await open();
+    await press(marker('modified'));
+    await layOutBoth();
+    const pane = previousPane()!;
+    const pointed = () =>
+      connectors()
+        .filter((el) => el.classList.contains('is-pointed'))
+        .map((el) => el.dataset.kind);
+    const band = (kind: string) =>
+      connectors()
+        .find((el) => el.dataset.kind === kind)!
+        .querySelector<SVGPathElement>('.connector-fill')!;
+
+    for (const kind of HUNK_KINDS) {
+      // Keyboard: the note's marker is a button in the Tab order. Focus
+      // points at its change in both versions, Enter (a button's click)
+      // selects it.
+      const button = marker(kind);
+      expect(button.tagName).toBe('BUTTON');
+      expect(button.tabIndex).toBe(0);
+      button.focus();
+      flushSync();
+      expect(pointed()).toEqual([kind]);
+      await press(button);
+      expect(button.getAttribute('aria-pressed')).toBe('true');
+      button.blur();
+      flushSync();
+      expect(pointed()).toEqual([kind]);
+
+      // Pointer, at the note's marker.
+      const other = HUNK_KINDS.find((k) => k !== kind)!;
+      pointerArrives(marker(other));
+      flushSync();
+      expect(pointed()).toEqual([other]);
+      marker(other).dispatchEvent(new MouseEvent('pointerleave'));
+      flushSync();
+
+      // Pointer, at the band: what is left of the previous version's reach.
+      pointerArrives(band(other));
+      flushSync();
+      expect(pointed()).toEqual([other]);
+      band(other).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle();
+      expect(marker(other).getAttribute('aria-pressed')).toBe('true');
+      band(other).dispatchEvent(new MouseEvent('pointerleave'));
+      flushSync();
+      expect(pointed()).toEqual([other]);
+    }
+    // Removed text included: it is lit where it is, from the note's side.
+    await press(marker('removed'));
     expect(lit(pane)).toEqual(['Logs are kept for a week.']);
     expect(lit(note())).toEqual([]);
-    expect(marker('removed').getAttribute('aria-pressed')).toBe('true');
-    expect(markersIn(pane)[0].getAttribute('aria-pressed')).toBe('true');
-    expect(previousPane()).not.toBeNull();
+    expect(paintedIn(notePane())[0]).toEqual(['gap', 'removed', true]);
   });
 
   it('joins each change across the gutter between the two versions, and only there', async () => {
@@ -412,17 +510,9 @@ describe('NoteModal previous version', () => {
     expect(connectors()).toEqual([]);
 
     await press(marker('modified'));
-    // jsdom lays nothing out: give both versions their blocks, in panes
-    // that show all of them, as a layout would report.
+    // jsdom lays nothing out: give both versions their blocks.
+    await layOutBoth();
     const pane = previousPane()!;
-    layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, 700);
-    layOut(
-      pane.querySelector('.markdown-content')!,
-      pane.querySelector<HTMLElement>('.previous-scroll')!,
-      700
-    );
-    resize();
-    await settle();
 
     // One band per change, between the panes: in the previous version's
     // pane but outside its scroll area, since it follows both.
@@ -510,42 +600,11 @@ describe('NoteModal previous version', () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it('leaves nothing lit after Escape with the pointer on a marker of the previous version', async () => {
-    await open();
-    await press(marker('modified'));
-    const gaps = () => [...notePane().querySelectorAll<HTMLElement>('.note-diff-gap')];
-
-    // The removed paragraph's marker, beside the previous version.
-    pointerArrives(markersIn(previousPane()!)[0]);
-    flushSync();
-    expect(lit(previousPane()!)).toEqual(['Logs are kept for a week.']);
-
-    // The pane closes under the pointer, which never leaves the marker.
-    await pressEscape();
-
-    expect(previousPane()).toBeNull();
-    expect(lit(note())).toEqual([]);
-    expect(gaps()).toEqual([]);
-    expect(markers().filter((el) => el.classList.contains('is-pointed'))).toEqual([]);
-    expect(markers().map((el) => el.getAttribute('aria-pressed'))).toEqual([
-      'false',
-      'false',
-      'false',
-    ]);
-  });
-
   it('leaves nothing lit after Escape with the pointer on a band between the versions', async () => {
     await open();
     await press(marker('modified'));
+    await layOutBoth();
     const pane = previousPane()!;
-    layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, 700);
-    layOut(
-      pane.querySelector('.markdown-content')!,
-      pane.querySelector<HTMLElement>('.previous-scroll')!,
-      700
-    );
-    resize();
-    await settle();
     const gaps = () => [...notePane().querySelectorAll<HTMLElement>('.note-diff-gap')];
 
     pointerArrives(connectors()[0].querySelector('.connector-fill')!);

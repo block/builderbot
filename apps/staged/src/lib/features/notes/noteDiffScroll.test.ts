@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import type { NoteDiffHunk, NoteDiffOp } from './noteDiff';
+import type { NoteDiffChange, NoteDiffHunk, NoteDiffOp } from './noteDiff';
 import {
+  BLOCK_BLEED,
   buildScrollAnchors,
   GAP_MARKER_HEIGHT,
+  hunkBlock,
+  hunkBlockExtent,
   hunkExtent,
   hunkGapOffset,
   hunkLead,
@@ -95,15 +98,153 @@ describe('hunkGapOffset', () => {
   });
 });
 
+describe('hunkBlockExtent', () => {
+  // 10px of margin between each block and the next, then two table rows
+  // with nothing between them.
+  const boxes = [box(20, 40), box(70, 30), box(110, 60), box(180, 20), box(200, 20)];
+
+  it('runs from the top of the first block to the bottom of the last, and a little into the margins', () => {
+    expect(hunkBlockExtent(hunk({ currentIndices: [1] }), 'current', boxes)).toEqual(
+      box(70 - BLOCK_BLEED, 30 + 2 * BLOCK_BLEED)
+    );
+    // The margins between the change's own blocks are inside it.
+    expect(hunkBlockExtent(hunk({ previousIndices: [1, 2] }), 'previous', boxes)).toEqual(
+      box(70 - BLOCK_BLEED, 100 + 2 * BLOCK_BLEED)
+    );
+  });
+
+  it('reaches as far past the first and last blocks of the version, which have no neighbour', () => {
+    expect(hunkBlockExtent(hunk({ currentIndices: [0] }), 'current', boxes)).toEqual(
+      box(20 - BLOCK_BLEED, 40 + 2 * BLOCK_BLEED)
+    );
+    expect(hunkBlockExtent(hunk({ currentIndices: [4] }), 'current', boxes)).toEqual(
+      box(200, 20 + BLOCK_BLEED)
+    );
+  });
+
+  it('never takes more than half the room to the neighbouring block', () => {
+    // Rows that touch: the changed row's rectangle is the row.
+    expect(hunkBlockExtent(hunk({ currentIndices: [4] }), 'current', boxes)!.top).toBe(200);
+    // 10px to the block above, none to the row below.
+    expect(hunkBlockExtent(hunk({ currentIndices: [3] }), 'current', boxes)).toEqual(
+      box(180 - BLOCK_BLEED, 20 + BLOCK_BLEED)
+    );
+    // 6px apart: 3px each, so two changes side by side meet and do not overlap.
+    const close = [box(0, 10), box(16, 10), box(32, 10)];
+    expect(hunkBlockExtent(hunk({ currentIndices: [0] }), 'current', close)).toEqual(
+      box(-BLOCK_BLEED, 10 + BLOCK_BLEED + 3)
+    );
+    expect(hunkBlockExtent(hunk({ currentIndices: [1] }), 'current', close)).toEqual(box(13, 16));
+  });
+
+  it('is nothing on a side the change has no block on, or with nothing measured', () => {
+    const removed = hunk({ kind: 'removed', previousIndices: [1], currentStart: 1 });
+    expect(hunkBlockExtent(removed, 'current', boxes)).toBeNull();
+    expect(hunkBlockExtent(hunk({ currentIndices: [7] }), 'current', boxes)).toBeNull();
+    expect(hunkBlockExtent(hunk({ currentIndices: [0] }), 'current', [])).toBeNull();
+  });
+});
+
+describe('hunkBlock', () => {
+  const boxes = [box(20, 40), box(70, 30), box(110, 60), box(180, 20), box(200, 20)];
+  const ops = (...list: NoteDiffChange[]) => list;
+
+  it('is one rectangle of one colour for a change whose blocks are all of a kind', () => {
+    const section = hunk({
+      kind: 'added',
+      currentIndices: [1, 2, 3],
+      ops: ops(
+        { type: 'added', currentIndex: 1 },
+        { type: 'added', currentIndex: 2 },
+        { type: 'added', currentIndex: 3 }
+      ),
+    });
+
+    const block = hunkBlock(section, 'current', boxes)!;
+    expect(block).toMatchObject(hunkBlockExtent(section, 'current', boxes)!);
+    expect(block.parts).toEqual([{ kind: 'added', height: block.height }]);
+  });
+
+  it('fills the rectangle in a part per run of blocks of a kind, meeting halfway between them', () => {
+    // A paragraph reworded, then one added under it.
+    const mixed = hunk({
+      kind: 'modified',
+      previousIndices: [1],
+      currentIndices: [1, 2],
+      ops: ops(
+        {
+          type: 'modified',
+          previousIndex: 1,
+          currentIndex: 1,
+          previousRanges: [],
+          currentRanges: [],
+          wholeUnit: true,
+        },
+        { type: 'added', currentIndex: 2 }
+      ),
+    });
+
+    const block = hunkBlock(mixed, 'current', boxes)!;
+    expect(block.top).toBe(70 - BLOCK_BLEED);
+    // The seam is the middle of the 10px between the two blocks, at 105.
+    expect(block.parts).toEqual([
+      { kind: 'modified', height: 105 - (70 - BLOCK_BLEED) },
+      { kind: 'added', height: 170 + BLOCK_BLEED - 105 },
+    ]);
+    // The parts fill the rectangle, with nothing between them.
+    expect(block.parts.reduce((sum, part) => sum + part.height, 0)).toBe(block.height);
+    // The previous version holds the reworded paragraph only.
+    expect(hunkBlock(mixed, 'previous', boxes)!.parts).toEqual([
+      { kind: 'modified', height: 30 + 2 * BLOCK_BLEED },
+    ]);
+  });
+
+  it('paints a block replaced outright in its own kind on each side', () => {
+    const replaced = hunk({
+      kind: 'modified',
+      previousIndices: [2],
+      currentIndices: [2],
+      ops: ops({ type: 'removed', previousIndex: 2 }, { type: 'added', currentIndex: 2 }),
+    });
+
+    expect(hunkBlock(replaced, 'previous', boxes)!.parts.map((part) => part.kind)).toEqual([
+      'removed',
+    ]);
+    expect(hunkBlock(replaced, 'current', boxes)!.parts.map((part) => part.kind)).toEqual([
+      'added',
+    ]);
+  });
+
+  it('is nothing on a side the change has no block on', () => {
+    const removed = hunk({
+      kind: 'removed',
+      previousIndices: [1],
+      currentStart: 1,
+      ops: ops({ type: 'removed', previousIndex: 1 }),
+    });
+
+    expect(hunkBlock(removed, 'current', boxes)).toBeNull();
+    expect(hunkBlock(removed, 'previous', boxes)!.parts).toEqual([
+      { kind: 'removed', height: 30 + 2 * BLOCK_BLEED },
+    ]);
+  });
+});
+
 describe('hunkMarkerBox', () => {
   const boxes = [box(20, 40), box(70, 30), box(110, 60), box(180, 1)];
 
-  it('is as tall as the hunk’s blocks and level with them', () => {
-    expect(hunkMarkerBox(hunk({ currentIndices: [1] }), 'current', boxes)).toEqual(box(70, 30));
-    expect(hunkMarkerBox(hunk({ currentIndices: [0, 1, 2] }), 'current', boxes)).toEqual(
-      box(20, 150)
+  it('is the rectangle painted behind the hunk’s blocks, top to bottom', () => {
+    for (const change of [
+      hunk({ currentIndices: [1] }),
+      hunk({ currentIndices: [0, 1, 2] }),
+      hunk({ previousIndices: [2] }),
+    ]) {
+      const side = change.currentIndices.length > 0 ? 'current' : 'previous';
+      expect(hunkMarkerBox(change, side, boxes)).toEqual(hunkBlockExtent(change, side, boxes));
+    }
+    expect(hunkMarkerBox(hunk({ currentIndices: [1] }), 'current', boxes)).toEqual(
+      box(70 - BLOCK_BLEED, 30 + 2 * BLOCK_BLEED)
     );
-    expect(hunkMarkerBox(hunk({ previousIndices: [2] }), 'previous', boxes)).toEqual(box(110, 60));
   });
 
   it('is a short marker centred on the gap line where the side has no block', () => {
@@ -115,7 +256,10 @@ describe('hunkMarkerBox', () => {
   });
 
   it('keeps a marker tall enough to see beside a block that is not, centred on it', () => {
-    expect(hunkMarkerBox(hunk({ currentIndices: [3] }), 'current', boxes)).toEqual(box(178.5, 4));
+    // A 1px row between two it touches: no margin for its rectangle to reach into.
+    const rows = [box(0, 20), box(20, 1), box(21, 20)];
+
+    expect(hunkMarkerBox(hunk({ currentIndices: [1] }), 'current', rows)).toEqual(box(18.5, 4));
   });
 
   it('is nowhere on a side with nothing measured', () => {

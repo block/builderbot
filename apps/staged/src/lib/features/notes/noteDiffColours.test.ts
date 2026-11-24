@@ -14,7 +14,7 @@ import appCss from '../../../app.css?raw';
 import rendererSource from '../../../../../../packages/diff-viewer/src/lib/utils/connectorRendererCanvas.ts?raw';
 import fileTreeSource from '../diff/DiffFileTreeSection.svelte?raw';
 import connectorsSource from './NoteDiffConnectors.svelte?raw';
-import gapsSource from './NoteDiffGaps.svelte?raw';
+import blocksSource from './NoteDiffBlocks.svelte?raw';
 import markersSource from './NoteDiffMarkers.svelte?raw';
 import noteDiffCss from './noteDiffStyles.css?raw';
 
@@ -54,7 +54,7 @@ const LITERAL_COLOUR = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|oklch|oklab|lab|lch|co
 const note = rules(noteDiffCss);
 const viewer = rules(styleOf(viewerSource));
 const markers = rules(styleOf(markersSource));
-const gaps = rules(styleOf(gapsSource));
+const blocks = rules(styleOf(blocksSource));
 const connectors = rules(styleOf(connectorsSource));
 
 describe('the code diff viewer', () => {
@@ -91,18 +91,39 @@ describe('the code diff viewer', () => {
   });
 });
 
+const KINDS = [
+  ['added', '--diff-added-bg', '--diff-added-bg-emphasis'],
+  ['removed', '--diff-removed-bg', '--diff-removed-bg-emphasis'],
+  ['modified', '--diff-modified-bg', '--diff-modified-bg-emphasis'],
+] as const;
+
 describe('a note diff’s block tints', () => {
-  it.each([
-    ['added', '--diff-added-bg', '--diff-added-bg-emphasis'],
-    ['removed', '--diff-removed-bg', '--diff-removed-bg-emphasis'],
-    ['modified', '--diff-modified-bg', '--diff-modified-bg-emphasis'],
-  ])('tint a block that was %s with the viewer’s token, and its emphasis', (kind, rest, strong) => {
-    const rule = note.get(`[data-note-diff='${kind}']`);
-    expect(rule?.get('--note-diff-rest')).toBe(`var(${rest})`);
-    expect(rule?.get('--note-diff-strong')).toBe(`var(${strong})`);
-  });
+  it.each(KINDS)(
+    'fill the rectangle behind blocks that were %s with the viewer’s token, and its emphasis',
+    (kind, rest, strong) => {
+      const rule = blocks.get(`.note-diff-block-part[data-kind='${kind}']`);
+      expect(rule?.get('--part-tint')).toBe(`var(${rest})`);
+      expect(rule?.get('--part-strong')).toBe(`var(${strong})`);
+    }
+  );
 
   it('use the viewer’s own tint at rest and the emphasis for the change pointed at', () => {
+    expect(blocks.get('.note-diff-block-part')?.get('background-color')).toBe('var(--part-tint)');
+    expect(
+      blocks.get('.note-diff-block.is-active > .note-diff-block-part')?.get('background-color')
+    ).toBe('var(--part-strong)');
+  });
+
+  it.each(KINDS)(
+    'tint a block that covers the rectangle, and was %s, as the rectangle is',
+    (kind, rest, strong) => {
+      const rule = note.get(`[data-note-diff='${kind}']`);
+      expect(rule?.get('--note-diff-rest')).toBe(`var(${rest})`);
+      expect(rule?.get('--note-diff-strong')).toBe(`var(${strong})`);
+    }
+  );
+
+  it('tint in place only the blocks with a background of their own, and nothing twice', () => {
     expect(note.get('.note-diff-all [data-note-diff]')?.get('--note-diff-tint')).toBe(
       'var(--note-diff-rest)'
     );
@@ -112,12 +133,51 @@ describe('a note diff’s block tints', () => {
     ]) {
       expect(note.get(selector)?.get('--note-diff-tint')).toBe('var(--note-diff-strong)');
     }
+    const painted = [...note]
+      .filter(([, declarations]) => declarations.has('box-shadow'))
+      .map(([selector, declarations]) => [selector, declarations.get('box-shadow')]);
+    expect(painted).toEqual(
+      [
+        '.note-diff-all pre[data-note-diff]',
+        'pre[data-note-diff][data-note-diff-active]',
+        '.note-diff-all tr[data-note-diff] > th',
+        'tr[data-note-diff][data-note-diff-active] > th',
+        '.note-diff-all figure[data-note-diff] > .markdown-diagram-preview',
+        'figure[data-note-diff][data-note-diff-active] > .markdown-diagram-preview',
+      ].map((selector) => [selector, 'inset 0 0 0 100vmax var(--note-diff-tint)'])
+    );
+    // No block is given a background: the rectangle behind it is the tint.
+    expect(
+      [...note].filter(
+        ([selector, declarations]) =>
+          !selector.startsWith('::highlight') &&
+          (declarations.has('background-color') || declarations.has('background'))
+      )
+    ).toEqual([]);
+  });
+});
+
+describe('a note diff’s square corners', () => {
+  it('round nothing and outline nothing in the note’s markup', () => {
+    for (const [selector, declarations] of note) {
+      for (const property of ['outline', 'border-radius', 'border', 'border-color']) {
+        expect([selector, property, declarations.has(property)]).toEqual([
+          selector,
+          property,
+          false,
+        ]);
+      }
+    }
   });
 
-  it('paint that one tint, as the fill and as the outline around it', () => {
-    const painted = note.get('.note-diff-all [data-note-diff]');
-    expect(painted?.get('box-shadow')).toBe('inset 0 0 0 100vmax var(--note-diff-tint)');
-    expect(painted?.get('outline')).toBe('3px solid var(--note-diff-tint)');
+  it('round nothing in the rectangles behind the changes', () => {
+    for (const [selector, declarations] of blocks) {
+      expect([selector, declarations.has('border-radius')]).toEqual([selector, false]);
+    }
+  });
+
+  it('square the markers, which are the rectangles’ ends', () => {
+    expect(markers.get('.note-change-marker')?.get('border-radius')).toBe('0');
   });
 });
 
@@ -142,104 +202,143 @@ describe('a note diff’s solid colours', () => {
     ['modified', '--diff-modified-accent', '--diff-modified-inline-bg'],
   ] as const;
 
-  it.each(ACCENTS)('edge a changed figure that was %s', (kind, accent) => {
-    expect(note.get(`[data-note-diff='${kind}']`)?.get('--note-diff-edge')).toBe(`var(${accent})`);
+  it.each(ACCENTS)('fill the marker of a change that was %s', (kind, accent) => {
+    const rule = markers.get(`.note-change-marker[data-kind='${kind}']`);
+    expect(rule?.get('--marker-color')).toBe(`var(${accent})`);
   });
 
-  it.each(ACCENTS)(
-    'fill the marker of a change that was %s, with a tint for its halo',
-    (kind, accent, halo) => {
-      const rule = markers.get(`.note-change-marker[data-kind='${kind}']`);
-      expect(rule?.get('--marker-color')).toBe(`var(${accent})`);
-      expect(rule?.get('--marker-halo')).toBe(`var(${halo})`);
-    }
-  );
-
-  it('show a marker at full strength, and the one pointed at by its halo', () => {
+  it('show a marker at full strength, with nothing round it', () => {
     const marker = markers.get('.note-change-marker');
     expect(marker?.get('background-color')).toBe('var(--marker-color)');
     expect(marker?.has('opacity')).toBe(false);
-    expect(markers.get('.note-change-marker.is-pointed')?.get('box-shadow')).toBe(
-      '0 0 0 2px var(--marker-halo)'
-    );
+    // The change being pointed at is shown by its rectangle. A marker has no
+    // halo, and no look of its own under a pointer: one the text scrolled
+    // under a pointer at rest matches `:hover`, and its change is not lit
+    // (noteDiffPointer.ts).
+    expect([...markers].filter(([, declarations]) => declarations.has('box-shadow'))).toEqual([]);
+    expect([...markers.keys()].filter((selector) => selector.includes(':hover'))).toEqual([]);
+    expect([...markers.keys()].filter((selector) => selector.includes('.is-pointed'))).toEqual([]);
   });
 
-  it('give the halo to the marker whose change is lit, not to one the pointer is merely over', () => {
-    // A marker the text scrolled under a pointer at rest matches `:hover`,
-    // and its change is not lit (noteDiffPointer.ts).
-    const haloed = [...markers]
-      .filter(([, declarations]) => declarations.has('box-shadow'))
-      .map(([selector]) => selector);
-    expect(haloed).toEqual(['.note-change-marker.is-pointed']);
-    expect([...markers.keys()].filter((selector) => selector.includes(':hover'))).toEqual([]);
+  it('line a rectangle with the viewer’s range border at rest', () => {
+    const line = blocks.get('.note-diff-block::after');
+    expect(line?.get('border-top')).toBe('1px solid var(--block-line, var(--diff-range-border))');
+    expect(line?.get('border-bottom')).toBe(
+      '1px solid var(--block-line, var(--diff-range-border))'
+    );
+    // Top and bottom only: the left end is the gutter's, the right the marker's.
+    expect(line?.has('border')).toBe(false);
+    expect(line?.has('border-left')).toBe(false);
+    expect(line?.has('border-right')).toBe(false);
   });
+
+  it.each(ACCENTS)(
+    'line the rectangle of a pointed change that was %s in its marker’s colour',
+    (kind, accent) => {
+      expect(
+        blocks.get(`.note-diff-block.is-active[data-kind='${kind}']`)?.get('--block-line')
+      ).toBe(`var(${accent})`);
+    }
+  );
 
   it.each(ACCENTS.slice(0, 2))(
     'draw the gap line of text that was %s solid when pointed at, and in the tint otherwise',
     (kind, accent, faint) => {
-      const rule = gaps.get(`.note-diff-gap[data-kind='${kind}']`);
+      const rule = blocks.get(`.note-diff-gap[data-kind='${kind}']`);
       expect(rule?.get('--gap-color')).toBe(`var(${accent})`);
       expect(rule?.get('--gap-faint')).toBe(`var(${faint})`);
-      expect(gaps.get('.note-diff-gap')?.get('background-color')).toBe('var(--gap-faint)');
-      expect(gaps.get('.note-diff-gap.is-active')?.get('background-color')).toBe(
+      expect(blocks.get('.note-diff-gap')?.get('background-color')).toBe('var(--gap-faint)');
+      expect(blocks.get('.note-diff-gap.is-active')?.get('background-color')).toBe(
         'var(--gap-color)'
       );
-      expect(gaps.get('.note-diff-gap')?.has('opacity')).toBe(false);
+      expect(blocks.get('.note-diff-gap')?.has('opacity')).toBe(false);
     }
   );
 });
 
 describe('a note diff’s connectors', () => {
-  it('are the viewer’s connectors at rest: its neutral fill and its range border', () => {
-    expect(connectors.get('.connector-fill')?.get('fill')).toBe(
-      'var(--connector-fill, var(--diff-changed-bg))'
+  it('are filled as the rectangles they join, and lined with the viewer’s range border', () => {
+    expect(connectors.get('.connector-fill')?.get('fill')).toBe('var(--connector-before)');
+    // Two ends of two colours: the band shades from the one to the other.
+    expect(connectors.get('.connector-stop-before')?.get('stop-color')).toBe(
+      'var(--connector-before)'
+    );
+    expect(connectors.get('.connector-stop-after')?.get('stop-color')).toBe(
+      'var(--connector-after)'
     );
     const stroke = connectors.get('.connector-stroke');
     expect(stroke?.get('stroke')).toBe('var(--connector-stroke, var(--diff-range-border))');
     expect(stroke?.get('stroke-width')).toBe('1px');
     expect(stroke?.get('fill')).toBe('none');
+    // The same line the rectangles carry along their top and bottom.
+    expect(blocks.get('.note-diff-block::after')?.get('border-top')).toContain(
+      'var(--diff-range-border)'
+    );
   });
 
+  it.each(KINDS)(
+    'take at each end the tint of blocks that were %s, at rest and pointed at',
+    (kind, rest, strong) => {
+      for (const end of ['before', 'after']) {
+        expect(
+          connectors.get(`.note-diff-connector[data-${end}='${kind}']`)?.get(`--connector-${end}`)
+        ).toBe(`var(${rest})`);
+        expect(
+          connectors
+            .get(`.note-diff-connector.is-pointed[data-${end}='${kind}']`)
+            ?.get(`--connector-${end}`)
+        ).toBe(`var(${strong})`);
+      }
+      // The tints the rectangle behind those blocks is filled with.
+      const part = blocks.get(`.note-diff-block-part[data-kind='${kind}']`);
+      expect([part?.get('--part-tint'), part?.get('--part-strong')]).toEqual([
+        `var(${rest})`,
+        `var(${strong})`,
+      ]);
+    }
+  );
+
   it.each([
-    ['added', '--diff-added-bg-emphasis', '--status-added'],
-    ['removed', '--diff-removed-bg-emphasis', '--status-deleted'],
-    ['modified', '--diff-modified-bg-emphasis', '--diff-modified-accent'],
+    ['added', '--status-added'],
+    ['removed', '--status-deleted'],
+    ['modified', '--diff-modified-accent'],
   ])(
-    'paint the connector of a pointed change that was %s as its blocks and its marker',
-    (kind, tint, accent) => {
-      const rule = connectors.get(`.note-diff-connector.is-pointed[data-kind='${kind}']`);
-      expect(rule?.get('--connector-fill')).toBe(`var(${tint})`);
-      expect(rule?.get('--connector-stroke')).toBe(`var(${accent})`);
-      // The same tint the change's blocks are lit with, and its marker's colour.
-      expect(note.get(`[data-note-diff='${kind}']`)?.get('--note-diff-strong')).toBe(
-        `var(${tint})`
-      );
+    'line the connector of a pointed change that was %s as its rectangles and its marker',
+    (kind, accent) => {
+      expect(
+        connectors
+          .get(`.note-diff-connector.is-pointed[data-kind='${kind}']`)
+          ?.get('--connector-stroke')
+      ).toBe(`var(${accent})`);
+      expect(
+        blocks.get(`.note-diff-block.is-active[data-kind='${kind}']`)?.get('--block-line')
+      ).toBe(`var(${accent})`);
       expect(markers.get(`.note-change-marker[data-kind='${kind}']`)?.get('--marker-color')).toBe(
         `var(${accent})`
       );
     }
   );
 
-  it('colour only the change being pointed at', () => {
-    const coloured = [...connectors.keys()].filter((selector) =>
-      [...(connectors.get(selector)?.keys() ?? [])].some((property) =>
-        property.startsWith('--connector-')
-      )
+  it('line only the change being pointed at in a colour of its own', () => {
+    const lined = [...connectors.keys()].filter((selector) =>
+      connectors.get(selector)?.has('--connector-stroke')
     );
-    expect(coloured).toHaveLength(3);
-    expect(coloured.every((selector) => selector.includes('.is-pointed'))).toBe(true);
+    expect(lined).toHaveLength(3);
+    expect(lined.every((selector) => selector.includes('.is-pointed'))).toBe(true);
   });
 
-  it('read no token but the viewer’s connector paint and the pointed change’s colours', () => {
+  it('read no token but the viewer’s tints, its range border and the markers’ colours', () => {
     const own = [...tokensRead(styleOf(connectorsSource))].filter(
       (name) => !name.startsWith('--connector-')
     );
     expect(own.sort()).toEqual([
+      '--diff-added-bg',
       '--diff-added-bg-emphasis',
-      '--diff-changed-bg',
       '--diff-modified-accent',
+      '--diff-modified-bg',
       '--diff-modified-bg-emphasis',
       '--diff-range-border',
+      '--diff-removed-bg',
       '--diff-removed-bg-emphasis',
       '--status-added',
       '--status-deleted',
@@ -248,15 +347,30 @@ describe('a note diff’s connectors', () => {
 });
 
 describe('the note diff’s stylesheets', () => {
-  it('read no colour token but the viewer’s tints and the colours they are made of', () => {
+  it('read no colour token in the note’s markup but the viewer’s tints', () => {
     const own = [...tokensRead(noteDiffCss)].filter((name) => !name.startsWith('--note-diff-'));
+    expect(own.sort()).toEqual([
+      '--diff-added-bg',
+      '--diff-added-bg-emphasis',
+      '--diff-modified-bg',
+      '--diff-modified-bg-emphasis',
+      '--diff-modified-inline-bg',
+      '--diff-removed-bg',
+      '--diff-removed-bg-emphasis',
+    ]);
+  });
+
+  it('read no colour token behind the changes but the viewer’s tints, its range border and the markers’ colours', () => {
+    const own = [...tokensRead(styleOf(blocksSource))].filter(
+      (name) => !/^--(?:part|block|gap|note-diff)-/.test(name)
+    );
     expect(own.sort()).toEqual([
       '--diff-added-bg',
       '--diff-added-bg-emphasis',
       '--diff-modified-accent',
       '--diff-modified-bg',
       '--diff-modified-bg-emphasis',
-      '--diff-modified-inline-bg',
+      '--diff-range-border',
       '--diff-removed-bg',
       '--diff-removed-bg-emphasis',
       '--status-added',
@@ -264,11 +378,17 @@ describe('the note diff’s stylesheets', () => {
     ]);
   });
 
-  it('take the solid colours for edges only, never for a tint', () => {
-    for (const [selector, declarations] of note) {
+  it('take the solid colours for lines and markers only, never for a tint', () => {
+    expect(noteDiffCss.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(
+      /--status-|--diff-modified-accent/
+    );
+    for (const [selector, declarations] of blocks) {
       for (const [property, value] of declarations) {
         if (!/--status-|--diff-modified-accent/.test(value)) continue;
-        expect([selector, property]).toEqual([selector, '--note-diff-edge']);
+        expect([selector, ['--block-line', '--gap-color'].includes(property)]).toEqual([
+          selector,
+          true,
+        ]);
       }
     }
   });
@@ -277,7 +397,7 @@ describe('the note diff’s stylesheets', () => {
     for (const css of [
       noteDiffCss,
       styleOf(markersSource),
-      styleOf(gapsSource),
+      styleOf(blocksSource),
       styleOf(connectorsSource),
     ]) {
       expect(tokensRead(css)).not.toContain('--status-modified');
@@ -287,7 +407,7 @@ describe('the note diff’s stylesheets', () => {
   it.each([
     ['noteDiffStyles.css', noteDiffCss],
     ['NoteDiffMarkers.svelte', styleOf(markersSource)],
-    ['NoteDiffGaps.svelte', styleOf(gapsSource)],
+    ['NoteDiffBlocks.svelte', styleOf(blocksSource)],
     ['NoteDiffConnectors.svelte', styleOf(connectorsSource)],
   ])('write out or mix no colour of their own: %s', (_name, css) => {
     expect(css.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(LITERAL_COLOUR);
@@ -305,6 +425,9 @@ describe('the tokens', () => {
     const read = [
       ...[...tokensRead(noteDiffCss)].filter((n) => !n.startsWith('--note-diff-')),
       ...[...tokensRead(styleOf(connectorsSource))].filter((n) => !n.startsWith('--connector-')),
+      ...[...tokensRead(styleOf(blocksSource))].filter(
+        (n) => !/^--(?:part|block|gap|note-diff)-/.test(n)
+      ),
     ];
     for (const name of read) {
       expect([name, root?.has(name)]).toEqual([name, true]);

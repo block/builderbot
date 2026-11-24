@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest';
 import type { NoteDiffHunk } from './noteDiff';
 import {
   clipConnectorEdges,
+  connectorLineEdges,
   CONNECTOR_WIDTH,
   hunkConnectorEdges,
   hunkConnectorSpan,
   layoutNoteDiffConnectors,
 } from './noteDiffConnectors';
-import { hunkGapOffset, type NoteDiffUnitBox } from './noteDiffScroll';
+import { BLOCK_BLEED, hunkBlock, hunkGapOffset, type NoteDiffUnitBox } from './noteDiffScroll';
 
 function box(top: number, height: number): NoteDiffUnitBox {
   return { top, height };
@@ -33,7 +34,9 @@ function numbers(d: string): number[] {
 }
 
 // Blocks 10px apart, as margins leave. The previous version has one block
-// more than the note, the second, which the revision removed.
+// more than the note, the second, which the revision removed. The rectangle
+// painted behind a change reaches 4px into the margin above and below it
+// (`BLOCK_BLEED`), and a band's ends are that rectangle's.
 const previous = [box(20, 40), box(70, 30), box(110, 60), box(180, 50), box(240, 20)];
 const current = [box(20, 40), box(70, 80), box(160, 50), box(220, 20), box(250, 90)];
 const boxes = { previous, current };
@@ -51,14 +54,14 @@ const added = hunk({ id: 'added', kind: 'added', currentIndices: [4], previousSt
 const NOT_SCROLLED = { previous: 0, current: 0 };
 
 describe('hunkConnectorSpan', () => {
-  it('runs from the top of the change’s first block to the bottom of its last, half a pixel in', () => {
+  it('runs from just above the change’s first block to just below its last', () => {
     expect(hunkConnectorSpan(modified, 'previous', previous)).toEqual({
-      top: 110.5,
-      bottom: 169.5,
+      top: 110 - BLOCK_BLEED,
+      bottom: 170 + BLOCK_BLEED,
     });
     expect(hunkConnectorSpan(hunk({ currentIndices: [1, 2, 3] }), 'current', current)).toEqual({
-      top: 70.5,
-      bottom: 239.5,
+      top: 70 - BLOCK_BLEED,
+      bottom: 240 + BLOCK_BLEED,
     });
   });
 
@@ -69,11 +72,20 @@ describe('hunkConnectorSpan', () => {
     expect(hunkConnectorSpan(removed, 'current', current)).toEqual({ top: 65, bottom: 65 });
   });
 
-  it('is a point at the middle of a block too short to be drawn inside', () => {
-    expect(hunkConnectorSpan(hunk({ currentIndices: [0] }), 'current', [box(30, 0.4)])).toEqual({
-      top: 30.2,
-      bottom: 30.2,
+  it('has the top and the bottom of the rectangle painted behind the change', () => {
+    const section = hunk({
+      currentIndices: [1, 2, 3],
+      ops: [
+        { type: 'added', currentIndex: 1 },
+        { type: 'added', currentIndex: 2 },
+        { type: 'added', currentIndex: 3 },
+      ],
     });
+    const block = hunkBlock(section, 'current', current)!;
+    const span = hunkConnectorSpan(section, 'current', current)!;
+
+    expect(span.top).toBe(block.top);
+    expect(span.bottom).toBe(block.top + block.height);
   });
 
   it('is nowhere on a side with nothing measured', () => {
@@ -82,34 +94,49 @@ describe('hunkConnectorSpan', () => {
   });
 });
 
+describe('connectorLineEdges', () => {
+  it('runs half a pixel inside the band’s edges, where a 1px line lies within the change', () => {
+    expect(
+      connectorLineEdges({ beforeTop: 110, beforeBottom: 170, afterTop: 70, afterBottom: 150 })
+    ).toEqual({ beforeTop: 110.5, beforeBottom: 169.5, afterTop: 70.5, afterBottom: 149.5 });
+  });
+
+  it('leaves a side that is a point where it is, and makes one of a side too short to line', () => {
+    expect(
+      connectorLineEdges({ beforeTop: 65, beforeBottom: 65, afterTop: 30, afterBottom: 30.4 })
+    ).toEqual({ beforeTop: 65, beforeBottom: 65, afterTop: 30.2, afterBottom: 30.2 });
+  });
+});
+
 describe('hunkConnectorEdges', () => {
   it('puts the previous version’s extent on the left and the note’s on the right', () => {
     expect(hunkConnectorEdges(modified, boxes, NOT_SCROLLED)).toEqual({
-      beforeTop: 110.5,
-      beforeBottom: 169.5,
-      afterTop: 70.5,
-      afterBottom: 149.5,
+      beforeTop: 106,
+      beforeBottom: 174,
+      afterTop: 66,
+      afterBottom: 154,
     });
   });
 
   it('moves each side by how far its own pane is scrolled', () => {
     expect(hunkConnectorEdges(modified, boxes, { previous: 100, current: 30 })).toEqual({
-      beforeTop: 10.5,
-      beforeBottom: 69.5,
-      afterTop: 40.5,
-      afterBottom: 119.5,
+      beforeTop: 6,
+      beforeBottom: 74,
+      afterTop: 36,
+      afterBottom: 124,
     });
   });
 
   it('collapses the note’s side of a removal, and the previous version’s side of an addition', () => {
     const removal = hunkConnectorEdges(removed, boxes, NOT_SCROLLED)!;
-    expect([removal.beforeTop, removal.beforeBottom]).toEqual([70.5, 99.5]);
+    expect([removal.beforeTop, removal.beforeBottom]).toEqual([66, 104]);
     expect([removal.afterTop, removal.afterBottom]).toEqual([65, 65]);
 
     const addition = hunkConnectorEdges(added, boxes, NOT_SCROLLED)!;
     // Under the previous version's last block, where its gap line is drawn.
     expect([addition.beforeTop, addition.beforeBottom]).toEqual([264, 264]);
-    expect([addition.afterTop, addition.afterBottom]).toEqual([250.5, 339.5]);
+    // The note ends with the added block: the rectangle runs its full reach past it.
+    expect([addition.afterTop, addition.afterBottom]).toEqual([246, 344]);
   });
 
   it('is not placed until both panes are measured', () => {
@@ -205,10 +232,10 @@ describe('layoutNoteDiffConnectors', () => {
 
     // "M 0 beforeTop C … width afterTop L width afterBottom C … 0 beforeBottom Z"
     const fill = numbers(band.fill);
-    expect(fill.slice(0, 2)).toEqual([0, 110.5]);
-    expect(fill.slice(6, 8)).toEqual([CONNECTOR_WIDTH, 70.5]);
-    expect(fill.slice(8, 10)).toEqual([CONNECTOR_WIDTH, 149.5]);
-    expect(fill.slice(-2)).toEqual([0, 169.5]);
+    expect(fill.slice(0, 2)).toEqual([0, 106]);
+    expect(fill.slice(6, 8)).toEqual([CONNECTOR_WIDTH, 66]);
+    expect(fill.slice(8, 10)).toEqual([CONNECTOR_WIDTH, 154]);
+    expect(fill.slice(-2)).toEqual([0, 174]);
     expect(band.fill.endsWith('Z')).toBe(true);
   });
 
@@ -218,9 +245,9 @@ describe('layoutNoteDiffConnectors', () => {
     // No line down the right edge: the top curve arrives where the bottom one leaves.
     expect(band.fill).not.toContain('L');
     const fill = numbers(band.fill);
-    expect(fill.slice(0, 2)).toEqual([0, 70.5]);
+    expect(fill.slice(0, 2)).toEqual([0, 66]);
     expect(fill.slice(6, 8)).toEqual([CONNECTOR_WIDTH, 65]);
-    expect(fill.slice(-2)).toEqual([0, 99.5]);
+    expect(fill.slice(-2)).toEqual([0, 104]);
   });
 
   it('opens an addition from a point at the previous version’s gap line', () => {
@@ -228,18 +255,39 @@ describe('layoutNoteDiffConnectors', () => {
 
     const fill = numbers(band.fill);
     expect(fill.slice(0, 2)).toEqual([0, 264]);
-    expect(fill.slice(6, 10)).toEqual([CONNECTOR_WIDTH, 250.5, CONNECTOR_WIDTH, 339.5]);
+    expect(fill.slice(6, 10)).toEqual([CONNECTOR_WIDTH, 246, CONNECTOR_WIDTH, 344]);
     expect(fill.slice(-2)).toEqual([0, 264]);
   });
 
-  it('draws the lines along the top and the bottom of the same band', () => {
+  it('gives each end the kind of the change’s blocks there, for a band between two colours', () => {
+    const replaced = hunk({
+      id: 'replaced',
+      previousIndices: [2],
+      currentIndices: [1],
+      previousStart: 2,
+      currentStart: 1,
+      ops: [
+        { type: 'removed', previousIndex: 2 },
+        { type: 'added', currentIndex: 1 },
+      ],
+    });
+    const connectors = layoutNoteDiffConnectors([removed, modified, replaced], boxes, viewport());
+
+    expect(connectors.map(({ kind, before, after }) => [kind, before, after])).toEqual([
+      ['removed', 'removed', 'removed'],
+      ['modified', 'modified', 'modified'],
+      ['modified', 'removed', 'added'],
+    ]);
+  });
+
+  it('draws the lines along the top and the bottom of the same band, half a pixel inside it', () => {
     const [, band] = layoutNoteDiffConnectors(hunks, boxes, viewport());
 
     const stroke = numbers(band.stroke);
-    expect(stroke.slice(0, 2)).toEqual([0, 110.5]);
-    expect(stroke.slice(6, 8)).toEqual([CONNECTOR_WIDTH, 70.5]);
-    expect(stroke.slice(8, 10)).toEqual([CONNECTOR_WIDTH, 149.5]);
-    expect(stroke.slice(-2)).toEqual([0, 169.5]);
+    expect(stroke.slice(0, 2)).toEqual([0, 106.5]);
+    expect(stroke.slice(6, 8)).toEqual([CONNECTOR_WIDTH, 66.5]);
+    expect(stroke.slice(8, 10)).toEqual([CONNECTOR_WIDTH, 153.5]);
+    expect(stroke.slice(-2)).toEqual([0, 173.5]);
     expect(band.stroke).not.toContain('Z');
   });
 
@@ -250,16 +298,16 @@ describe('layoutNoteDiffConnectors', () => {
       )!.edges;
 
     expect(at(40, 0)).toEqual({
-      beforeTop: 70.5,
-      beforeBottom: 129.5,
-      afterTop: 70.5,
-      afterBottom: 149.5,
+      beforeTop: 66,
+      beforeBottom: 134,
+      afterTop: 66,
+      afterBottom: 154,
     });
     expect(at(40, 25)).toEqual({
-      beforeTop: 70.5,
-      beforeBottom: 129.5,
-      afterTop: 45.5,
-      afterBottom: 124.5,
+      beforeTop: 66,
+      beforeBottom: 134,
+      afterTop: 41,
+      afterBottom: 129,
     });
   });
 
@@ -275,7 +323,7 @@ describe('layoutNoteDiffConnectors', () => {
     const connectors = layoutNoteDiffConnectors(hunks, boxes, viewport(100, 300, 100));
     const band = connectors.find(({ hunkId }) => hunkId === 'modified')!;
 
-    expect(band.edges.beforeTop).toBe(10.5);
+    expect(band.edges.beforeTop).toBe(6);
     expect(band.edges.afterBottom).toBeLessThan(0);
   });
 

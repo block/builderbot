@@ -7,24 +7,28 @@
   does, and hands over the rendered element (`contentEl`; `renderKey` is
   what it was rendered from).
 
-  Its blocks are marked from the viewer's diff (`noteDiff`): the hunk being
-  pointed at lit, with the words it lost, the others tinted, and a line
-  where the revision added text this version does not have. The diff was
-  computed from this version's HTML parsed off screen; the blocks read here
-  are checked against those, and left unmarked if they differ.
-
-  It carries the diff's markers too, level with this version's blocks: text
-  the revision removed has its full height here, where the note has only a
-  line. They are a second set of the changes the note's markers list, so
-  they take presses (`onSelect`) and hovers but no Tab stop.
+  Its blocks are marked from the viewer's diff (`noteDiff`), and every
+  change has a rectangle behind its text here (NoteDiffBlocks.svelte): the
+  hunk being pointed at lit, with the words it lost, the others tinted, and
+  a line where the revision added text this version does not have. The diff
+  was computed from this version's HTML parsed off screen; the blocks read
+  here are checked against those, and left unmarked if they differ.
 
   Each change is joined to its place in the note by a band across the gutter
-  between the panes (NoteDiffConnectors.svelte), from this pane's markers to
-  the note's blocks. This pane knows how far both panes are scrolled, since
-  it keeps them in step, so the bands are placed from here (`scrollTops`).
-  Nothing stands between the markers and the bands: this pane's scrollbar is
-  on its outer edge, the left, as the code diff viewer's before pane has it,
+  between the panes (NoteDiffConnectors.svelte). A rectangle here runs
+  through this pane's right padding to the gutter's edge, where the band
+  starts at the rectangle's height and in its colour, and the note's
+  rectangle starts where the band ends: the three are one shape. This pane
+  knows how far both panes are scrolled, since it keeps them in step, so the
+  bands are placed from here (`scrollTops`). Nothing stands between the
+  rectangles and the bands: this pane has no markers, its scrollbar is on
+  its outer edge, the left, as the code diff viewer's before pane has it,
   and the line dividing the panes stops at their headers.
+
+  The changes are pointed at and selected from the bands (`onSelect`) and
+  from the note's markers, which list every one of them and take the
+  keyboard. Text the revision removed, which has its full height here, has
+  a short marker in the note, across the line where it was.
 
   The pane scrolls with the note (`currentScrollEl`). Each maps the other's
   place through the blocks both versions hold (noteDiffScroll.ts), so a
@@ -64,9 +68,9 @@
     measureNoteDiffUnits,
     type NoteDiffDomUnit,
   } from './noteDiffUnits';
+  import { CONNECTOR_PREVIOUS_REACH } from './noteDiffConnectors';
+  import NoteDiffBlocks from './NoteDiffBlocks.svelte';
   import NoteDiffConnectors from './NoteDiffConnectors.svelte';
-  import NoteDiffGaps from './NoteDiffGaps.svelte';
-  import NoteDiffMarkers from './NoteDiffMarkers.svelte';
   import NoteDiffPaneHeader from './NoteDiffPaneHeader.svelte';
 
   interface Props {
@@ -82,7 +86,7 @@
     /** The height of what stands under the note's scroll area. */
     bottomInset?: number;
     onClose: () => void;
-    /** A marker beside the version was pressed. */
+    /** A change was pressed, at its band between the panes. */
     onSelect: (hunkId: string) => void;
     /** A press or a key in the version, handled as the note's are. */
     onContentClick?: (event: MouseEvent) => void;
@@ -266,6 +270,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="previous-scroll note-diff-all"
+      style:--note-diff-blocks-right="{CONNECTOR_PREVIOUS_REACH}px"
       bind:this={scrollEl}
       onclick={onContentClick}
       onkeydown={onContentKeydown}
@@ -273,14 +278,7 @@
       <div class="previous-content">
         {@render content()}
       </div>
-      <NoteDiffGaps {noteDiff} side="previous" showAll />
-      <NoteDiffMarkers
-        {noteDiff}
-        side="previous"
-        label="Changes in the previous version"
-        tabbable={false}
-        {onSelect}
-      />
+      <NoteDiffBlocks {noteDiff} side="previous" showAll />
     </div>
     <NoteDiffConnectors
       {noteDiff}
@@ -323,13 +321,17 @@
   }
 
   /* The note's scroll area over again (`.modal-content` in NoteModal),
-     positioned for the gap lines and the markers. The room under the text lets the last
+     positioned, and a stacking context, for the rectangles painted behind
+     the changes (NoteDiffBlocks). The room under the text lets the last
      change reach the reference line, a third of the way down; the note's
      pane has the same.
 
-     Its scrollbar is on the left, the pane's outer edge, so that the markers
-     at its right edge meet the connectors: a scroll area laid out right to
-     left has it there. What it holds reads left to right as ever.
+     Its scrollbar is on the left, the pane's outer edge, so that nothing is
+     between the rectangles, which run to the gutter at its right edge, and
+     the connectors: a scroll area laid out right to left has it there. What
+     it holds reads left to right as ever. The rectangles start at the
+     scrollbar and stop where the gutter starts
+     (`--note-diff-blocks-right`).
 
      Laid out right to left, it also scrolls from its right edge, and what
      runs past that edge is out of reach: it scrolls up and down only. */
@@ -342,6 +344,7 @@
     padding: 24px 24px 60vh;
     background: var(--bg-primary);
     direction: rtl;
+    isolation: isolate;
   }
 
   .previous-scroll > :global(*) {
@@ -352,13 +355,14 @@
      than the pane (a table, a long path or hash that cannot wrap), as the
      note does in its own scroll area. The text is laid out to the pane's
      width either way, so both versions wrap alike. Reading left to right,
-     it scrolls from its left edge. The markers and the gap lines are beside
-     it, not in it, and stay where they are.
+     it scrolls from its left edge. The rectangles behind the changes and the
+     gap lines are under it, not in it: they span the pane and stay where
+     they are, so a change is painted across whatever part of it is in view.
 
-     A scroll box cuts off what is drawn outside it, as a tinted block's
-     outline is (3px, see noteDiffStyles.css). So the box is larger than the
-     text by that and a pixel all round, and pulled out by as much, which
-     leaves the text where it would be without the box. */
+     A scroll box cuts off what is drawn outside it, as the focus ring of a
+     heading or a diagram is. So the box is larger than the text by 4px all
+     round, and pulled out by as much, which leaves the text where it would
+     be without the box. */
   .previous-content {
     margin: -4px;
     padding: 4px;

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  changeUnitIndex,
   computeNoteDiff,
+  hunkSideKind,
   hunkTextRanges,
   type NoteDiffTextRange,
   type NoteDiffUnit,
@@ -467,6 +469,64 @@ describe('the work budget', () => {
 
     expect(diff.capped).toBe(false);
     expect(diff.ops.every((op) => op.type === 'modified')).toBe(true);
+  });
+});
+
+describe('changeUnitIndex', () => {
+  it('is the block a change has in a version, and none where the version lacks it', () => {
+    const reworded = computeNoteDiff([intro, middle], [intro, unit(`${middle.text} Mostly.`)]);
+    const [op] = reworded.hunks[0].ops;
+    expect(op.type).toBe('modified');
+    expect([changeUnitIndex(op, 'previous'), changeUnitIndex(op, 'current')]).toEqual([1, 1]);
+
+    expect(changeUnitIndex({ type: 'removed', previousIndex: 3 }, 'previous')).toBe(3);
+    expect(changeUnitIndex({ type: 'removed', previousIndex: 3 }, 'current')).toBeNull();
+    expect(changeUnitIndex({ type: 'added', currentIndex: 2 }, 'current')).toBe(2);
+    expect(changeUnitIndex({ type: 'added', currentIndex: 2 }, 'previous')).toBeNull();
+  });
+});
+
+describe('hunkSideKind', () => {
+  const sideKinds = (previous: NoteDiffUnit[], current: NoteDiffUnit[]) => {
+    const [hunk] = computeNoteDiff(previous, current).hunks;
+    return [hunk.kind, hunkSideKind(hunk, 'previous'), hunkSideKind(hunk, 'current')];
+  };
+
+  it('is the hunk’s kind for a change of one kind, on the side with none of its blocks too', () => {
+    expect(sideKinds([intro, outro], [intro, middle, outro])).toEqual(['added', 'added', 'added']);
+    expect(sideKinds([intro, middle, outro], [intro, outro])).toEqual([
+      'removed',
+      'removed',
+      'removed',
+    ]);
+    expect(sideKinds([intro, middle], [intro, unit(`${middle.text} Mostly.`)])).toEqual([
+      'modified',
+      'modified',
+      'modified',
+    ]);
+  });
+
+  it('is removed in the previous version and added in the note for a block replaced outright', () => {
+    const before = unit('Logs are kept for a week and then deleted by a nightly job.');
+    const after = unit('Nobody has asked for exports since the spring release went out.');
+
+    expect(sideKinds([intro, before, outro], [intro, after, outro])).toEqual([
+      'modified',
+      'removed',
+      'added',
+    ]);
+  });
+
+  it('is the hunk’s kind on a side that holds blocks of more than one kind', () => {
+    // A paragraph reworded and another added under it: amber and green in the note.
+    const [hunk] = computeNoteDiff(
+      [intro, middle],
+      [intro, unit(`${middle.text} Mostly.`), outro]
+    ).hunks;
+
+    expect(hunk.ops.map((op) => op.type)).toEqual(['modified', 'added']);
+    expect(hunkSideKind(hunk, 'current')).toBe('modified');
+    expect(hunkSideKind(hunk, 'previous')).toBe('modified');
   });
 });
 

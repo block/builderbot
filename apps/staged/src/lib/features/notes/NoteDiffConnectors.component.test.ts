@@ -7,6 +7,7 @@ import {
   CONNECTOR_WIDTH,
   layoutNoteDiffConnectors,
 } from './noteDiffConnectors';
+import { hunkBlock, hunkGapOffset } from './noteDiffScroll';
 import { NoteDiffState } from './noteDiffState.svelte';
 import { extractNoteDiffUnits, measureNoteDiffUnits } from './noteDiffUnits';
 import { renderNoteMarkdown } from './noteMarkdown';
@@ -54,11 +55,16 @@ function version(markdown: string) {
   return { units, boxes: measureNoteDiffUnits(units, scroller) };
 }
 
-function render({ height = VIEWPORT, measured = true } = {}) {
-  const current = version(CURRENT_NOTE);
-  const previous = version(PREVIOUS_NOTE);
+function render({
+  height = VIEWPORT,
+  measured = true,
+  previousNote = PREVIOUS_NOTE,
+  currentNote = CURRENT_NOTE,
+} = {}) {
+  const current = version(currentNote);
+  const previous = version(previousNote);
   const noteDiff = new NoteDiffState();
-  noteDiff.compare(renderNoteMarkdown(PREVIOUS_NOTE), current.units);
+  noteDiff.compare(renderNoteMarkdown(previousNote), current.units);
   noteDiff.setBoxes('current', current.boxes);
   if (measured) noteDiff.setBoxes('previous', previous.boxes);
 
@@ -120,11 +126,83 @@ describe('NoteDiffConnectors', () => {
     );
   });
 
-  it('starts at the previous version’s markers and is as wide as the gutter', () => {
+  it('starts where the previous version’s rectangles stop and is as wide as the gutter', () => {
     render();
 
     expect(svg()!.style.left).toBe(`calc(100% - ${CONNECTOR_PREVIOUS_REACH}px)`);
     expect(svg()!.style.width).toBe(`${CONNECTOR_WIDTH}px`);
+  });
+
+  it('ends each band on the rectangle painted behind its change in each pane', () => {
+    const { noteDiff } = render({ height: 7 * BLOCK_HEIGHT });
+
+    for (const hunk of noteDiff.hunks) {
+      const el = bands().find((g) => g.dataset.hunkId === hunk.id)!;
+      const d = fill(el).getAttribute('d')!;
+      // Where the outline touches each side of the gutter.
+      const ends = [...d.matchAll(/[MCL]([^MCLZ]*)/g)].map(([, args]) => {
+        const n = args.match(/-?\d+(?:\.\d+)?/g)!.map(Number);
+        return n.slice(-2);
+      });
+      const at = (x: number) => ends.filter(([ex]) => ex === x).map(([, y]) => y);
+      for (const [side, x] of [
+        ['previous', 0],
+        ['current', CONNECTOR_WIDTH],
+      ] as const) {
+        const block = hunkBlock(hunk, side, noteDiff.boxes[side]);
+        const expected = block
+          ? [block.top, block.top + block.height]
+          : [hunkGapOffset(hunk, side, noteDiff.boxes[side])!];
+        expect([hunk.kind, side, Math.min(...at(x)), Math.max(...at(x))]).toEqual([
+          hunk.kind,
+          side,
+          Math.min(...expected),
+          Math.max(...expected),
+        ]);
+      }
+    }
+  });
+
+  it('names the kind of the change’s blocks at each end, and shades between two kinds', () => {
+    render({ height: 7 * BLOCK_HEIGHT });
+
+    // One kind at both ends: one colour, from the stylesheet.
+    expect(bands().map((el) => [el.dataset.before, el.dataset.after])).toEqual(
+      HUNK_KINDS.map((kind) => [kind, kind])
+    );
+    expect(document.querySelectorAll('.note-diff-connectors linearGradient')).toHaveLength(0);
+    expect(bands().map((el) => fill(el).style.fill)).toEqual(['', '', '']);
+  });
+
+  it('shades the band of a block replaced outright from its removal to its addition', () => {
+    render({
+      height: 7 * BLOCK_HEIGHT,
+      previousNote:
+        '# Plan\n\nLogs are kept for a week and then deleted by a nightly job.\n\nThe end.',
+      currentNote:
+        '# Plan\n\nNobody has asked for exports since the spring release went out.\n\nThe end.',
+    });
+
+    const [el] = bands();
+    // One change, amber as a whole: red where it was, green where it is.
+    expect([el.dataset.kind, el.dataset.before, el.dataset.after]).toEqual([
+      'modified',
+      'removed',
+      'added',
+    ]);
+    const gradient = el.querySelector('linearGradient')!;
+    expect(gradient.getAttribute('gradientUnits')).toBe('userSpaceOnUse');
+    expect([gradient.getAttribute('x1'), gradient.getAttribute('x2')]).toEqual([
+      '0',
+      `${CONNECTOR_WIDTH}`,
+    ]);
+    expect(
+      [...gradient.querySelectorAll('stop')].map((stop) => stop.getAttribute('class'))
+    ).toEqual([
+      expect.stringContaining('connector-stop-before'),
+      expect.stringContaining('connector-stop-after'),
+    ]);
+    expect(fill(el).style.fill).toContain(`#${gradient.id}`);
   });
 
   it('joins the removed paragraph in the previous version to the gap it left in the note', () => {
@@ -134,9 +212,9 @@ describe('NoteDiffConnectors', () => {
     // a point between the note's second and third blocks on the right.
     const d = fill(band('removed')).getAttribute('d')!;
     const numbers = d.match(/-?\d+(?:\.\d+)?/g)!.map(Number);
-    expect(numbers.slice(0, 2)).toEqual([0, 2 * BLOCK_HEIGHT + 0.5]);
+    expect(numbers.slice(0, 2)).toEqual([0, 2 * BLOCK_HEIGHT]);
     expect(numbers.slice(6, 8)).toEqual([CONNECTOR_WIDTH, 2 * BLOCK_HEIGHT]);
-    expect(numbers.slice(-2)).toEqual([0, 3 * BLOCK_HEIGHT - 0.5]);
+    expect(numbers.slice(-2)).toEqual([0, 3 * BLOCK_HEIGHT]);
     expect(d).not.toContain('L');
   });
 

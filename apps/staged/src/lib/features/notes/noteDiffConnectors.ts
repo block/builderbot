@@ -8,11 +8,14 @@
  * a band comes from its `connectorGeometry.ts`, which its canvas renderer
  * draws from too. What is worked out here is where a band meets each pane.
  * The viewer counts that in lines of one height; a note's blocks are
- * measured (noteDiffUnits.ts), so a band's edge runs from the top of the
- * change's first block on a side to the bottom of its last. A side with no
- * block of the change (in the note, text the revision removed; in the
- * previous version, text it added) is a point at the line drawn across that
- * gap (`hunkGapOffset`), and the band tapers to it.
+ * measured (noteDiffUnits.ts), so a band's end is the edge of the rectangle
+ * painted behind the change in that pane (`hunkBlock`): from the top of the
+ * change's first block there to the bottom of its last. The rectangle runs
+ * to the gutter and the band starts where it stops, so the two are one
+ * shape. A side with no block of the change (in the note, text the revision
+ * removed; in the previous version, text it added) is a point at the line
+ * drawn across that gap (`hunkGapOffset`), which runs to the gutter too, and
+ * the band tapers to its end.
  *
  * The panes scroll separately, so a band is placed from both scroll offsets
  * and moves whenever either does. Its coordinates are the gutter's, whose
@@ -31,32 +34,38 @@ import {
   type ConnectorEdges,
 } from '@builderbot/diff-viewer/utils';
 
-import type { NoteDiffHunk, NoteDiffHunkKind, NoteDiffSide } from './noteDiff';
-import { hunkExtent, hunkGapOffset, type NoteDiffUnitBox } from './noteDiffScroll';
+import {
+  hunkSideKind,
+  type NoteDiffBlockKind,
+  type NoteDiffHunk,
+  type NoteDiffHunkKind,
+  type NoteDiffSide,
+} from './noteDiff';
+import { hunkBlockExtent, hunkGapOffset, type NoteDiffUnitBox } from './noteDiffScroll';
 
 /**
- * How far the gutter reaches into the previous version's pane: to the right
- * edge of that pane's markers (NoteDiffMarkers.svelte stands them 8px from
- * the scroll area's edge), which a band starts from.
+ * How far the gutter reaches into the previous version's pane: half of that
+ * pane's right padding (24px). The rectangles painted behind that version's
+ * changes stop there (NoteDiffBlocks.svelte), and a band starts from them.
  */
-export const CONNECTOR_PREVIOUS_REACH = 8;
+export const CONNECTOR_PREVIOUS_REACH = 12;
 
 /**
- * How far the gutter reaches into the note's pane: across its left padding
- * (24px) to the tint of a changed block, which is carried 3px past the text
- * (noteDiffStyles.css), where a band lands.
+ * How far the gutter reaches into the note's pane: half of its left padding
+ * (24px), where the rectangles painted behind the note's changes start and
+ * a band lands.
  */
-export const CONNECTOR_CURRENT_REACH = 21;
+export const CONNECTOR_CURRENT_REACH = 12;
 
 /** The gutter's width. */
 export const CONNECTOR_WIDTH = CONNECTOR_PREVIOUS_REACH + CONNECTOR_CURRENT_REACH;
 
 /**
- * How far a band's edge is drawn inside its blocks' edge, so that the 1px
- * line along it lies within the change, as the viewer's does within its
- * lines.
+ * How far inside a band's edge the line along it is drawn, so that the 1px
+ * line lies within the change, as the viewer's does within its lines, and
+ * runs on from the 1px line along the edge of the rectangle either side.
  */
-const EDGE_INSET = 0.5;
+const LINE_INSET = 0.5;
 
 /** The gutter as it stands: how far each pane is scrolled, and its size. */
 export interface NoteDiffConnectorViewport {
@@ -70,7 +79,17 @@ export interface NoteDiffConnectorViewport {
 export interface NoteDiffConnector {
   hunkId: string;
   kind: NoteDiffHunkKind;
-  /** Where the band meets each pane, in the gutter's coordinates. */
+  /**
+   * The kind of the change's blocks at each end, which is the colour the
+   * band has there (`hunkSideKind`). They differ where a revision replaced
+   * text outright: removed on the left, added on the right.
+   */
+  before: NoteDiffBlockKind;
+  after: NoteDiffBlockKind;
+  /**
+   * Where the band meets each pane, in the gutter's coordinates: the top
+   * and the bottom of the change's rectangle in each.
+   */
   edges: ConnectorEdges;
   /** SVG path data for the band's fill, and for the lines along its top and bottom. */
   fill: string;
@@ -78,9 +97,10 @@ export interface NoteDiffConnector {
 }
 
 /**
- * Where a band meets one side, as offsets in that pane's content: the
- * extent of the hunk's blocks there, or the one point of its gap line.
- * `null` when the side has nothing measured to place it by.
+ * Where a band meets one side, as offsets in that pane's content: the top
+ * and the bottom of the rectangle painted behind the hunk's blocks there
+ * (`hunkBlockExtent`), or the one point of its gap line. `null` when the side has
+ * nothing measured to place it by.
  */
 export function hunkConnectorSpan(
   hunk: NoteDiffHunk,
@@ -92,11 +112,23 @@ export function hunkConnectorSpan(
     const gap = hunkGapOffset(hunk, side, boxes);
     return gap === null ? null : { top: gap, bottom: gap };
   }
-  const extent = hunkExtent(hunk, side, boxes);
-  if (!extent) return null;
-  // A block too short to hold the inset twice is a point at its middle.
-  const inset = Math.min(EDGE_INSET, extent.height / 2);
-  return { top: extent.top + inset, bottom: extent.top + extent.height - inset };
+  const extent = hunkBlockExtent(hunk, side, boxes);
+  return extent && { top: extent.top, bottom: extent.top + extent.height };
+}
+
+/**
+ * Where the lines along a band's top and bottom run: half a pixel inside
+ * its edges. A side too short to hold that twice is a point at its middle.
+ */
+export function connectorLineEdges(edges: ConnectorEdges): ConnectorEdges {
+  const beforeInset = Math.min(LINE_INSET, Math.max(0, edges.beforeBottom - edges.beforeTop) / 2);
+  const afterInset = Math.min(LINE_INSET, Math.max(0, edges.afterBottom - edges.afterTop) / 2);
+  return {
+    beforeTop: edges.beforeTop + beforeInset,
+    beforeBottom: edges.beforeBottom - beforeInset,
+    afterTop: edges.afterTop + afterInset,
+    afterBottom: edges.afterBottom - afterInset,
+  };
 }
 
 /**
@@ -167,9 +199,11 @@ export function layoutNoteDiffConnectors(
       {
         hunkId: hunk.id,
         kind: hunk.kind,
+        before: hunkSideKind(hunk, 'previous'),
+        after: hunkSideKind(hunk, 'current'),
         edges,
         fill: connectorFillPathData(edges, width),
-        stroke: connectorStrokePathData(edges, width),
+        stroke: connectorStrokePathData(connectorLineEdges(edges), width),
       },
     ];
   });

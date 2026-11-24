@@ -8,8 +8,12 @@ import {
   NOTE_DIFF_ATTRIBUTE,
   NOTE_DIFF_REMOVED_HIGHLIGHT,
 } from './noteDiffHighlights';
-import { CONNECTOR_WIDTH, layoutNoteDiffConnectors } from './noteDiffConnectors';
-import { GAP_MARKER_HEIGHT } from './noteDiffScroll';
+import {
+  CONNECTOR_PREVIOUS_REACH,
+  CONNECTOR_WIDTH,
+  layoutNoteDiffConnectors,
+} from './noteDiffConnectors';
+import { BLOCK_BLEED } from './noteDiffScroll';
 import { NoteDiffState } from './noteDiffState.svelte';
 import { extractNoteDiffUnits, measureNoteDiffUnits } from './noteDiffUnits';
 import { renderNoteMarkdown } from './noteMarkdown';
@@ -62,12 +66,15 @@ interface RenderOptions {
   /** Where the note is scrolled to when the pane opens. */
   currentScrollTop?: number;
   bottomInset?: number;
+  /** The room between one block and the next, in both versions. */
+  margin?: number;
 }
 
 function render({
   shown = PREVIOUS_NOTE,
   currentScrollTop = 0,
   bottomInset = 0,
+  margin = 0,
 }: RenderOptions = {}) {
   // The note, as the viewer and its change bar leave it: read, compared and measured.
   const currentScrollEl = document.createElement('div');
@@ -76,7 +83,7 @@ function render({
   currentScrollEl.append(currentEl);
   const target = document.createElement('div');
   document.body.append(target, currentScrollEl);
-  layOut(currentEl, currentScrollEl, VIEWPORT);
+  layOut(currentEl, currentScrollEl, VIEWPORT, BLOCK_HEIGHT, margin);
   currentScrollEl.scrollTop = currentScrollTop;
 
   const noteDiff = new NoteDiffState();
@@ -108,7 +115,7 @@ function render({
   // The viewer binds the element its snippet rendered and hands it back.
   const scrollEl = document.querySelector<HTMLElement>('.previous-scroll')!;
   const contentEl = scrollEl.querySelector<HTMLElement>('.markdown-content')!;
-  layOut(contentEl, scrollEl, VIEWPORT);
+  layOut(contentEl, scrollEl, VIEWPORT, BLOCK_HEIGHT, margin);
   props.contentEl = contentEl;
   flushSync();
   return {
@@ -131,7 +138,9 @@ const marked = (el: Element) =>
 const active = (el: Element) =>
   [...el.querySelectorAll(`[${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`)].map((block) => block.textContent);
 const gaps = () => [...document.querySelectorAll<HTMLElement>('.note-diff-gap')];
-const markers = () => [...document.querySelectorAll<HTMLButtonElement>('.note-change-marker')];
+/** The rectangles painted behind this version's changes. */
+const blocks = () => [...document.querySelectorAll<HTMLElement>('.note-diff-block')];
+const block = (kind: string) => blocks().find((el) => el.dataset.kind === kind)!;
 const connectors = () => [...document.querySelectorAll<SVGGElement>('.note-diff-connector')];
 const connector = (kind: string) => connectors().find((el) => el.dataset.kind === kind)!;
 const band = (el: Element) => el.querySelector<SVGPathElement>('.connector-fill')!;
@@ -185,37 +194,75 @@ describe('NotePreviousPane', () => {
     expect(gaps()[0].classList.contains('is-active')).toBe(false);
   });
 
-  it('carries a marker for each change, level with this version’s blocks', () => {
-    const { scrollEl } = render();
+  it('paints one rectangle behind each change, out to the gutter', () => {
+    const { noteDiff, scrollEl, contentEl } = render({ margin: 20 });
 
-    expect(markers().every((el) => el.closest('.previous-scroll') === scrollEl)).toBe(true);
-    expect(markers().map((el) => [el.dataset.kind, el.style.top, el.style.height])).toEqual([
+    // One per change with blocks here, from just above its block to just
+    // below, whichever blocks it holds.
+    expect(blocks().map((el) => [el.dataset.kind, el.style.top, el.style.height])).toEqual([
       // The removed paragraph is a block here, the third.
-      ['removed', `${2 * BLOCK_HEIGHT}px`, `${BLOCK_HEIGHT}px`],
-      ['modified', `${4 * BLOCK_HEIGHT}px`, `${BLOCK_HEIGHT}px`],
-      // The added one is not: a short marker across its line.
-      ['added', `${6 * BLOCK_HEIGHT + 4 - GAP_MARKER_HEIGHT / 2}px`, `${GAP_MARKER_HEIGHT}px`],
+      [
+        'removed',
+        `${2 * (BLOCK_HEIGHT + 20) - BLOCK_BLEED}px`,
+        `${BLOCK_HEIGHT + 2 * BLOCK_BLEED}px`,
+      ],
+      [
+        'modified',
+        `${4 * (BLOCK_HEIGHT + 20) - BLOCK_BLEED}px`,
+        `${BLOCK_HEIGHT + 2 * BLOCK_BLEED}px`,
+      ],
     ]);
-    expect(markers()[0].closest('[role="group"]')!.getAttribute('aria-label')).toBe(
-      'Changes in the previous version'
+    expect(blocks().map((el) => el.dataset.hunkId)).toEqual([
+      noteDiff.hunks[0].id,
+      noteDiff.hunks[1].id,
+    ]);
+    // Behind the version, not in it: the rendered markdown holds what the
+    // note's author wrote and nothing else.
+    const layer = scrollEl.querySelector<HTMLElement>(':scope > .note-diff-blocks')!;
+    expect(blocks().every((el) => el.parentElement!.parentElement === layer)).toBe(true);
+    expect(contentEl.querySelector('.note-diff-block, .note-diff-gap')).toBeNull();
+    expect(layer.getAttribute('aria-hidden')).toBe('true');
+    expect(layer.dataset.side).toBe('previous');
+    // The layer stops where the gutter starts, and the bands go on from it.
+    expect(scrollEl.style.getPropertyValue('--note-diff-blocks-right')).toBe(
+      `${CONNECTOR_PREVIOUS_REACH}px`
     );
-    // A second set of the note's markers: pressed and hovered, not tabbed to.
-    expect(markers().map((el) => el.tabIndex)).toEqual([-1, -1, -1]);
   });
 
-  it('lights a change from its marker here, and reports a press on it', () => {
-    const { noteDiff, contentEl, onSelect } = render();
+  it('has no markers: a change is pointed at and selected from its band or the note', () => {
+    const { noteDiff, scrollEl } = render();
 
-    pointerArrives(markers()[0]);
-    flushSync();
-    expect(active(contentEl)).toEqual(['Logs are kept for a week.']);
+    expect(scrollEl.querySelector('.note-change-bar, .note-change-marker')).toBeNull();
+    expect(document.querySelectorAll('.previous-pane button')).toHaveLength(1);
+    // Every change has something drawn for it here all the same.
+    expect(blocks().length + gaps().length).toBe(noteDiff.hunks.length);
+  });
 
-    markers()[0].dispatchEvent(new MouseEvent('pointerleave'));
-    flushSync();
-    expect(active(contentEl)).toEqual([]);
+  it('ends each band on the rectangle it starts from', () => {
+    const { noteDiff, scrollEl } = render({ margin: 20 });
 
-    markers()[0].click();
-    expect(onSelect).toHaveBeenCalledExactlyOnceWith(noteDiff.hunks[0].id);
+    // The panes show 300px: the removed paragraph, tapering to its gap.
+    const edge = (el: HTMLElement) => parseFloat(el.style.top) - scrollEl.scrollTop;
+    const height = (el: HTMLElement) => parseFloat(el.style.height);
+    let edges = bandEdges(connector('removed'));
+    expect(edges.beforeTop).toBe(edge(block('removed')));
+    expect(edges.beforeBottom).toBe(edge(block('removed')) + height(block('removed')));
+
+    // Scrolled, the band's end moves with the rectangle.
+    scrollTo(scrollEl, 190);
+    edges = bandEdges(connector('removed'));
+    expect(edges.beforeTop).toBe(edge(block('removed')));
+    expect(edges.beforeBottom).toBe(edge(block('removed')) + height(block('removed')));
+    edges = bandEdges(connector('modified'));
+    expect(edges.beforeTop).toBe(edge(block('modified')));
+    expect(edges.beforeBottom).toBe(edge(block('modified')) + height(block('modified')));
+
+    // The added paragraph has no block here: its band ends on the gap line.
+    scrollTo(scrollEl, 420);
+    edges = bandEdges(connector('added'));
+    const gap = parseFloat(gaps()[0].style.top) - scrollEl.scrollTop;
+    expect(gaps()[0].dataset.hunkId).toBe(noteDiff.hunks[2].id);
+    expect([edges.beforeTop, edges.beforeBottom]).toEqual([gap, gap]);
   });
 
   it('lights the change being pointed at, with the words it lost', () => {
@@ -404,8 +451,8 @@ describe('NotePreviousPane', () => {
     // block here, tapering to the gap it left above the note's third.
     expect(connectors().map((el) => el.dataset.hunkId)).toEqual([noteDiff.hunks[0].id]);
     expect(bandEdges(connector('removed'))).toEqual({
-      beforeTop: 2 * BLOCK_HEIGHT + 0.5,
-      beforeBottom: 3 * BLOCK_HEIGHT - 0.5,
+      beforeTop: 2 * BLOCK_HEIGHT,
+      beforeBottom: 3 * BLOCK_HEIGHT,
       afterTop: 2 * BLOCK_HEIGHT,
       afterBottom: 2 * BLOCK_HEIGHT,
     });
@@ -420,18 +467,18 @@ describe('NotePreviousPane', () => {
     // The removal: its paragraph is 250px further up this pane, its gap
     // 150px further up the note.
     expect(bandEdges(connector('removed'))).toEqual({
-      beforeTop: -50 + 0.5,
-      beforeBottom: 50 - 0.5,
+      beforeTop: -50,
+      beforeBottom: 50,
       afterTop: 50,
       afterBottom: 50,
     });
     // The reworded paragraph, the fifth block here and the note's fourth,
     // has come into view level in both.
     expect(bandEdges(connector('modified'))).toEqual({
-      beforeTop: 150.5,
-      beforeBottom: 249.5,
-      afterTop: 150.5,
-      afterBottom: 249.5,
+      beforeTop: 150,
+      beforeBottom: 250,
+      afterTop: 150,
+      afterBottom: 250,
     });
     // What is drawn is the layout for where both panes now are.
     expect(connectors().map((el) => band(el).getAttribute('d'))).toEqual(
@@ -448,15 +495,15 @@ describe('NotePreviousPane', () => {
 
     scrollTo(scrollEl, 100);
     expect(currentScrollEl.scrollTop).toBe(100);
-    expect(bandEdges(connector('removed'))).toMatchObject({ beforeTop: 100.5, afterTop: 100 });
+    expect(bandEdges(connector('removed'))).toMatchObject({ beforeTop: 100, afterTop: 100 });
 
     // Through the removed paragraph the note waits, and only this end moves:
     // the two sides of the change stand at different heights.
     scrollTo(scrollEl, 150);
     expect(currentScrollEl.scrollTop).toBe(100);
     expect(bandEdges(connector('removed'))).toEqual({
-      beforeTop: 50.5,
-      beforeBottom: 149.5,
+      beforeTop: 50,
+      beforeBottom: 150,
       afterTop: 100,
       afterBottom: 100,
     });
@@ -465,7 +512,7 @@ describe('NotePreviousPane', () => {
   it('draws the bands from where the note is when it opens', () => {
     render({ currentScrollTop: 150 });
 
-    expect(bandEdges(connector('modified'))).toMatchObject({ beforeTop: 150.5, afterTop: 150.5 });
+    expect(bandEdges(connector('modified'))).toMatchObject({ beforeTop: 150, afterTop: 150 });
   });
 
   it('leads a change scrolled out of one pane off the edge, and drops it once out of both', () => {
@@ -484,7 +531,7 @@ describe('NotePreviousPane', () => {
 
   it('moves the bands when a pane is laid out again', () => {
     const { contentEl, scrollEl } = render();
-    expect(bandEdges(connector('removed')).beforeTop).toBe(2 * BLOCK_HEIGHT + 0.5);
+    expect(bandEdges(connector('removed')).beforeTop).toBe(2 * BLOCK_HEIGHT);
 
     // This version's blocks are half as tall: an image above came in smaller.
     layOut(contentEl, scrollEl, VIEWPORT, BLOCK_HEIGHT / 2);
@@ -492,23 +539,28 @@ describe('NotePreviousPane', () => {
     flushSync();
 
     expect(bandEdges(connector('removed'))).toMatchObject({
-      beforeTop: BLOCK_HEIGHT + 0.5,
-      beforeBottom: 1.5 * BLOCK_HEIGHT - 0.5,
+      beforeTop: BLOCK_HEIGHT,
+      beforeBottom: 1.5 * BLOCK_HEIGHT,
       afterTop: 2 * BLOCK_HEIGHT,
     });
   });
 
-  it('holds the version in a box that scrolls sideways, with the markers and gap lines beside it', () => {
+  it('holds the version in a box that scrolls sideways, with the rectangles and gap lines outside it', () => {
     const { scrollEl, contentEl } = render();
 
     const box = scrollEl.querySelector<HTMLElement>(':scope > .previous-content')!;
     expect(box.contains(contentEl)).toBe(true);
-    // What marks the changes is placed in the scroll area, from its right
-    // edge: it is not in the box, and stays put when the version is scrolled
-    // sideways.
-    expect(box.querySelector('.note-change-bar, .note-diff-gap')).toBeNull();
-    expect(scrollEl.querySelectorAll(':scope > .note-change-bar')).toHaveLength(1);
-    expect(scrollEl.querySelectorAll(':scope > .note-diff-gap')).toHaveLength(1);
+    // What marks the changes is placed in the scroll area, across its
+    // width: it is not in the box, and stays put when the version is
+    // scrolled sideways.
+    expect(box.querySelector('.note-diff-blocks, .note-diff-block, .note-diff-gap')).toBeNull();
+    expect(scrollEl.querySelectorAll(':scope > .note-diff-blocks')).toHaveLength(1);
+    expect(
+      scrollEl.querySelectorAll(':scope > .note-diff-blocks > * > .note-diff-gap')
+    ).toHaveLength(1);
+    expect(
+      scrollEl.querySelectorAll(':scope > .note-diff-blocks > * > .note-diff-block')
+    ).toHaveLength(2);
 
     // jsdom lays nothing out, so the rules are read. The scroll area keeps
     // its scrollbar on the left by being laid out right to left, which puts
@@ -526,18 +578,6 @@ describe('NotePreviousPane', () => {
     expect(rule('.previous-scroll')).toMatch(/overflow-x:\s*hidden/);
     expect(rule('.previous-scroll > :global(*)')).toMatch(/direction:\s*ltr/);
     expect(rule('.previous-content')).toMatch(/overflow-x:\s*auto/);
-  });
-
-  it('lets go of a change hovered at its marker here when the pane closes', () => {
-    const { noteDiff } = render();
-
-    pointerArrives(markers()[0]);
-    flushSync();
-    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
-    // The pane is taken down under the pointer: its marker is never left.
-    unmount(component!);
-    component = null;
-    expect(noteDiff.hoveredHunkId).toBeNull();
   });
 
   it('lets go of a change hovered at its band when the pane closes', () => {
@@ -559,12 +599,13 @@ describe('NotePreviousPane', () => {
     expect(noteDiff.pointedHunkId).toBe(noteDiff.hunks[0].id);
     expect(active(contentEl)).toEqual(['Logs are kept for a week.']);
     expect(connector('removed').classList.contains('is-pointed')).toBe(true);
-    expect(markers()[0].classList.contains('is-pointed')).toBe(true);
+    expect(block('removed').classList.contains('is-active')).toBe(true);
 
     band(connector('removed')).dispatchEvent(new MouseEvent('pointerleave'));
     flushSync();
     expect(active(contentEl)).toEqual([]);
     expect(connector('removed').classList.contains('is-pointed')).toBe(false);
+    expect(block('removed').classList.contains('is-active')).toBe(false);
 
     band(connector('removed')).dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(noteDiff.hunks[0].id);

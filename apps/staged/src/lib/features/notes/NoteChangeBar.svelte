@@ -1,12 +1,16 @@
 <!--
   NoteChangeBar.svelte — what a note's latest revision changed, as markers
-  beside the note.
+  beside the note and a rectangle behind each change.
 
   One marker per hunk of the diff against the previous version (noteDiff.ts),
   each level with its change and as tall as it, in the note's right padding
-  (NoteDiffMarkers.svelte draws them). Mounted inside the element that
-  scrolls the note, which must be positioned: the markers are part of what
-  it scrolls, and move with the text.
+  (NoteDiffMarkers.svelte draws them). The change being pointed at has a
+  rectangle behind its text, which ends at its marker, or a line where it
+  is text the revision removed (NoteDiffBlocks.svelte); with `showAll`,
+  beside the previous version, every change has. Mounted inside the element
+  that scrolls the note, which must be positioned and a stacking context:
+  the markers and the rectangles are part of what it scrolls, and move with
+  the text.
 
   Hovering a marker, or moving keyboard focus to it, lights its change in
   the note; pressing it selects the change (`onSelect`), which scrolls the
@@ -17,9 +21,9 @@
   what it was rendered from) it reads the note's blocks, has them compared
   with the previous version's (`previousHtml`), and marks the changed ones
   (noteDiffHighlights.ts); it measures them, again whenever the note's
-  layout changes, and the markers follow the measurements. With no previous
-  version, or one that reads the same, there are no markers and nothing is
-  rendered.
+  layout changes, and the markers and rectangles follow the measurements.
+  With no previous version, or one that reads the same, there are no markers
+  and nothing is rendered.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -35,6 +39,7 @@
     measureNoteDiffUnits,
     type NoteDiffDomUnit,
   } from './noteDiffUnits';
+  import NoteDiffBlocks from './NoteDiffBlocks.svelte';
   import NoteDiffMarkers from './NoteDiffMarkers.svelte';
 
   interface Props {
@@ -47,14 +52,28 @@
     renderKey: unknown;
     /** The previous version, rendered as the note is; `null` when there is none (yet). */
     previousHtml: string | null;
+    /** Paint every change, not only the one being pointed at: the previous version is beside the note. */
+    showAll?: boolean;
     /** A marker was pressed. */
     onSelect: (hunkId: string) => void;
   }
 
-  let { noteDiff, contentEl, scrollEl, renderKey, previousHtml, onSelect }: Props = $props();
+  let {
+    noteDiff,
+    contentEl,
+    scrollEl,
+    renderKey,
+    previousHtml,
+    showAll = false,
+    onSelect,
+  }: Props = $props();
 
   /** The note's blocks as last read. */
   let units = $state.raw<NoteDiffDomUnit[]>([]);
+  /** The width a scrollbar takes from the right of the scroll area's content, if one does. */
+  let scrollbarWidth = $state(0);
+  /** How far the scroll area scrolls sideways, for text that runs past the right of its column. */
+  let overflowX = $state(0);
 
   // Read the note's blocks, compare, and mark the changed ones. The markup
   // is rebuilt on every render, so its marks go with it.
@@ -100,11 +119,21 @@
   }
 
   // Measure the blocks, now and whenever the note is laid out again: an
-  // image loading, the dialog resized, text wrapped again. The markers and
-  // the gap lines are placed from these. Opening the previous version
-  // changes how far the note scrolls without resizing anything observed, so
-  // the selected change is put back on its line then too. A diff with no
-  // changes has nothing to place.
+  // image loading, the dialog resized, text wrapped again. The markers, the
+  // rectangles behind the changes and the gap lines are placed from these.
+  // Opening the previous version changes how far the note scrolls without
+  // resizing anything observed, so the selected change is put back on its
+  // line then too. A diff with no changes has nothing to place.
+  //
+  // Two more things are read with them. What is placed from the content's
+  // right edge is moved in by a scrollbar there that takes room, so its
+  // width is taken off again. And a table or a string that cannot wrap runs
+  // past the text's column, which the scroll area then scrolls sideways:
+  // the rectangles and the markers are told how far, to hold still while
+  // it does. That is asked of the note's own element, which they are not
+  // in, so their width is not counted in it; the scroll area scrolls until
+  // the text's right end is at its edge, with none of its padding after
+  // it.
   $effect(() => {
     const el = contentEl;
     const scroller = scrollEl;
@@ -114,6 +143,14 @@
 
     const measure = () => {
       noteDiff.setBoxes('current', measureNoteDiffUnits(current, scroller));
+      const style = getComputedStyle(scroller);
+      const borders =
+        (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.borderRightWidth) || 0);
+      scrollbarWidth = Math.max(0, scroller.offsetWidth - scroller.clientWidth - borders);
+      overflowX = Math.max(
+        0,
+        el.scrollWidth - el.clientWidth - (parseFloat(style.paddingRight) || 0)
+      );
       if (noteDiff.following) alignActive();
     };
     untrack(measure);
@@ -134,4 +171,11 @@
   });
 </script>
 
-<NoteDiffMarkers {noteDiff} side="current" label="Changes since the previous version" {onSelect} />
+<NoteDiffBlocks {noteDiff} side="current" {showAll} {scrollbarWidth} {overflowX} />
+<NoteDiffMarkers
+  {noteDiff}
+  label="Changes since the previous version"
+  {scrollbarWidth}
+  {overflowX}
+  {onSelect}
+/>

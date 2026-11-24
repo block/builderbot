@@ -18,6 +18,14 @@
   line. They are a second set of the changes the note's markers list, so
   they take presses (`onSelect`) and hovers but no Tab stop.
 
+  Each change is joined to its place in the note by a band across the gutter
+  between the panes (NoteDiffConnectors.svelte), from this pane's markers to
+  the note's blocks. This pane knows how far both panes are scrolled, since
+  it keeps them in step, so the bands are placed from here (`scrollTops`).
+  Nothing stands between the markers and the bands: this pane's scrollbar is
+  on its outer edge, the left, as the code diff viewer's before pane has it,
+  and the line dividing the panes stops at their headers.
+
   The pane scrolls with the note (`currentScrollEl`). Each maps the other's
   place through the blocks both versions hold (noteDiffScroll.ts), so a
   shared block on the reference line in one is on it in the other. The pane
@@ -56,6 +64,7 @@
     measureNoteDiffUnits,
     type NoteDiffDomUnit,
   } from './noteDiffUnits';
+  import NoteDiffConnectors from './NoteDiffConnectors.svelte';
   import NoteDiffGaps from './NoteDiffGaps.svelte';
   import NoteDiffMarkers from './NoteDiffMarkers.svelte';
   import NoteDiffPaneHeader from './NoteDiffPaneHeader.svelte';
@@ -101,6 +110,12 @@
   let paneHeight = $state(0);
   /** The version's blocks as last read; none when they are not the ones the diff compared. */
   let units = $state.raw<NoteDiffDomUnit[]>([]);
+  /**
+   * How far each pane is scrolled, read once this pane has answered a
+   * scroll: the connectors are drawn from the two together, so one read
+   * before the other pane was moved would bend them for a frame.
+   */
+  let scrollTops = $state.raw<Record<NoteDiffSide, number>>({ previous: 0, current: 0 });
 
   $effect(() => {
     const el = contentEl;
@@ -183,13 +198,21 @@
       const target = panes[from === 'current' ? 'previous' : 'current'];
       scrollPane(target, syncedScrollTop(map, from, source, target));
     };
+    const readScrollTops = () => {
+      const now = { previous: previous.scrollTop, current: current.scrollTop };
+      if (now.previous !== scrollTops.previous || now.current !== scrollTops.current) {
+        scrollTops = now;
+      }
+    };
     const scrolled = (side: NoteDiffSide) => () => {
       const pane = panes[side];
       const echo = echoes.get(pane);
       echoes.delete(pane);
-      if (echo !== undefined && Math.abs(pane.scrollTop - echo) < 1) return;
-      leader = side;
-      follow(side);
+      if (echo === undefined || Math.abs(pane.scrollTop - echo) >= 1) {
+        leader = side;
+        follow(side);
+      }
+      readScrollTops();
     };
 
     // The panes were laid out again, this one has just opened, or a change
@@ -205,6 +228,7 @@
         scrollPane(previous, scrollTopForOffset(lead.offset, previous));
       }
       follow(leader);
+      readScrollTops();
     });
     const onCurrent = scrolled('current');
     const onPrevious = scrolled('previous');
@@ -219,6 +243,15 @@
   $effect(() => {
     if (scrollEl) return noteDiff.watchReaderScroll(scrollEl);
   });
+
+  /**
+   * The wheel was turned over a connector, which is in neither scroll area.
+   * The note takes it, and this pane follows as it does any scroll of the
+   * note's.
+   */
+  function scrollFromGutter(deltaY: number) {
+    if (currentScrollEl) currentScrollEl.scrollTop += deltaY;
+  }
 </script>
 
 <section class="previous-pane" aria-label="Previous version">
@@ -228,22 +261,31 @@
     closeLabel="Close previous version"
     {onClose}
   />
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="previous-scroll note-diff-all"
-    bind:this={scrollEl}
-    onclick={onContentClick}
-    onkeydown={onContentKeydown}
-  >
-    {@render content()}
-    <NoteDiffGaps {noteDiff} side="previous" showAll />
-    <NoteDiffMarkers
+  <div class="previous-body">
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="previous-scroll note-diff-all"
+      bind:this={scrollEl}
+      onclick={onContentClick}
+      onkeydown={onContentKeydown}
+    >
+      {@render content()}
+      <NoteDiffGaps {noteDiff} side="previous" showAll />
+      <NoteDiffMarkers
+        {noteDiff}
+        side="previous"
+        label="Changes in the previous version"
+        tabbable={false}
+        {onSelect}
+      />
+    </div>
+    <NoteDiffConnectors
       {noteDiff}
-      side="previous"
-      label="Changes in the previous version"
-      tabbable={false}
+      {scrollTops}
+      height={paneHeight}
       {onSelect}
+      onWheel={scrollFromGutter}
     />
   </div>
   {#if bottomInset > 0}
@@ -258,13 +300,34 @@
     min-width: 0;
     min-height: 0;
     flex-direction: column;
+  }
+
+  /* The line between the panes runs beside the header and beside what stands
+     under the scroll area. Between them is the gutter the connectors cross,
+     which it would cut in two. */
+  .previous-pane > :global(.note-diff-pane-header),
+  .previous-bottom {
     border-right: 1px solid var(--border-subtle);
+  }
+
+  /* The scroll area's box, positioned for the connectors, which lie over its
+     right edge and are as tall as it. */
+  .previous-body {
+    position: relative;
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
   }
 
   /* The note's scroll area over again (`.modal-content` in NoteModal),
      positioned for the gap lines and the markers. The room under the text lets the last
      change reach the reference line, a third of the way down; the note's
-     pane has the same. */
+     pane has the same.
+
+     Its scrollbar is on the left, the pane's outer edge, so that the markers
+     at its right edge meet the connectors: a scroll area laid out right to
+     left has it there. What it holds reads left to right as ever. */
   .previous-scroll {
     position: relative;
     flex: 1;
@@ -272,6 +335,11 @@
     overflow-y: auto;
     padding: 24px 24px 60vh;
     background: var(--bg-primary);
+    direction: rtl;
+  }
+
+  .previous-scroll > :global(*) {
+    direction: ltr;
   }
 
   .previous-scroll::-webkit-scrollbar {

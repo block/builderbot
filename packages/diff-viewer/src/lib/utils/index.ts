@@ -68,6 +68,18 @@ export {
 } from './highlighter';
 
 export { ConnectorRendererCanvas, type CommentHighlightInfo } from './connectorRendererCanvas';
+export {
+  BEZIER_CP_FRACTION,
+  connectorFillPathData,
+  connectorShape,
+  connectorStrokePathData,
+  SvgPathData,
+  traceConnectorFill,
+  traceConnectorStroke,
+  type ConnectorEdges,
+  type ConnectorPathSink,
+  type ConnectorShape,
+} from './connectorGeometry';
 export { setupDiffKeyboardNav } from './diffKeyboard';
 export { setupMarkdownScrollSync } from './markdownScrollSync';
 export { sanitize } from './sanitize';

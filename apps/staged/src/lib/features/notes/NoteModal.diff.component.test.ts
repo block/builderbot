@@ -84,6 +84,7 @@ import {
   CURRENT_NOTE,
   fakeResizeObserver,
   HUNK_KINDS,
+  layOut,
   PREVIOUS_NOTE,
 } from './testStubs/noteDiffFixtures';
 import { runSearchShortcut } from '../keyboard/searchTargets';
@@ -107,6 +108,8 @@ const versionOf = (markdown: string, id = 'version-1'): NoteVersion => ({
 });
 
 let modal: ReturnType<typeof mount> | null = null;
+/** Report a new layout to everything observing one. */
+let resize: () => void;
 
 /** The dialog opens and closes over timers and frames; let them run, then render. */
 async function settle() {
@@ -150,6 +153,7 @@ const marker = (kind: string) => markers().find((el) => el.dataset.kind === kind
 const note = () => notePane().querySelector<HTMLElement>('.markdown-content')!;
 const lit = (el: Element) =>
   [...el.querySelectorAll(`[${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`)].map((block) => block.textContent);
+const connectors = () => [...document.querySelectorAll<SVGGElement>('.note-diff-connector')];
 const button = (label: string) =>
   document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
 
@@ -178,7 +182,9 @@ beforeEach(() => {
   document.body.innerHTML = '';
   screen.wide = true;
   viewport.canSplit = true;
-  vi.stubGlobal('ResizeObserver', fakeResizeObserver().FakeResizeObserver);
+  const observer = fakeResizeObserver();
+  vi.stubGlobal('ResizeObserver', observer.FakeResizeObserver);
+  resize = observer.resize;
   commands.getNotePreviousVersion.mockReset().mockResolvedValue(versionOf(PREVIOUS_NOTE));
   commands.getMediaDimensions.mockReset().mockResolvedValue({});
   // `computeLineDiff` reports each run.
@@ -399,6 +405,54 @@ describe('NoteModal previous version', () => {
     expect(previousPane()).not.toBeNull();
   });
 
+  it('joins each change across the gutter between the two versions, and only there', async () => {
+    await open();
+    // One pane: nothing to join.
+    expect(connectors()).toEqual([]);
+
+    await press(marker('modified'));
+    // jsdom lays nothing out: give both versions their blocks, in panes
+    // that show all of them, as a layout would report.
+    const pane = previousPane()!;
+    layOut(note(), notePane().querySelector<HTMLElement>('.modal-content')!, 700);
+    layOut(
+      pane.querySelector('.markdown-content')!,
+      pane.querySelector<HTMLElement>('.previous-scroll')!,
+      700
+    );
+    resize();
+    await settle();
+
+    // One band per change, between the panes: in the previous version's
+    // pane but outside its scroll area, since it follows both.
+    expect(connectors().map((el) => el.dataset.kind)).toEqual(HUNK_KINDS);
+    expect(connectors().every((el) => pane.contains(el))).toBe(true);
+    expect(connectors().every((el) => el.closest('.previous-scroll') === null)).toBe(true);
+    // The selected change's band is the one lit.
+    expect(
+      connectors()
+        .filter((el) => el.classList.contains('is-pointed'))
+        .map((el) => el.dataset.kind)
+    ).toEqual(['modified']);
+
+    // A band is part of its change: pressing it selects the change.
+    connectors()[0]
+      .querySelector('.connector-fill')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await settle();
+    expect(marker('removed').getAttribute('aria-pressed')).toBe('true');
+    expect(lit(pane)).toEqual(['Logs are kept for a week.']);
+    // The markers are still the only way in by keyboard, and the only names.
+    expect(pane.querySelectorAll('.note-diff-connectors [tabindex]')).toHaveLength(0);
+    expect(document.querySelector('.note-diff-connectors')!.getAttribute('aria-hidden')).toBe(
+      'true'
+    );
+
+    await pressEscape();
+    expect(previousPane()).toBeNull();
+    expect(connectors()).toEqual([]);
+  });
+
   it('closes the previous version when the chat opens', async () => {
     const { onChatOpenChange } = await open();
     await press(marker('modified'));
@@ -528,6 +582,7 @@ describe('NoteModal previous version', () => {
     await press(marker('modified'));
 
     expect(previousPane()).toBeNull();
+    expect(connectors()).toEqual([]);
     expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
     expect(dialog()!.style.width).toBe(`${NOTE_DIALOG_WIDTH}px`);
 

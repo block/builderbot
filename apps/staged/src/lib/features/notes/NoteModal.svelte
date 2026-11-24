@@ -1490,9 +1490,13 @@
 
   /* Beside its previous version the note has room under it, so its last
      change can reach the line the two panes are kept level on, a third of
-     the way down (NotePreviousPane has the same). */
+     the way down (NotePreviousPane has the same). It is not at the dialog's
+     left edge there, so it has no inset to clear on that side: its left
+     padding is the fixed width the diff's connectors cross to reach its
+     blocks (NoteDiffConnectors). */
   .modal-body.split-diff-open .modal-content {
     padding-bottom: 60vh;
+    padding-left: 24px;
   }
 
   .modal-content::-webkit-scrollbar {

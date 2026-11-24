@@ -7,7 +7,9 @@ viewer's (see [Colours](#colours)). A marker stands beside its
 change, as tall as the changed text, and scrolls with the note. Hovering a
 marker highlights that change in the note. Pressing one opens the previous
 version in a pane on the left, with the change lit in both panes and the two
-scrolling together.
+scrolling together. Between the two panes each change's old text is joined to
+its new text by a band, as the two sides of a change are in the code diff
+viewer (see [The connectors](#the-connectors)).
 
 ## What is compared
 
@@ -67,6 +69,76 @@ A marker that scrolls under a pointer at rest is not hovered: only a pointer
 that moved onto it lights the change. Otherwise the change a press scrolled
 into the pointer's place would take the light from the one that was pressed.
 
+## The connectors
+
+While the previous version is open, every change has a band across the gutter
+between the panes, from its blocks in the previous version to its blocks in
+the note (`NoteDiffConnectors.svelte`, mounted by `NotePreviousPane.svelte`).
+There are none in the one-pane view, nor in a window too narrow for two
+panes, where the previous version does not open.
+
+They are the code diff viewer's spine connectors, drawn from the same
+definition. The viewer's outline (a band whose top and bottom edges leave
+each pane level and curve between them, with the control points half-way
+across) was in its canvas renderer; it is now in
+`packages/diff-viewer/src/lib/utils/connectorGeometry.ts`, written against a
+small path interface that a canvas `Path2D` and an SVG path string both
+satisfy. `connectorRendererCanvas.ts` traces it onto its canvas and the note
+diff into SVG paths, so the two cannot drift apart.
+
+The canvas renderer itself is not reused. It places connectors by line number
+times one line height, where a note's blocks have measured tops and heights;
+it has no notion of which connector the pointer is over, and a note's
+connectors are hovered and pressed; it reads one neutral pair of colours from
+the document root, and the band being pointed at takes its kind's colour; and
+a canvas draws nothing in jsdom, where the component tests run. SVG paths are
+hit-tested by the browser and styled from CSS.
+
+- **Edges.** The left edge of a band is the extent of the change's blocks in
+  the previous version, and the right edge their extent in the note, each
+  from the top of the first block to the bottom of the last. A side with no
+  blocks (the note's, for removed text; the previous version's, for added
+  text) is a point at that side's gap line, so the band tapers to it, as the
+  viewer's do for an insertion or a deletion.
+- **Where they come from.** `layoutNoteDiffConnectors` in
+  `noteDiffConnectors.ts` is a pure function of the hunks, the blocks as
+  measured (`noteDiff.boxes`) and how far each pane is scrolled. The
+  measurements are the ones the markers stand on, taken by the same
+  `ResizeObserver`s, so whatever moves a block (an image loading, a resize,
+  text wrapping again, the pane opening) moves its marker and its band
+  together. Nothing is measured for the connectors alone.
+- **Scrolling.** The panes' scroll offsets are read in the scroll handler
+  that already keeps the two panes together, and the bands are laid out
+  again before that frame is painted. A band is drawn from where each pane
+  actually is, so while one pane is held at its end and the other scrolls
+  on, or after scrolling the previous version alone, a change's two sides
+  sit at different heights and its band slants between them.
+- **Clipping.** The drawing is as tall as the panes' scroll areas and starts
+  below their headers. A change scrolled out of one pane leads off the top
+  or bottom edge; one whose two sides are both above the gutter, or both
+  below it, is not drawn.
+- **One gutter.** The previous version's markers are the left end of the
+  bands, and the tint of the note's blocks the right end. A band is 29px
+  wide: it starts at the right edge of the previous version's markers, 8px
+  inside that pane, and crosses 21px of the note's left padding to stop
+  where the note's blocks are tinted, 3px short of the text. The previous
+  version's scrollbar is on its left, the outer edge, as the viewer's old
+  pane has it, so nothing lies between its markers and the bands. The line
+  dividing the panes is drawn beside their headers only. The note's own
+  markers stay in its right margin, where they are in the one-pane view, so
+  opening the previous version moves none of them.
+- **Pointing.** Hovering a band lights its change in both panes, as hovering
+  a marker does, and pressing it selects the change. Only the bands take the
+  pointer; between them a press is the text's. The wheel over a band scrolls
+  the note, and so both panes. As with markers, a band that scrolls under a
+  pointer at rest is not hovered (`noteDiffPointer.ts`).
+- **Keyboard and screen readers.** The bands add nothing to either. The
+  markers name every change and take Tab; the drawing is `aria-hidden` and
+  has no Tab stop.
+
+A band between two sides far apart is steep, and thin where it crosses the
+gutter, as the viewer's are. It is easiest to point at near either end.
+
 ## Colours
 
 A note diff is painted from the code diff viewer's own tokens
@@ -103,6 +175,13 @@ system. A block is to a note what a line is to a file:
   gold meant to be read as text, and beside the amber tint it looks brown.
   The other gap lines are the emphasised tint, and a pointed marker has a
   2px halo of it.
+- A connector at rest is painted as the viewer's are: `--diff-changed-bg`
+  filled, with a 1px `--diff-range-border` line along its top and bottom, in
+  every kind of change. The viewer has no pointed-at connector. The band of
+  the change being pointed at is filled with its kind's `-emphasis` tint and
+  lined in the kind's solid colour, the same pair that lights its blocks and
+  its marker. The viewer's own hover fill, `--bg-hover`, is a neutral and is
+  not used: it would not say which change is lit.
 - The amber is one colour in every theme. `app.css` sets the modified tokens
   and `theme.ts` does not, so they are the same in the light and dark chrome
   and under every diff theme.
@@ -298,6 +377,16 @@ What to expect:
   is, still level. For the removed paragraph the previous version shows it
   lit and the note shows the red line beside it; for the added section it is
   the other way round, with a green line on the left.
+- Between the panes each change has a band from its marker beside the
+  previous version to its blocks in the note: grey with a hairline top and
+  bottom, as in a code diff, and in the change's colour for the one pressed.
+  The band of the removed paragraph narrows to a point at the red line in
+  the note, and the added section's to a point at the green line on the
+  left. Hover a band: that change lights in both panes. Press one: it is
+  selected and scrolled to. Scroll the previous version on its own, or
+  scroll to either end of the note: the bands slant to follow both sides,
+  and run off the top or bottom of the gutter, never over the pane headers.
+  Tab still stops at the note's markers only.
 
 With the find field open (Cmd+F) and focused, what Escape does depends on
 whether anything of the diff is held open. While the previous version is

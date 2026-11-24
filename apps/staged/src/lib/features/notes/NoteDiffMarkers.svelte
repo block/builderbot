@@ -25,6 +25,7 @@
 -->
 <script lang="ts">
   import type { NoteDiffHunk, NoteDiffSide } from './noteDiff';
+  import { RestingPointer } from './noteDiffPointer';
   import { hunkMarkerBox } from './noteDiffScroll';
   import type { NoteDiffState } from './noteDiffState.svelte';
 
@@ -47,10 +48,9 @@
   const KIND_LABELS = { added: 'Added', removed: 'Removed', modified: 'Modified' } as const;
 
   let barEl = $state<HTMLElement>();
-  /** The width the scroll area's scrollbar takes from its content, if it takes any. */
+  /** The width a scrollbar takes from the right of the scroll area's content, if one does. */
   let scrollbarWidth = $state(0);
-  /** Where the pointer last was in the window, as of the event before the one being handled. */
-  let pointerAt: { x: number; y: number } | null = null;
+  const pointer = new RestingPointer();
 
   function markerLabel(hunk: NoteDiffHunk): string {
     const blocks = Math.max(hunk.previousIndices.length, hunk.currentIndices.length);
@@ -66,13 +66,21 @@
   });
 
   // The markers are placed from the content's right edge, which a scrollbar
-  // that takes room moves in: measured, so they keep their place when the
-  // version grows one. The scroll area's content box changes when it does.
+  // there that takes room moves in: measured, so they keep their place when
+  // the version grows one. The scroll area's content box changes when it does.
   $effect(() => {
     const scroller = barEl?.parentElement;
     if (!scroller) return;
     const measure = () => {
       const style = getComputedStyle(scroller);
+      // A scroll area laid out right to left has its scrollbar on the left
+      // (the previous version's pane), where it moves nothing the markers
+      // are placed from. Asked of the style: WebKit leaves a scrollbar there
+      // out of `clientLeft`.
+      if (style.direction === 'rtl') {
+        scrollbarWidth = 0;
+        return;
+      }
       const borders =
         (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.borderRightWidth) || 0);
       scrollbarWidth = Math.max(0, scroller.offsetWidth - scroller.clientWidth - borders);
@@ -84,31 +92,16 @@
     return () => observer.disconnect();
   });
 
-  // Listening on the window in the bubble phase: a marker's own handlers run
-  // first, and so compare an event with where the pointer was before it.
   $effect(() => {
-    if (markers.length === 0) return;
-    const track = (event: PointerEvent) => {
-      pointerAt = { x: event.clientX, y: event.clientY };
-    };
-    window.addEventListener('pointermove', track, { passive: true });
-    window.addEventListener('pointerdown', track, { passive: true });
-    return () => {
-      window.removeEventListener('pointermove', track);
-      window.removeEventListener('pointerdown', track);
-    };
+    if (markers.length > 0) return pointer.watch();
   });
 
   /**
-   * The pointer is over a marker. Only one that moved there counts. When
-   * the text scrolls, the browser reports a move for a pointer at rest, at
-   * the place it already was, to whatever is now under it.
+   * The pointer is over a marker. Only one that moved there counts, not one
+   * at rest that the text scrolled a marker under (noteDiffPointer.ts).
    */
   function pointerOver(event: PointerEvent, hunkId: string) {
-    // A finger has no hover: a tap's would stay lit until the next tap.
-    if (event.pointerType === 'touch') return;
-    if (pointerAt && event.clientX === pointerAt.x && event.clientY === pointerAt.y) return;
-    noteDiff.hover(hunkId);
+    if (pointer.hovers(event)) noteDiff.hover(hunkId);
   }
 
   function unhover(hunkId: string) {

@@ -295,9 +295,10 @@ export class NoteDiffState {
   /**
    * Stop following the selected change once the reader scrolls `scroller`
    * themselves: a wheel, a finger, a key, or a press (the scrollbar's
-   * included). Returns the undo.
+   * included). Also given what scrolls a pane from outside it, the
+   * connectors between the panes. Returns the undo.
    */
-  watchReaderScroll(scroller: HTMLElement): () => void {
+  watchReaderScroll(scroller: Element): () => void {
     const stop = () => {
       this.follows = false;
     };

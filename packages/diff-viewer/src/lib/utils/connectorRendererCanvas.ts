@@ -18,6 +18,7 @@
  */
 
 import type { Alignment, Span, Comment } from '../types';
+import { traceConnectorFill, traceConnectorStroke } from './connectorGeometry';
 
 // ============================================================================
 // Types
@@ -62,9 +63,6 @@ interface CommentHitRegion {
 const COMMENT_WIDTH = 4;
 const COMMENT_GAP = 2;
 const COMMENT_VERTICAL_PADDING = 2;
-
-/** Bezier control point offset as fraction of width */
-const BEZIER_CP_FRACTION = 0.5;
 
 // ============================================================================
 // Helper Functions
@@ -232,7 +230,6 @@ export class ConnectorRendererCanvas {
     height: number
   ): void {
     const ctx = this.ctx;
-    const cpOffset = width * BEZIER_CP_FRACTION;
 
     // Find first potentially visible changed alignment
     const firstVisible = this.findFirstVisibleChangedAlignment(
@@ -277,22 +274,12 @@ export class ConnectorRendererCanvas {
 
       // Build paths
       const isHovered = this.hoveredAlignmentIndex === changedIndex;
-      const fillPath = this.buildConnectorFillPath(
-        beforeTop,
-        beforeBottom,
-        afterTop,
-        afterBottom,
-        width,
-        cpOffset
-      );
-      const strokePath = this.buildConnectorStrokePath(
-        beforeTop,
-        beforeBottom,
-        afterTop,
-        afterBottom,
-        width,
-        cpOffset
-      );
+      // The shape is shared with other connector drawers (connectorGeometry.ts).
+      const edges = { beforeTop, beforeBottom, afterTop, afterBottom };
+      const fillPath = new Path2D();
+      traceConnectorFill(fillPath, edges, width);
+      const strokePath = new Path2D();
+      traceConnectorStroke(strokePath, edges, width);
 
       if (isHovered) {
         hoverFills.push(fillPath);
@@ -326,78 +313,6 @@ export class ConnectorRendererCanvas {
         ctx.stroke(path);
       }
     }
-  }
-
-  /**
-   * Build a Path2D for the connector fill (curved trapezoid).
-   */
-  private buildConnectorFillPath(
-    beforeTop: number,
-    beforeBottom: number,
-    afterTop: number,
-    afterBottom: number,
-    width: number,
-    cpOffset: number
-  ): Path2D {
-    const path = new Path2D();
-    const isInsertion = Math.abs(beforeTop - beforeBottom) < 1;
-    const isDeletion = Math.abs(afterTop - afterBottom) < 1;
-
-    if (isInsertion) {
-      // Point on left, range on right
-      path.moveTo(0, beforeTop);
-      path.bezierCurveTo(cpOffset, beforeTop, width - cpOffset, afterTop, width, afterTop);
-      path.lineTo(width, afterBottom);
-      path.bezierCurveTo(width - cpOffset, afterBottom, cpOffset, beforeTop, 0, beforeTop);
-    } else if (isDeletion) {
-      // Range on left, point on right
-      path.moveTo(0, beforeTop);
-      path.bezierCurveTo(cpOffset, beforeTop, width - cpOffset, afterTop, width, afterTop);
-      path.bezierCurveTo(width - cpOffset, afterTop, cpOffset, beforeBottom, 0, beforeBottom);
-    } else {
-      // Curved trapezoid
-      path.moveTo(0, beforeTop);
-      path.bezierCurveTo(cpOffset, beforeTop, width - cpOffset, afterTop, width, afterTop);
-      path.lineTo(width, afterBottom);
-      path.bezierCurveTo(width - cpOffset, afterBottom, cpOffset, beforeBottom, 0, beforeBottom);
-    }
-
-    path.closePath();
-    return path;
-  }
-
-  /**
-   * Build a Path2D for the connector strokes (top and bottom curves).
-   */
-  private buildConnectorStrokePath(
-    beforeTop: number,
-    beforeBottom: number,
-    afterTop: number,
-    afterBottom: number,
-    width: number,
-    cpOffset: number
-  ): Path2D {
-    const path = new Path2D();
-    const isInsertion = Math.abs(beforeTop - beforeBottom) < 1;
-    const isDeletion = Math.abs(afterTop - afterBottom) < 1;
-
-    // Top stroke
-    path.moveTo(0, beforeTop);
-    path.bezierCurveTo(cpOffset, beforeTop, width - cpOffset, afterTop, width, afterTop);
-
-    // Bottom stroke
-    if (isInsertion) {
-      path.moveTo(width, afterBottom);
-      path.bezierCurveTo(width - cpOffset, afterBottom, cpOffset, beforeTop, 0, beforeTop);
-    } else if (isDeletion) {
-      path.moveTo(width, afterTop);
-      path.bezierCurveTo(width - cpOffset, afterTop, cpOffset, beforeBottom, 0, beforeBottom);
-    } else {
-      path.moveTo(width, afterBottom);
-      path.bezierCurveTo(width - cpOffset, afterBottom, cpOffset, beforeBottom, 0, beforeBottom);
-    }
-
-    return path;
   }
 
   /**

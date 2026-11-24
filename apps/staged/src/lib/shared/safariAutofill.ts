@@ -21,7 +21,11 @@ import type { HTMLInputAttributes } from 'svelte/elements';
  * `name` has no other effect as long as the form is handled in JS and nothing
  * reads its controls by name. The Return key keeps its "return" label.
  *
- * It does not stop the Passwords offer on a `type="password"` input.
+ * It does not stop the Passwords offer on a `type="password"` input: Safari
+ * offers saved passwords there whatever the `name`, and keeps doing so after
+ * the type is switched to `text`. A password field beside a text field still
+ * needs these attributes, though: in the env var row, the name field kept
+ * its "Sign In" sheet until the value field carried them as well.
  */
 export const NO_SAFARI_AUTOFILL = {
   name: 'search',

@@ -26,6 +26,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { Input } from '$lib/components/ui/input';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import { agentEnvVarRowErrors, agentEnvVarRowWarnings, type AgentEnvVar } from './agentEnvVars';
   import { getAgentEnvVars, preferences, setAgentEnvVars } from './preferences.svelte';
 
@@ -116,6 +117,7 @@
             <Input
               id={nameInputId(index)}
               type="text"
+              {...NO_SAFARI_AUTOFILL}
               placeholder="NAME"
               aria-label="Variable name"
               aria-invalid={error !== null}
@@ -131,17 +133,22 @@
             <!-- Masked by default: the usual value is an API key, and the
                  panel is open during screen-shares and recordings. The
                  toggle only changes what the screen shows; the value is
-                 stored and sent as typed. -->
+                 stored and sent as typed.
+
+                 Being a password field, it keeps Safari's Passwords offer
+                 whatever its attributes. It carries NO_SAFARI_AUTOFILL for
+                 the name field's sake, which keeps its Sign In sheet unless
+                 both inputs in the row have it. -->
             <div class="env-var-value-wrap">
               <Input
                 type={isRevealed ? 'text' : 'password'}
+                {...NO_SAFARI_AUTOFILL}
                 placeholder="value"
                 aria-label="Variable value"
                 aria-describedby={describedBy}
                 class="env-var-value h-8 min-w-0 w-full pr-8 font-mono"
                 autocapitalize="off"
                 autocorrect="off"
-                autocomplete="off"
                 spellcheck={false}
                 value={entry.value}
                 oninput={(e) => updateEntry(index, { value: e.currentTarget.value })}

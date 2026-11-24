@@ -75,7 +75,7 @@ async function settle() {
   }
 }
 
-async function submit(name: string): Promise<HTMLElement> {
+async function open(): Promise<HTMLElement> {
   backend.state = tagState();
   await tagsStore.load({ force: true });
   const target = document.createElement('div');
@@ -83,6 +83,11 @@ async function submit(name: string): Promise<HTMLElement> {
   component = mount(NewTagDialog, { target });
   newTagDialog.request(project);
   await settle();
+  return target;
+}
+
+async function submit(name: string): Promise<HTMLElement> {
+  const target = await open();
 
   const input = target.querySelector<HTMLInputElement>('#new-tag-name')!;
   input.value = name;
@@ -131,5 +136,27 @@ describe('NewTagDialog', () => {
     expect(commandsMock.createTag).not.toHaveBeenCalled();
     expect(root.querySelector('[role="alert"]')?.textContent).toBe('Enter a tag name.');
     expect(newTagDialog.open).toBe(true);
+  });
+
+  // Safari offers the contact name on this field unless it matches Safari's
+  // `search` keyword, and that exemption holds only while `autocomplete` is
+  // `off` or absent.
+  it('carries the attributes that stop Safari offering AutoFill', async () => {
+    const root = await open();
+    const input = root.querySelector<HTMLInputElement>('#new-tag-name')!;
+
+    expect(input.getAttribute('name')).toBe('search');
+    expect(input.getAttribute('autocomplete')).toBe('off');
+  });
+
+  it('keeps its typing attributes beside them', async () => {
+    const root = await open();
+    const input = root.querySelector<HTMLInputElement>('#new-tag-name')!;
+
+    expect(input.getAttribute('placeholder')).toBe('e.g. q4-launch');
+    expect(input.getAttribute('autocorrect')).toBe('off');
+    expect(input.getAttribute('autocapitalize')).toBe('off');
+    expect(input.getAttribute('spellcheck')).toBe('false');
+    expect(input.hasAttribute('enterkeyhint')).toBe(false);
   });
 });

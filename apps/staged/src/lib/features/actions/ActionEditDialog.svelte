@@ -32,6 +32,7 @@
   import * as Select from '$lib/components/ui/select';
   import Spinner from '../../shared/Spinner.svelte';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import type { ProjectAction } from '../../api/commands';
   import IconPicker from './IconPicker.svelte';
 
@@ -136,6 +137,7 @@
           />
           <Input
             id={nameId}
+            {...NO_SAFARI_AUTOFILL}
             class="bg-[var(--bg-primary)] dark:bg-[var(--bg-primary)]"
             bind:ref={nameElement}
             bind:value={draft.name}

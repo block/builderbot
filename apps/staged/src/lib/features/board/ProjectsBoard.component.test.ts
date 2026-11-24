@@ -2498,6 +2498,25 @@ describe('ProjectsBoard column drag', () => {
     expect(document.activeElement).toBe(input);
   });
 
+  // Safari offers the contact name on a column's name field, and one tap on
+  // the offer renames the tag. The field is exempt while it matches Safari's
+  // `search` keyword and `autocomplete` is `off` or absent.
+  it('gives a column’s name field the attributes that stop Safari offering AutoFill', async () => {
+    const root = await mountBoard();
+    menuItem(await openColumnMenu(root, 'doing'), 'Rename').click();
+    await settle();
+    const input = column(root, 'doing').querySelector<HTMLInputElement>('.column-name-input')!;
+
+    expect(input.getAttribute('name')).toBe('search');
+    expect(input.getAttribute('autocomplete')).toBe('off');
+    // The spread leaves the rest of the editor as it was.
+    expect(input.getAttribute('type')).toBe('text');
+    expect(input.getAttribute('aria-label')).toBe('Tag name');
+    expect(input.hasAttribute('maxlength')).toBe(true);
+    expect(input.hasAttribute('enterkeyhint')).toBe(false);
+    expect(input.value).toBe('Doing');
+  });
+
   it('refuses a native drag that starts in the handle, which would take the pointer', async () => {
     const root = await mountBoard();
 

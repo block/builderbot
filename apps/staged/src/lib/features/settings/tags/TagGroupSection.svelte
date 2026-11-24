@@ -51,6 +51,7 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { pointerDrag, type PointerDragOptions } from '../../../shared/pointerDrag';
+  import { NO_SAFARI_AUTOFILL } from '../../../shared/safariAutofill';
   import type { Tag, TagGroup } from '../../../types';
   import { MAX_TAG_NAME_CHARS } from '../../tags/tagState';
   import TagList from './TagList.svelte';
@@ -150,6 +151,7 @@
       id={groupNameInputId(group.id)}
       class="group-name"
       type="text"
+      {...NO_SAFARI_AUTOFILL}
       aria-label="Group name"
       maxlength={MAX_TAG_NAME_CHARS}
       bind:value={nameDraft}

@@ -53,6 +53,7 @@
   import { tick } from 'svelte';
   import type { TagGroup } from '../../types';
   import { pointerDrag, type PointerDragOptions } from '../../shared/pointerDrag';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import TagIcon from '../tags/TagIcon.svelte';
   import { tagActions } from '../tags/tagActions.svelte';
   import { MAX_TAG_NAME_CHARS } from '../tags/tagState';
@@ -192,6 +193,7 @@
             bind:this={nameInput}
             class="column-name-input"
             type="text"
+            {...NO_SAFARI_AUTOFILL}
             aria-label="Tag name"
             maxlength={MAX_TAG_NAME_CHARS}
             value={column.tag.name}

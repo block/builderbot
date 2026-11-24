@@ -10,6 +10,7 @@
   import { Label } from '$lib/components/ui/label';
   import Spinner from '../../shared/Spinner.svelte';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
 
   interface Props {
     open: boolean;
@@ -98,10 +99,10 @@
         <Label for={inputId}>Branch name</Label>
         <Input
           id={inputId}
+          {...NO_SAFARI_AUTOFILL}
           bind:ref={inputElement}
           bind:value={draft}
           disabled={renaming}
-          autocomplete="off"
           autocorrect="off"
           autocapitalize="off"
           spellcheck="false"

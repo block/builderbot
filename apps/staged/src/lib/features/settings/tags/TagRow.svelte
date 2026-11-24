@@ -27,6 +27,7 @@
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
+  import { NO_SAFARI_AUTOFILL } from '../../../shared/safariAutofill';
   import type { Tag } from '../../../types';
   import IconPicker from '../../actions/IconPicker.svelte';
   import TagIcon from '../../tags/TagIcon.svelte';
@@ -174,6 +175,7 @@
   <Input
     id={tagNameInputId(tag.id)}
     type="text"
+    {...NO_SAFARI_AUTOFILL}
     placeholder="Tag name"
     aria-label="Tag name"
     class="tag-name-input min-w-0"

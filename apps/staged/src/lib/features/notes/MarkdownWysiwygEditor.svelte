@@ -162,10 +162,14 @@
     overflow: hidden;
   }
 
+  /* A size container: stored media is capped at a share of the scroller's
+     height (`cqh`, see mediaStyles.css). Its height comes from the dialog,
+     never from the document, so the containment changes nothing else. */
   .editor-host {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    container-type: size;
     background: var(--bg-primary);
   }
 

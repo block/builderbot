@@ -13,19 +13,32 @@
   max-width: 100%;
 }
 /*
- * Images get a tight height cap; videos mostly don't.
+ * Images and videos share one height cap: 70% of the height of the note's
+ * scroll area, and never more than 600px.
  *
- * The image cap is bounded in px as well as vh so a portrait screenshot
- * (660x860 logical) never fills the pane's scroll region on a tall window,
- * while landscape captures (<=600 logical px tall) stay at their logical size.
+ * The share keeps some of the note's text in view around a tall or portrait
+ * embed, and follows the area as it shrinks (a smaller window, a bottom bar
+ * or composer taking room). Each host's scroll area is a size container, so
+ * `cqh` measures it; NoteModal's dialog sizes to its content instead, which
+ * size containment would collapse, so it sets `--media-area-height` to the
+ * height its scroll area would have at the dialog's full height
+ * (noteMediaArea.ts). Outside any size container `cqh` reads as the small
+ * viewport height. The 600px ceiling stops a tall window from stretching a
+ * portrait screenshot (660x860 logical) over a whole screen, while landscape
+ * captures (<=600 logical px tall) keep their logical size wherever the area
+ * is tall enough. Nothing is upscaled: the cap is a maximum only.
  *
- * A height cap squeezes portrait recordings into a narrow box, and WebKit's
- * inline controls drop the scrubber and time display as the box narrows (on
- * iOS, down to a lone play button). Full screen is the native control's job,
- * so there is no expand button either.
+ * Full screen (MediaViewerModal, or the video's native control) is a
+ * separate box that this cap does not reach.
  */
+.markdown-content .markdown-media {
+  --media-max-height: min(600px, calc(var(--media-area-height, 100cqh) * 0.7));
+}
+.markdown-content .markdown-media img,
+.markdown-content .markdown-media video {
+  max-height: var(--media-max-height);
+}
 .markdown-content .markdown-media img {
-  max-height: min(60vh, 600px);
   object-fit: contain;
   cursor: zoom-in;
 }
@@ -44,19 +57,44 @@
  * without stored dimensions keep the auto-width replaced-element rules above.
  */
 .markdown-content .markdown-media img[width] {
-  width: min(var(--media-width), calc(min(60vh, 600px) * var(--media-aspect)));
+  width: min(var(--media-width), calc(var(--media-max-height) * var(--media-aspect)));
   height: auto;
 }
 /*
- * Still keep a portrait recording from overflowing a wide desktop pane, where
- * uncapped it would run past the viewport and scroll the controls away. Only
- * when the viewport is tall enough that a 9:16 clip capped at its height stays
- * wide enough (~320px) for full controls, so landscape phones are left alone.
+ * A video has no stored size, so the auto-width `max-height` above narrows it
+ * proportionally. A capped portrait recording would then be a narrow box, and
+ * WebKit's inline controls drop the scrubber and time display as the box
+ * narrows (on iOS, down to a lone play button). So the video's box, not its
+ * picture, stays at least 320px wide, or as wide as the figure's container
+ * if that is narrower. The picture is letterboxed inside with `scale-down`,
+ * which also keeps a clip smaller than that box at its own size rather than
+ * stretching it.
+ *
+ * The floor sits on the figure, whose percentages resolve against its own
+ * container: the note's column, or a list item, blockquote or table cell
+ * that indents it. The video then fills the figure through `min-width:
+ * 100%`. A floor on the video itself can't see that container: a percentage
+ * there is ignored while the fit-content figure sizes itself (the figure
+ * would hug the narrow picture), and `cqw` measures the whole scroll area, so
+ * an indented video would overflow the figure and lose the right end of its
+ * controls to the clip.
+ *
+ * Full screen is uncapped already: the browser's own `:fullscreen` rules
+ * override the sizes above with `!important`. They don't override
+ * `object-fit`, so that goes back to filling the screen here. This only
+ * concerns element full screen: iOS's native player (`webkitEnterFullscreen`)
+ * never matches `:fullscreen` and ignores page CSS, so there is nothing to
+ * fix for it here.
  */
-@media (min-height: 600px) {
-  .markdown-content .markdown-media video {
-    max-height: 100dvh;
-  }
+.markdown-content .markdown-media-video {
+  min-width: min(320px, 100%);
+}
+.markdown-content .markdown-media video {
+  min-width: 100%;
+  object-fit: scale-down;
+}
+.markdown-content .markdown-media video:fullscreen {
+  object-fit: contain;
 }
 .markdown-content .markdown-media figcaption {
   padding: 6px 10px;

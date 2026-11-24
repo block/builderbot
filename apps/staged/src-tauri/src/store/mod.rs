@@ -39,6 +39,7 @@ pub mod repo_badges;
 mod reviews;
 mod session_feed;
 mod session_poll;
+mod session_summary;
 mod session_titles;
 mod sessions;
 mod tag_import;
@@ -55,6 +56,10 @@ mod migration_tests;
 mod note_versions_tests;
 #[cfg(test)]
 mod session_feed_tests;
+#[cfg(test)]
+mod session_feed_writer_tests;
+#[cfg(test)]
+mod session_summary_tests;
 #[cfg(test)]
 mod tags_tests;
 #[cfg(test)]
@@ -73,6 +78,7 @@ pub use project_transfer::{BranchLanding, BranchTransfer, ProjectTransfer};
 pub use repo_badges::{fallback_short_name, next_hue};
 pub use session_feed::{SessionDirty, SessionFeed};
 pub use session_poll::{SessionPoll, SessionPollRequest};
+pub use session_summary::{SessionSummary, SummaryRow, SummaryRowsQuery};
 pub use session_titles::{
     non_empty_acp_title, opens_with_staged_instructions, pending_commit_subject, review_title,
     title_echoes_input,

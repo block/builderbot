@@ -55,6 +55,7 @@ pub mod session_commands;
 pub mod session_completion;
 pub mod session_queue;
 pub mod session_runner;
+pub mod session_stream;
 pub mod shell_env;
 pub mod stagedctl_link;
 pub mod store;
@@ -395,10 +396,12 @@ fn get_store_status(db_state: tauri::State<'_, DbState>) -> Option<StoreIncompat
 fn open_store(
     db_path: &Path,
     tx: tokio::sync::broadcast::Sender<store::StoreChange>,
+    session_feed: Arc<store::SessionFeed>,
 ) -> Result<Store, String> {
     let store = Store::new(db_path)
         .map_err(|e| e.to_string())?
-        .with_change_sender(tx);
+        .with_change_sender(tx)
+        .with_session_feed(session_feed);
     match read_legacy_preferences(&db_path.with_file_name("preferences.json")) {
         Ok(prefs) => {
             let options = store::parse_legacy_status_options(prefs.as_ref());
@@ -442,6 +445,7 @@ fn reset_store(
     db_state: &DbState,
     store_slot: &Mutex<Option<Arc<Store>>>,
     store_change_tx: &tokio::sync::broadcast::Sender<store::StoreChange>,
+    session_feed: &Arc<store::SessionFeed>,
 ) -> Result<Option<Arc<Store>>, String> {
     // This guard is the reset claim. Holding it through file deletion, store
     // creation, and slot replacement makes concurrent confirmations serialize;
@@ -459,7 +463,11 @@ fn reset_store(
 
     store::remove_db_files(&db_state.db_path).map_err(|e| e.to_string())?;
 
-    let store = Arc::new(open_store(&db_state.db_path, store_change_tx.clone())?);
+    let store = Arc::new(open_store(
+        &db_state.db_path,
+        store_change_tx.clone(),
+        Arc::clone(session_feed),
+    )?);
     *store_slot.lock().unwrap() = Some(Arc::clone(&store));
     *needs_reset = None;
     Ok(Some(store))
@@ -489,7 +497,13 @@ async fn confirm_reset_store(
         let store_slot = app_handle.state::<Mutex<Option<Arc<Store>>>>();
         let store_change_tx =
             app_handle.state::<tokio::sync::broadcast::Sender<store::StoreChange>>();
-        if let Some(store) = reset_store(&db_state, &store_slot, &store_change_tx)? {
+        let session_stream = app_handle.state::<Arc<session_stream::SessionStreamHub>>();
+        if let Some(store) = reset_store(
+            &db_state,
+            &store_slot,
+            &store_change_tx,
+            session_stream.feed(),
+        )? {
             start_store_services(
                 store,
                 pr_scheduler,
@@ -2097,6 +2111,15 @@ pub fn run() {
                 tokio::sync::broadcast::channel::<store::StoreChange>(1024);
             store_events::spawn(app.handle().clone(), store_change_rx);
             app.manage(store_change_tx.clone());
+            // Session stream: session writes mark the hub's feed, and the hub
+            // task sends each subscribed window or web client what it asked
+            // for (see `session_stream.rs`). Created unconditionally, like
+            // the change feed, so a replacement store gets the same feed.
+            // The feed records nothing until a client subscribes.
+            let session_stream = Arc::new(session_stream::SessionStreamHub::new(Arc::new(
+                store::SessionFeed::default(),
+            )));
+            session_stream::spawn(app.handle().clone(), Arc::clone(&session_stream));
             // Backend-owned PR-poll scheduler. Managed unconditionally so the
             // interest/hint commands resolve even before the store exists (e.g.
             // during the needs-reset prompt); the tick loop is spawned once the
@@ -2108,8 +2131,12 @@ pub fn run() {
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
-                    let s = open_store(&db_path, store_change_tx.clone())
-                        .map_err(|e| format!("Failed to open store: {e}"))?;
+                    let s = open_store(
+                        &db_path,
+                        store_change_tx.clone(),
+                        Arc::clone(session_stream.feed()),
+                    )
+                    .map_err(|e| format!("Failed to open store: {e}"))?;
                     let store_arc = Arc::new(s);
                     session_runner::recover_stale_queued_session_messages(&store_arc);
                     // Release action-detection windows whose owner process is
@@ -2199,6 +2226,7 @@ pub fn run() {
             app.manage(store_slot);
             app.manage(session_registry);
             app.manage(pr_scheduler);
+            app.manage(session_stream);
             app.manage(window_commands::NewWindowState::new());
             app.manage(window_commands::UpdaterWindowState::default());
             app.manage(project_open::ProjectOpenState::default());
@@ -2364,6 +2392,18 @@ pub fn run() {
                         pr_poll_scheduler::TAURI_CLIENT_PREFIX,
                         window.label()
                     ));
+                // The window's session stream goes with it: its channel has
+                // nowhere to deliver, and its interest would keep the
+                // session feed recording for nobody.
+                app.state::<Arc<session_stream::SessionStreamHub>>()
+                    .disconnect(
+                        &format!(
+                            "{}{}",
+                            pr_poll_scheduler::TAURI_CLIENT_PREFIX,
+                            window.label()
+                        ),
+                        None,
+                    );
                 // Drop any unconsumed navigation seed (window closed pre-init).
                 app.state::<window_commands::NewWindowState>()
                     .discard_seed(window.label());
@@ -2563,6 +2603,9 @@ pub fn run() {
             pr_poll_scheduler::set_branch_pending,
             pr_poll_scheduler::refresh_now,
             pr_poll_scheduler::disconnect_client,
+            // Session stream (pushed session updates)
+            session_stream::commands::set_session_stream_interest,
+            session_stream::commands::check_session_stream,
             // Utilities
             util_commands::open_url,
             util_commands::is_sq_available,
@@ -2726,7 +2769,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    reset_store(&db_state, &store_slot, &store_change_tx)
+                    reset_store(&db_state, &store_slot, &store_change_tx, &Arc::default())
                         .unwrap()
                         .is_some()
                 })
@@ -2771,7 +2814,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _) = tokio::sync::broadcast::channel(4);
 
-        let store = open_store(&dir.path().join("data.db"), tx).unwrap();
+        let store = open_store(&dir.path().join("data.db"), tx, Arc::default()).unwrap();
 
         // The marker is gone, so a second import is a no-op...
         assert_eq!(
@@ -2795,7 +2838,7 @@ mod tests {
 
         // A half-written file: another instance may be saving it right now.
         std::fs::write(&prefs_path, "{\"project-status-options\": [{\"id\": \"cu").unwrap();
-        let store = open_store(&db_path, tx.clone()).unwrap();
+        let store = open_store(&db_path, tx.clone(), Arc::default()).unwrap();
 
         // Nothing was imported and the marker is still there.
         assert!(store.get_tag_state().unwrap().groups.is_empty());
@@ -2807,7 +2850,7 @@ mod tests {
             "{\"project-status-options\": [{\"id\": \"custom\", \"label\": \"Custom\"}]}",
         )
         .unwrap();
-        let store = open_store(&db_path, tx).unwrap();
+        let store = open_store(&db_path, tx, Arc::default()).unwrap();
 
         let state = store.get_tag_state().unwrap();
         assert_eq!(state.groups.len(), 1);
@@ -2835,7 +2878,7 @@ mod tests {
         let store_slot = Mutex::new(None);
         let (store_change_tx, _) = tokio::sync::broadcast::channel(4);
 
-        let error = match reset_store(&db_state, &store_slot, &store_change_tx) {
+        let error = match reset_store(&db_state, &store_slot, &store_change_tx, &Arc::default()) {
             Err(error) => error,
             Ok(_) => panic!("too-new store should not be reset"),
         };

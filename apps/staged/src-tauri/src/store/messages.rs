@@ -12,7 +12,7 @@ const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at
     acp_agent_info, acp_message_id, acp_tool_call_id, acp_tool_kind, acp_tool_status,
     acp_raw_input, acp_raw_output, acp_content, acp_locations, acp_usage,
     acp_session_info, acp_config_options, acp_session_mode_state, acp_origin";
-const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NOT NULL)";
+pub(super) const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NOT NULL)";
 /// Assistant replies the chat shows (empty ACP rows never render): what
 /// [`Store::count_assistant_messages_after`] counts and what a note row's chat
 /// button compares against.

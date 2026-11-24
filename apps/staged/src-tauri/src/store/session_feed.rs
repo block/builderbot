@@ -20,9 +20,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use rusqlite::{Connection, Params};
 use tokio::sync::Notify;
 
-use super::Store;
+use super::{Store, StoreError};
 
 /// What changed in one session since the feed was last drained.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -33,7 +34,9 @@ pub struct SessionDirty {
     /// only for the hidden kinds the transcript reads (see
     /// `TRANSCRIPT_HIDDEN_EVENT_KINDS` in `messages.rs`).
     pub metadata_rows: BTreeSet<i64>,
-    /// The `sessions` row changed: status, owner, title or pipeline.
+    /// The `sessions` row was inserted, or a field of it that the UI's
+    /// `Session` carries was written: status, owner, title, pipeline, working
+    /// directory, provider, branch and the rest.
     pub session: bool,
     /// The follow-up queue changed.
     pub queue: bool,
@@ -158,9 +161,35 @@ impl Store {
         written
     }
 
+    /// [`Self::mark_session_written`] for a statement that wrote several
+    /// session rows: the ids [`updated_session_ids`] collected.
+    pub(super) fn mark_sessions_written(&self, session_ids: &[String]) {
+        if let Some(feed) = &self.session_feed {
+            for session_id in session_ids {
+                feed.mark_session(session_id);
+            }
+        }
+    }
+
     pub(super) fn mark_session_queue(&self, session_id: &str) {
         if let Some(feed) = &self.session_feed {
             feed.mark_queue(session_id);
         }
     }
+}
+
+/// Run an `UPDATE sessions … RETURNING id` and collect the ids of the rows
+/// it wrote, for a writer that selects its sessions by something other than
+/// their id. The caller marks them once its transaction has committed
+/// ([`Store::mark_sessions_written`]).
+pub(super) fn updated_session_ids(
+    conn: &Connection,
+    sql: &str,
+    params: impl Params,
+) -> Result<Vec<String>, StoreError> {
+    let mut statement = conn.prepare(sql)?;
+    let ids = statement
+        .query_map(params, |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(ids)
 }

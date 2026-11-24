@@ -514,6 +514,10 @@ const SYNCHRONOUS_COMMANDS: &[(&str, &str)] = &[
         "session_runner/reconcile.rs",
         "get_session_reconcile_states",
     ),
+    // The session stream's interest and sequence numbers, held in memory.
+    // The hub task does the store reads, on the blocking pool.
+    ("session_stream/commands.rs", "set_session_stream_interest"),
+    ("session_stream/commands.rs", "check_session_stream"),
     // The reasons failed branch setups left behind, held in memory.
     ("workspace_setup/failures.rs", "get_workspace_setup_errors"),
     // Per-window seeds and the updater claim.

@@ -157,6 +157,7 @@ impl Store {
                 session.started_by,
             ],
         )?;
+        self.mark_session_written(&session.id, 1);
         Ok(())
     }
 
@@ -913,7 +914,7 @@ impl Store {
                 observed_error_message,
             ],
         )?;
-        Ok((rows > 0).then_some(now))
+        Ok(self.mark_session_written(id, rows).then_some(now))
     }
 
     /// How many sessions ended with exactly this `error_message`.
@@ -1075,10 +1076,11 @@ impl Store {
     /// This is used by `load_session` to resume the conversation on follow-up turns.
     pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET agent_id = ?1, updated_at = ?2 WHERE id = ?3",
             params![agent_session_id, now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1094,10 +1096,11 @@ impl Store {
         pre_head_sha: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET pre_head_sha = ?1 WHERE id = ?2",
             params![pre_head_sha, id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1116,10 +1119,11 @@ impl Store {
         blox_command_id: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET blox_command_id = ?1 WHERE id = ?2",
             params![blox_command_id, id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1142,10 +1146,11 @@ impl Store {
     /// provider and the system resolved one before launching the local agent.
     pub fn set_session_provider(&self, id: &str, provider: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET provider = ?1, updated_at = ?2 WHERE id = ?3",
             params![provider, now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1160,10 +1165,11 @@ impl Store {
         prompt: &str,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET working_dir = ?1, prompt = ?2, owner_pid = ?3, updated_at = ?4 WHERE id = ?5",
             params![working_dir, prompt, std::process::id(), now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1196,7 +1202,7 @@ impl Store {
                 expected_agent_id,
             ],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Get all queued sessions for a branch, ordered by creation time (oldest first).
@@ -1455,10 +1461,11 @@ impl Store {
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let json = serialize_acp_config_selection(selection)?;
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET acp_config_selection = ?1, updated_at = ?2 WHERE id = ?3",
             params![json, now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1538,10 +1545,11 @@ impl Store {
     pub fn mark_completion_effects_ran(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET completion_effects_at = ?1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1589,10 +1597,11 @@ impl Store {
         let merged_json = serde_json::to_string(&merged)
             .map_err(|e| StoreError(format!("Failed to serialize provider metadata: {e}")))?;
 
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET provider_metadata = ?1, updated_at = ?2 WHERE id = ?3",
             params![merged_json, now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 

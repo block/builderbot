@@ -18,6 +18,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::ProjectRepo;
+use super::session_feed::updated_session_ids;
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
 /// Which `project_repos` row the moved branch points at once it lands.
@@ -75,6 +76,8 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let now = now_timestamp();
+        // Sessions whose `working_dir` the move rewrites, for the session feed.
+        let mut moved_sessions = Vec::new();
 
         match &mv.repo {
             RepoPlacement::Reparent { repo_id } => {
@@ -132,12 +135,14 @@ impl Store {
             // so a session rooted at a repo subpath keeps it, separator and
             // all — `substr` starts at the separator character itself.
             let (old_slash, old_backslash) = session_dir_prefixes(&wd.old_path, cfg!(windows));
-            tx.execute(
+            moved_sessions = updated_session_ids(
+                &tx,
                 "UPDATE sessions
                     SET working_dir = ?1 || substr(working_dir, ?2), updated_at = ?3
                   WHERE working_dir = ?4
                      OR instr(working_dir, ?5) = 1
-                     OR instr(working_dir, ?6) = 1",
+                     OR instr(working_dir, ?6) = 1
+                  RETURNING id",
                 params![
                     wd.new_path,
                     wd.old_path.chars().count() as i64 + 1,
@@ -169,6 +174,7 @@ impl Store {
         elect_primary_repo(&tx, &mv.target_project_id, now)?;
 
         tx.commit()?;
+        self.mark_sessions_written(&moved_sessions);
         // A move mutates *two* projects' branch surfaces, and `project_id` on a
         // `Branch` change means "this project's branch list is affected", not
         // "this branch's current parent" — so name both. Without the source
@@ -851,5 +857,47 @@ mod tests {
         assert!(duplicate_repo_error(&violation)
             .to_string()
             .contains("already has this repository"));
+    }
+
+    /// The move rewrites `sessions.working_dir` in bulk, which a frame of the
+    /// session stream carries: exactly the rewritten sessions are marked on
+    /// the session feed.
+    #[test]
+    fn marks_the_sessions_whose_working_dir_it_rewrites() {
+        let feed = std::sync::Arc::new(crate::store::SessionFeed::default());
+        feed.set_active(true);
+        let f = fixture_in(Store::in_memory().unwrap().with_session_feed(feed.clone()));
+        let workdir = Workdir::new(&f.source.id, "/wt/source/acme-widgets--feature")
+            .with_branch(&f.branch.id);
+        f.store.create_workdir(&workdir).unwrap();
+        let at_root = Session::new_running("root", Path::new("/wt/source/acme-widgets--feature"));
+        let at_subpath = Session::new_running(
+            "sub",
+            Path::new("/wt/source/acme-widgets--feature/apps/web"),
+        );
+        let elsewhere = Session::new_running("other", Path::new("/wt/elsewhere"));
+        for session in [&at_root, &at_subpath, &elsewhere] {
+            f.store.create_session(session).unwrap();
+        }
+        feed.drain();
+
+        f.store
+            .move_branch_to_project(&reparent(
+                &f,
+                Some(WorkdirMove {
+                    workdir_id: workdir.id.clone(),
+                    old_path: workdir.path.clone(),
+                    new_path: "/wt/target/acme-widgets--feature".to_string(),
+                }),
+            ))
+            .unwrap();
+
+        let marks = feed.drain();
+        let mut marked: Vec<&str> = marks.keys().map(String::as_str).collect();
+        marked.sort_unstable();
+        let mut expected = vec![at_root.id.as_str(), at_subpath.id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(marked, expected);
+        assert!(marks.values().all(|dirty| dirty.session));
     }
 }

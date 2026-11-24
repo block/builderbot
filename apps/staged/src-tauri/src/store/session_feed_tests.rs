@@ -14,7 +14,7 @@ use super::{SessionDirty, SessionFeed, Store};
 // =============================================================================
 
 /// A store with an active feed attached.
-fn store_with_feed() -> (Store, Arc<SessionFeed>) {
+pub(super) fn store_with_feed() -> (Store, Arc<SessionFeed>) {
     let feed = Arc::new(SessionFeed::default());
     feed.set_active(true);
     let store = Store::in_memory().unwrap().with_session_feed(feed.clone());
@@ -22,14 +22,14 @@ fn store_with_feed() -> (Store, Arc<SessionFeed>) {
 }
 
 /// A running session, with the feed drained of anything its setup marked.
-fn running_session(store: &Store, feed: &SessionFeed) -> Session {
+pub(super) fn running_session(store: &Store, feed: &SessionFeed) -> Session {
     let session = Session::new_running("work", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     feed.drain();
     session
 }
 
-fn queued_session(store: &Store, feed: &SessionFeed) -> Session {
+pub(super) fn queued_session(store: &Store, feed: &SessionFeed) -> Session {
     let session = Session::new_queued("work");
     store.create_session(&session).unwrap();
     feed.drain();
@@ -37,7 +37,11 @@ fn queued_session(store: &Store, feed: &SessionFeed) -> Session {
 }
 
 /// A running session moved to `status` by a plain status write.
-fn session_with_status(store: &Store, feed: &SessionFeed, status: SessionStatus) -> Session {
+pub(super) fn session_with_status(
+    store: &Store,
+    feed: &SessionFeed,
+    status: SessionStatus,
+) -> Session {
     let session = running_session(store, feed);
     store
         .update_session_status(&session.id, status, None, None)
@@ -102,7 +106,7 @@ fn session_with_claimed_message(
     (session, queued)
 }
 
-fn updated_at(store: &Store, session: &Session) -> i64 {
+pub(super) fn updated_at(store: &Store, session: &Session) -> i64 {
     store.get_session(&session.id).unwrap().unwrap().updated_at
 }
 
@@ -127,7 +131,7 @@ fn metadata_rows(ids: &[i64]) -> SessionDirty {
     }
 }
 
-fn session_row() -> SessionDirty {
+pub(super) fn session_row() -> SessionDirty {
     SessionDirty {
         session: true,
         ..Default::default()
@@ -144,7 +148,7 @@ fn queue() -> SessionDirty {
 /// Drain the feed and require that exactly `session` was marked, with
 /// exactly `expected`.
 #[track_caller]
-fn assert_marked(feed: &SessionFeed, session: &Session, expected: SessionDirty) {
+pub(super) fn assert_marked(feed: &SessionFeed, session: &Session, expected: SessionDirty) {
     assert_eq!(
         feed.drain(),
         HashMap::from([(session.id.clone(), expected)])
@@ -152,7 +156,7 @@ fn assert_marked(feed: &SessionFeed, session: &Session, expected: SessionDirty) 
 }
 
 #[track_caller]
-fn assert_unmarked(feed: &SessionFeed) {
+pub(super) fn assert_unmarked(feed: &SessionFeed) {
     assert_eq!(feed.drain(), HashMap::new());
 }
 

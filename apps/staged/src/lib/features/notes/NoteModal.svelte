@@ -64,7 +64,12 @@
     markSessionChatRead,
   } from '../../api/commands';
   import { listenToEvent } from '../../transport';
-  import { notesChangeAffectsNote } from './noteRefresh';
+  import {
+    liveNoteFor,
+    noteIdentityKey,
+    notesChangeAffectsNote,
+    type FetchedNote,
+  } from './noteRefresh';
   import { noteRenderInputsReady } from './noteRenderReadiness';
   import { NoteReadTracker } from './noteReadTracker.svelte';
   import { noteChatSessionStarter, type NoteChatSessionStart } from './noteChatNewSession';
@@ -196,11 +201,17 @@
   }: Props = $props();
 
   let copied = $state(false);
-  let liveNote = $state<{ id: string; title: string; content: string; updatedAt: number } | null>(
-    null
-  );
+  // The props are a snapshot of the note taken when it was clicked. The row
+  // fetched while the dialog is open overrides them for as long as it is the
+  // same note and no older than they are (`liveNoteFor`). That is derived, not
+  // reset when props arrive: every host reassigns its snapshot on a chat
+  // toggle, which hands over the same values again, and treating that as fresh
+  // props put the click-time note back on screen.
+  let fetchedNote = $state<FetchedNote | null>(null);
+  let noteIdentity = $derived(noteIdentityKey({ noteKind, sessionId, noteId }));
+  let liveNote = $derived(liveNoteFor(fetchedNote, noteIdentity, noteUpdatedAt));
   // Ordering guard for overlapping refreshes — a burst of writes fires a burst
-  // of events, and only the newest fetch may write `liveNote`.
+  // of events, and only the newest fetch may write `fetchedNote`.
   let liveNoteRefreshSeq = 0;
   let assistantMessagesAfterNote = $state(0);
   let assistantMessagesAfterNoteLoadedKey = $state<string | null>(null);
@@ -516,29 +527,33 @@
     untrack(() => readTracker.show(kind, id));
   });
 
-  // Fresh props supersede the override — and any refresh still in flight for
-  // the note they replaced, since reference navigation swaps notes in place.
+  // The snapshot can already be behind the store when the dialog opens: the
+  // row was clicked before its timeline reloaded, or it comes from a
+  // reference-history entry, which keeps the content it was pushed with. So
+  // fetch the note on open, and again whenever another note is swapped in
+  // (reference navigation does that in place). Untracked, so that only those
+  // two start a fetch, not whatever state the fetch itself reads.
   $effect(() => {
-    noteId;
-    title;
-    content;
-    noteUpdatedAt;
-    liveNote = null;
-    liveNoteRefreshSeq++;
+    if (!open || !noteIdentity) return;
+    untrack(() => void refreshLiveNote());
   });
 
-  // The props are a snapshot taken when the note was clicked; the surfaces
-  // behind the modal reload themselves off this same feed, but nothing maps
-  // their fresh data back into those props. So refetch here on any write that
-  // could touch this note — including one made while the chat pane is closed,
-  // which is the only other refresh path.
+  // The surfaces behind the modal reload themselves off this feed, but nothing
+  // maps their fresh data back into the snapshot props. So refetch here on any
+  // write that could touch this note — including one made while the chat pane
+  // is closed, which is the only other refresh path. A write that lands before
+  // the listener is live is never delivered, so refetch once it is.
   $effect(() => {
     if (!open) return;
     const target = { noteKind, branchId, projectId };
-    return listenToEvent<NotesChangedEvent>('notes-changed', (payload) => {
-      if (!notesChangeAffectsNote(payload, target)) return;
-      void refreshLiveNote();
-    });
+    return listenToEvent<NotesChangedEvent>(
+      'notes-changed',
+      (payload) => {
+        if (!notesChangeAffectsNote(payload, target)) return;
+        void refreshLiveNote();
+      },
+      { onEstablished: () => void refreshLiveNote() }
+    );
   });
 
   onDestroy(() => {
@@ -632,12 +647,16 @@
 
   async function refreshLiveNote() {
     const seq = ++liveNoteRefreshSeq;
+    const identity = noteIdentity;
+    if (!identity) return;
     try {
       const refreshed = await fetchLatestNote();
       // A later refresh already landed, or the note is gone — either way this
-      // result is not the one to render.
-      if (!refreshed || seq !== liveNoteRefreshSeq) return;
-      liveNote = {
+      // result is not the one to render. Nor is one for a note that reference
+      // navigation has since swapped out.
+      if (!refreshed || seq !== liveNoteRefreshSeq || identity !== noteIdentity) return;
+      fetchedNote = {
+        identity,
         id: refreshed.id,
         title: refreshed.title,
         content: refreshed.content,

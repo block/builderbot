@@ -1,4 +1,4 @@
-import { RESUME_ROW_PROMPT } from './sessionRowState';
+import { RESUME_PROMPT } from '../../shared/resumePrompt';
 
 /**
  * The prompts Staged sends to pick a session back up without the user typing
@@ -8,8 +8,8 @@ import { RESUME_ROW_PROMPT } from './sessionRowState';
  *
  * - `AUTO_RETRY_RESUME_PROMPT`, `NETWORK_RESUME_PROMPT`
  *   (`rate_limit_scheduler.rs`): the automatic resume after a rate-limit or
- *   network pause. The first is also what a Resume button sends
- *   (`RESUME_ROW_PROMPT`).
+ *   network pause. The first is also what every Resume button sends
+ *   (`RESUME_PROMPT`).
  * - `REPO_SESSION_RESUME_PROMPT`, `PROJECT_SESSION_RESUME_PROMPT`
  *   (`launch_resume/plan.rs`): the resume of a session that was running when
  *   Staged was closed.
@@ -19,7 +19,7 @@ import { RESUME_ROW_PROMPT } from './sessionRowState';
  * prompt is reworded or a new one is added on one side only.
  */
 export const STAGED_RESUME_PROMPTS: Readonly<Record<string, string>> = {
-  AUTO_RETRY_RESUME_PROMPT: RESUME_ROW_PROMPT,
+  AUTO_RETRY_RESUME_PROMPT: RESUME_PROMPT,
   NETWORK_RESUME_PROMPT:
     'Your previous turn was cut off by a network error before it finished. Check the state of your work, then continue where you left off.',
   REPO_SESSION_RESUME_PROMPT:

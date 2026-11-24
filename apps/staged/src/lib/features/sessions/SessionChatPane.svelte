@@ -209,6 +209,7 @@
   import { observeSizeChanges } from '../../shared/observeSizeChanges';
   import { LatestWins } from '../../shared/latestWins';
   import { isImeKeydown } from '../../shared/imeKeydown';
+  import { RESUME_PROMPT } from '../../shared/resumePrompt';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -3828,7 +3829,7 @@
           <Button
             variant="outline"
             size="xs"
-            onclick={() => sendMessage('Continue where you left off.')}
+            onclick={() => sendMessage(RESUME_PROMPT)}
             disabled={sending}
           >
             Resume
@@ -3891,7 +3892,7 @@
             <Button
               variant="outline"
               size="xs"
-              onclick={() => sendMessage('Continue where you left off.')}
+              onclick={() => sendMessage(RESUME_PROMPT)}
               disabled={sending}
             >
               {isRateLimited ? 'Resume now' : 'Resume'}

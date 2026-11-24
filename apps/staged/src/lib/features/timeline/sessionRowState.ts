@@ -12,8 +12,11 @@
 import { isSessionInFlight } from '../../shared/sessionStatus';
 import { isResumableReason } from '../../types';
 
-/** The prompt a row's Resume button sends to the session it resumes. */
-export const RESUME_ROW_PROMPT = 'Continue where you left off.';
+/**
+ * The prompt a row's Resume button sends to the session it resumes: the one
+ * every Resume button sends.
+ */
+export { RESUME_PROMPT as RESUME_ROW_PROMPT } from '../../shared/resumePrompt';
 
 /**
  * What a session row shows: waiting in the branch queue, running, finished

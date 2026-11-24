@@ -565,6 +565,26 @@ describe('createLiveSessionHints user replies', () => {
     expect(latestHints.s1.endsWith('…')).toBe(true);
   });
 
+  it('drops an emoji the cut would split instead of leaving half of it', async () => {
+    // An emoji outside the BMP is two UTF-16 units. Seventy letters put the
+    // cut at unit 71 between the halves of the first one.
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', `${'a'.repeat(70)}😀😀`)]);
+
+    expect(latestHints).toEqual({ s1: `${'a'.repeat(70)}…` });
+  });
+
+  it('keeps an emoji that ends where the cut falls', async () => {
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', `${'a'.repeat(69)}😀😀`)]);
+
+    expect(latestHints).toEqual({ s1: `${'a'.repeat(69)}😀…` });
+  });
+
+  it('does not split an emoji when it truncates agent text either', async () => {
+    await track([OPENING_PROMPT, row(2, 'assistant', `${'a'.repeat(70)}😀😀`)]);
+
+    expect(latestHints).toEqual({ s1: `${'a'.repeat(70)}…` });
+  });
+
   // The backend stores a resume prompt as a plain user row, with no action
   // block around it: nobody typed it, so it must not read as a reply.
   describe.each(Object.entries(STAGED_RESUME_PROMPTS))('the resume prompt %s', (_name, prompt) => {
@@ -582,6 +602,15 @@ describe('createLiveSessionHints user replies', () => {
       await tick([reply, row(4, 'user', prompt)]);
 
       expect(latestHints).toEqual({ s1: 'Also cover the eviction policy' });
+    });
+
+    it('is skipped behind a block Staged wrapped around it', async () => {
+      // Skipped only because the tagged blocks are stripped before the text
+      // is matched against the resume prompts; this pins that order.
+      const wrapped = `<action>\nThe user is requesting a note.\n</action>\n\n${prompt}`;
+      await track([OPENING_PROMPT, TURN_END, row(3, 'user', wrapped)]);
+
+      expect(latestHints).toEqual({ s1: 'Done' });
     });
 
     it('gives way to what the agent writes after the resume', async () => {

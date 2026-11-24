@@ -58,7 +58,13 @@ function normalizeHintText(text: string): string | undefined {
 
 function truncateHint(text: string): string {
   if (text.length <= MAX_HINT_LENGTH) return text;
-  return `${text.slice(0, MAX_HINT_LENGTH - 1).trimEnd()}…`;
+  let end = MAX_HINT_LENGTH - 1;
+  // `slice` counts UTF-16 units, and a character outside the BMP (most emoji)
+  // is a pair of them. When the last unit kept is the first of a pair, drop
+  // it too: by itself it renders as a replacement glyph.
+  const lastKept = text.charCodeAt(end - 1);
+  if (lastKept >= 0xd800 && lastKept <= 0xdbff) end -= 1;
+  return `${text.slice(0, end).trimEnd()}…`;
 }
 
 function withTrailingEllipsis(text: string): string {
@@ -149,6 +155,15 @@ function attachmentPlaceholder(count: number): string {
  * left but with attachments (`imageIds`, which holds images and PDFs alike)
  * shows a placeholder: the rows Staged writes by itself carry none, so an
  * attachment marks a message somebody sent.
+ *
+ * A new tag that Staged wraps around a prompt must be added to
+ * `XML_BLOCK_TAGS`. Agent output gets a generic strip of anything shaped like
+ * a tag (`normalizeHintText`); a reply does not, because `<` and `>` in typed
+ * text are text. `stripXmlTags` is therefore the only thing that takes a
+ * wrapper out of a reply, and it removes whole, balanced blocks of the listed
+ * tags and nothing else. A wrapper with an unlisted tag shows raw in the
+ * subtitle, tags and body, and so does whatever is left of a listed one that
+ * is unclosed or nested in itself.
  */
 function formatUserHint(message: SessionMessage): string | undefined {
   const typed = parseQuotedMessage(stripXmlTags(message.content))

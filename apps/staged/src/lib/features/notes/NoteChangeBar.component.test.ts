@@ -7,6 +7,7 @@ import {
   NOTE_DIFF_ADDED_HIGHLIGHT,
   NOTE_DIFF_ATTRIBUTE,
 } from './noteDiffHighlights';
+import { GAP_MARKER_HEIGHT } from './noteDiffScroll';
 import { NoteDiffState } from './noteDiffState.svelte';
 import {
   BLOCK_HEIGHT,
@@ -23,8 +24,9 @@ import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 
 /**
  * The change bar beside a note: one marker per hunk of the diff against the
- * previous version, placed and coloured, lighting its change on hover. The
- * note here is plain markup in a scroller, laid out by stubbed offsets.
+ * previous version, level with its change and coloured, lighting it on
+ * hover. The note here is plain markup in a scroller, laid out by stubbed
+ * offsets, and the bar is mounted in the scroller as the viewer mounts it.
  */
 
 let component: ReturnType<typeof mount> | null = null;
@@ -55,8 +57,7 @@ function render(previous: string | null, current = CURRENT_NOTE, viewport = 300)
   const contentEl = document.createElement('div');
   contentEl.innerHTML = renderNoteMarkdown(current);
   scrollEl.append(contentEl);
-  const target = document.createElement('div');
-  document.body.append(scrollEl, target);
+  document.body.append(scrollEl);
   layOut(contentEl, scrollEl, viewport);
 
   const noteDiff = new NoteDiffState();
@@ -69,7 +70,7 @@ function render(previous: string | null, current = CURRENT_NOTE, viewport = 300)
     previousHtml: previous === null ? null : renderNoteMarkdown(previous),
     onSelect,
   });
-  component = mount(NoteChangeBar, { target, props });
+  component = mount(NoteChangeBar, { target: scrollEl, props });
   flushSync();
   return { props, noteDiff, contentEl, scrollEl, onSelect };
 }
@@ -91,6 +92,16 @@ function hover(el: Element) {
   el.dispatchEvent(new MouseEvent('pointerenter'));
   flushSync();
 }
+
+/** A pointer event at a place in the window; a move bubbles there, as the browser's does. */
+function pointer(type: string, el: Element, x: number, y: number) {
+  el.dispatchEvent(
+    new MouseEvent(type, { clientX: x, clientY: y, bubbles: type !== 'pointerenter' })
+  );
+  flushSync();
+}
+
+const TWO_ADDED = [CURRENT_NOTE, 'They are chosen by last use.'].join('\n\n');
 
 function leave(el: Element) {
   el.dispatchEvent(new MouseEvent('pointerleave'));
@@ -136,36 +147,83 @@ describe('NoteChangeBar', () => {
     expect(active(contentEl)).toEqual([]);
   });
 
-  it('places each marker where its change is, scaled to the scrolled height', () => {
-    // Six blocks of 100px in a 300px viewport: the bar is half the note's scale.
-    render(PREVIOUS_NOTE);
-    const scale = 300 / (6 * BLOCK_HEIGHT);
+  it('stands in the element that scrolls the note, so the markers scroll with it', () => {
+    const { scrollEl } = render(PREVIOUS_NOTE);
 
-    // Removed: the gap above the third block, as short as a marker gets.
-    expect(marker('removed').style.top).toBe(`${2 * BLOCK_HEIGHT * scale}px`);
-    expect(marker('removed').style.height).toBe('4px');
-    expect(marker('modified').style.top).toBe(`${3 * BLOCK_HEIGHT * scale}px`);
-    expect(marker('modified').style.height).toBe(`${BLOCK_HEIGHT * scale}px`);
-    expect(marker('added').style.top).toBe(`${5 * BLOCK_HEIGHT * scale}px`);
+    expect(bar()!.parentElement).toBe(scrollEl);
   });
 
-  it('puts the markers beside their blocks when the note fits without scrolling', () => {
-    render(PREVIOUS_NOTE, CURRENT_NOTE, 800);
+  it('stands each marker level with its change and as tall as its block', () => {
+    // Six blocks of 100px in a 300px viewport: the note scrolls, and a
+    // marker is where its block is in the note all the same.
+    render(PREVIOUS_NOTE);
 
-    expect(marker('removed').style.top).toBe(`${2 * BLOCK_HEIGHT}px`);
     expect(marker('modified').style.top).toBe(`${3 * BLOCK_HEIGHT}px`);
     expect(marker('modified').style.height).toBe(`${BLOCK_HEIGHT}px`);
     expect(marker('added').style.top).toBe(`${5 * BLOCK_HEIGHT}px`);
+    expect(marker('added').style.height).toBe(`${BLOCK_HEIGHT}px`);
+  });
+
+  it('gives removed text a short marker across the gap it left', () => {
+    render(PREVIOUS_NOTE);
+
+    // The gap is between the second and third blocks, 200px down the note.
+    expect(marker('removed').style.top).toBe(`${2 * BLOCK_HEIGHT - GAP_MARKER_HEIGHT / 2}px`);
+    expect(marker('removed').style.height).toBe(`${GAP_MARKER_HEIGHT}px`);
+  });
+
+  it('spans every block of a change', () => {
+    render(PREVIOUS_NOTE, TWO_ADDED);
+
+    expect(markers().map((el) => el.getAttribute('aria-label'))).toEqual([
+      'Removed: 1 block',
+      'Modified: 1 block',
+      'Added: 2 blocks',
+    ]);
+    expect(marker('added').style.top).toBe(`${5 * BLOCK_HEIGHT}px`);
+    expect(marker('added').style.height).toBe(`${2 * BLOCK_HEIGHT}px`);
+  });
+
+  it('leaves the markers where they are as the note scrolls', () => {
+    const { scrollEl } = render(PREVIOUS_NOTE);
+    const placed = () => markers().map((el) => [el.style.top, el.style.height]);
+    const before = placed();
+
+    scrollEl.scrollTop = 250;
+    scrollEl.dispatchEvent(new Event('scroll'));
+    flushSync();
+
+    expect(placed()).toEqual(before);
   });
 
   it('moves the markers when the note is laid out again', () => {
     const { contentEl, scrollEl } = render(PREVIOUS_NOTE);
 
-    layOut(contentEl, scrollEl, 600);
+    // Every block half as tall again: an image loaded, the text wrapped.
+    layOut(contentEl, scrollEl, 300, 150);
     resize();
     flushSync();
 
-    expect(marker('modified').style.top).toBe(`${3 * BLOCK_HEIGHT}px`);
+    expect(marker('removed').style.top).toBe(`${2 * 150 - GAP_MARKER_HEIGHT / 2}px`);
+    expect(marker('modified').style.top).toBe(`${3 * 150}px`);
+    expect(marker('modified').style.height).toBe('150px');
+    expect(marker('added').style.top).toBe(`${5 * 150}px`);
+  });
+
+  it('keeps its distance from the edge when the note grows a scrollbar', () => {
+    const { scrollEl } = render(PREVIOUS_NOTE);
+    const scrollbar = () => bar()!.style.getPropertyValue('--note-diff-scrollbar');
+    expect(scrollbar()).toBe('0px');
+
+    // A scrollbar takes 6px from the scroll area's content.
+    Object.defineProperties(scrollEl, {
+      offsetWidth: { configurable: true, value: 700 },
+      clientWidth: { configurable: true, value: 694 },
+    });
+    resize();
+    flushSync();
+
+    expect(scrollbar()).toBe('6px');
   });
 
   it('lights a change while its marker is hovered, with the words it gained', () => {
@@ -194,6 +252,22 @@ describe('NoteChangeBar', () => {
     marker('added').blur();
     flushSync();
     expect(active(contentEl)).toEqual([]);
+  });
+
+  it('does not light a change that scrolls under a pointer at rest', () => {
+    const { contentEl, scrollEl } = render(PREVIOUS_NOTE);
+    // The pointer comes to rest over the note's right edge.
+    pointer('pointermove', scrollEl, 690, 120);
+
+    // The note scrolls, and the browser reports the pointer, where it
+    // already was, to the marker now under it.
+    pointer('pointerenter', marker('added'), 690, 120);
+    pointer('pointermove', marker('added'), 690, 120);
+    expect(active(contentEl)).toEqual([]);
+
+    // The pointer moves on the marker: that is a hover.
+    pointer('pointermove', marker('added'), 690, 121);
+    expect(active(contentEl)).toEqual(['A hundred entries go at a time.']);
   });
 
   it('does not light a change for a touch, which has no hover to end', () => {

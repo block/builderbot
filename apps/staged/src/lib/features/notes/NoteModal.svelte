@@ -34,11 +34,11 @@
   block out of the draft and the mark goes.
 
   A note that has been revised shows what the revision changed
-  (`NoteDiffState`): a bar of markers beside the note (`NoteChangeBar`), each
-  lighting its change on hover. Pressing one opens the note's previous
-  version on the left (`NotePreviousPane`), the two scrolling together, where
-  the window has room for two panes; elsewhere it scrolls to the change and
-  keeps it lit. The previous version takes the place the chat would, so
+  (`NoteDiffState`): markers beside the note (`NoteChangeBar`), each level
+  with its change and scrolling with it, and lighting it on hover. Pressing
+  one opens the note's previous version on the left (`NotePreviousPane`),
+  the two scrolling together, where the window has room for two panes;
+  elsewhere it scrolls to the change and keeps it lit. The previous version takes the place the chat would, so
   opening either closes the other. Escape closes the previous version before
   it closes the note, and until it has, Escape in the find field closes the
   search and nothing else.
@@ -1119,6 +1119,7 @@
           currentScrollEl={contentEl}
           bottomInset={bottomSlotHeight}
           onClose={() => noteDiff.close()}
+          onSelect={handleDiffSelect}
           onContentClick={handleContentClick}
           onContentKeydown={handleContentKeydown}
           content={previousContent}
@@ -1176,18 +1177,16 @@
             {/if}
             {#if hasNoteContent}
               <NoteDiffGaps {noteDiff} side="current" showAll={splitDiffOpen} />
+              <NoteChangeBar
+                {noteDiff}
+                contentEl={markdownEl}
+                scrollEl={contentEl}
+                renderKey={renderedNoteHtml}
+                previousHtml={renderedPreviousHtml}
+                onSelect={handleDiffSelect}
+              />
             {/if}
           </div>
-          {#if hasNoteContent}
-            <NoteChangeBar
-              {noteDiff}
-              contentEl={markdownEl}
-              scrollEl={contentEl}
-              renderKey={renderedNoteHtml}
-              previousHtml={renderedPreviousHtml}
-              onSelect={handleDiffSelect}
-            />
-          {/if}
         </div>
 
         <!-- The pane's bottom slot: the bottom bar, and over it the place a
@@ -1441,10 +1440,8 @@
   }
 
   /* The note's scroll area; the pane's bottom slot (`.note-bottom`) follows
-     it. Positioned for the change bar, which stands at its right edge
-     without scrolling. */
+     it. */
   .note-scroll {
-    position: relative;
     display: flex;
     flex: 1;
     min-height: 0;
@@ -1456,8 +1453,11 @@
      is docked and reaches up over the note's bottom edge the text clears
      that too (`--selection-dock-overlap`, measured above), so a selection
      ending in the last lines can scroll out from behind it. */
-  /* Positioned for the selection's Reply button, which scrolls with the text. */
+  /* Positioned for the selection's Reply button and the diff's markers and
+     gap lines, which scroll with the text. The markers stand in the right
+     padding, as far in as the text's inset. */
   .modal-content {
+    --note-diff-markers-inset: var(--dialog-safe-right, 0px);
     position: relative;
     flex: 1;
     overflow-y: auto;

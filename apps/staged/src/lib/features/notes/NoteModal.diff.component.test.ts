@@ -137,12 +137,16 @@ async function open(overrides: Record<string, unknown> = {}) {
 }
 
 const dialog = () => document.querySelector<HTMLElement>('[data-slot="dialog-content"]');
-const bar = () => document.querySelector('.note-change-bar');
-const markers = () => [...document.querySelectorAll<HTMLButtonElement>('.note-change-marker')];
-const marker = (kind: string) => markers().find((el) => el.dataset.kind === kind)!;
 const previousPane = () => document.querySelector<HTMLElement>('.previous-pane');
 const chatPane = () => document.querySelector('#note-modal-chat-pane');
 const notePane = () => document.querySelector<HTMLElement>('#note-modal-note-pane')!;
+// The note's own bar and markers; its previous version carries a set too.
+const bar = () => document.querySelector('#note-modal-note-pane .note-change-bar');
+const markersIn = (pane: Element) => [
+  ...pane.querySelectorAll<HTMLButtonElement>('.note-change-marker'),
+];
+const markers = () => markersIn(notePane());
+const marker = (kind: string) => markers().find((el) => el.dataset.kind === kind)!;
 const note = () => notePane().querySelector<HTMLElement>('.markdown-content')!;
 const lit = (el: Element) =>
   [...el.querySelectorAll(`[${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`)].map((block) => block.textContent);
@@ -215,6 +219,14 @@ describe('NoteModal change bar', () => {
     expect(notePane().querySelector('.note-diff-all')).toBeNull();
     expect(lit(note())).toEqual([]);
     expect(previousPane()).toBeNull();
+  });
+
+  it('puts the markers in the note’s scroll area, so they scroll with the note', async () => {
+    await open();
+
+    const scroller = notePane().querySelector('.modal-content')!;
+    expect(bar()!.parentElement).toBe(scroller);
+    expect(scroller.contains(note())).toBe(true);
   });
 
   it('lights a change in the note while its marker is hovered', async () => {
@@ -367,6 +379,24 @@ describe('NoteModal previous version', () => {
     expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
     expect(lit(pane)).toEqual(['The cache is warmed when the app starts.']);
     expect(marker('modified').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('carries the markers beside the previous version too, and selects a change from them', async () => {
+    await open();
+    await press(marker('modified'));
+    const pane = previousPane()!;
+
+    expect(markersIn(pane).map((el) => el.dataset.kind)).toEqual(HUNK_KINDS);
+    expect(markersIn(pane).every((el) => el.closest('.previous-scroll') !== null)).toBe(true);
+
+    await press(markersIn(pane)[0]);
+
+    // The removed paragraph: lit where it is, a line where it was.
+    expect(lit(pane)).toEqual(['Logs are kept for a week.']);
+    expect(lit(note())).toEqual([]);
+    expect(marker('removed').getAttribute('aria-pressed')).toBe('true');
+    expect(markersIn(pane)[0].getAttribute('aria-pressed')).toBe('true');
+    expect(previousPane()).not.toBeNull();
   });
 
   it('closes the previous version when the chat opens', async () => {

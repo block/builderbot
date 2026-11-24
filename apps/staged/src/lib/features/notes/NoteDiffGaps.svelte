@@ -10,11 +10,12 @@
   Mounted inside the element that scrolls the version, which must be
   positioned: the lines are placed in its content and scroll with it. Only
   the hunk being pointed at has its line, unless `showAll`, when every gap
-  has one and the pointed hunk's is the strong one.
+  has one and the pointed hunk's is the strong one. The hunk's marker stands
+  across the line's end (NoteDiffMarkers.svelte).
 -->
 <script lang="ts">
-  import type { NoteDiffHunk, NoteDiffSide } from './noteDiff';
-  import type { NoteDiffUnitBox } from './noteDiffScroll';
+  import type { NoteDiffSide } from './noteDiff';
+  import { hunkGapOffset } from './noteDiffScroll';
   import type { NoteDiffState } from './noteDiffState.svelte';
 
   interface Props {
@@ -26,20 +27,6 @@
 
   let { noteDiff, side, showAll = false }: Props = $props();
 
-  /** How far from the note's first or last block a gap at that end is drawn. */
-  const EDGE_OFFSET = 4;
-
-  /** The middle of the gap: between the blocks either side, or just off the one there is. */
-  function gapOffset(hunk: NoteDiffHunk, boxes: readonly NoteDiffUnitBox[]): number | null {
-    const start = side === 'previous' ? hunk.previousStart : hunk.currentStart;
-    const before = boxes[start - 1];
-    const after = boxes[start];
-    if (before && after) return (before.top + before.height + after.top) / 2;
-    if (after) return after.top - EDGE_OFFSET;
-    if (before) return before.top + before.height + EDGE_OFFSET;
-    return null;
-  }
-
   let gaps = $derived.by(() => {
     const boxes = noteDiff.boxes[side];
     const pointed = noteDiff.pointedHunkId;
@@ -48,7 +35,7 @@
       if (here.length > 0) return [];
       const active = hunk.id === pointed;
       if (!showAll && !active) return [];
-      const top = gapOffset(hunk, boxes);
+      const top = hunkGapOffset(hunk, side, boxes);
       return top === null ? [] : [{ hunk, top, active }];
     });
   });

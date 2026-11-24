@@ -1,10 +1,11 @@
 # Note diffs
 
 When a note has been revised, the note viewer shows what the last revision
-changed. A thin bar at the right of the note carries one marker per change:
-green for added, red for removed, orange for modified. Hovering a marker
-highlights that change in the note. Pressing one opens the previous version
-in a pane on the left, with the change lit in both panes and the two
+changed. Each change has a marker in the note's right margin: green for
+added, red for removed, orange for modified. A marker stands beside its
+change, as tall as the changed text, and scrolls with the note. Hovering a
+marker highlights that change in the note. Pressing one opens the previous
+version in a pane on the left, with the change lit in both panes and the two
 scrolling together.
 
 ## What is compared
@@ -20,13 +21,13 @@ that replace a note's text: `update_note_title_and_content`,
 - The viewer compares the note with its **newest** version only, read through
   `get_note_previous_version`. There is no version picker.
 - Nothing was backfilled. A note written before the migration has no versions,
-  and so no bar, until it is next revised.
+  and so no markers, until it is next revised.
 - Moving a note to another project is not a revision and keeps its versions,
   but it does rewrite the note: references to media the move copied point at
   the copies, and a branch note's title can gain a suffix to stay unique
   where it lands. The move rewrites the note's versions the same way, in its
-  transaction (`carry_move_into_note_versions`), so the bar after a move shows
-  what the last revision changed and nothing the move did. A version's
+  transaction (`carry_move_into_note_versions`), so the markers after a move
+  show what the last revision changed and nothing the move did. A version's
   references to media the note no longer embeds are left as written. A copy
   is a new note and starts with no versions.
 - The diff is over the rendered note's blocks (a paragraph, a list item, a
@@ -34,6 +35,36 @@ that replace a note's text: `update_note_title_and_content`,
   blocks, `noteDiff.ts` compares them, and `NoteChangeBar.svelte` and
   `NotePreviousPane.svelte` show the result. All of it is in
   `src/lib/features/notes/`.
+
+## Where the markers stand
+
+The markers are part of what the note scrolls (`NoteDiffMarkers.svelte`,
+mounted inside the scroll area), so nothing is computed as it scrolls. Each is
+placed from its blocks as measured (`hunkMarkerBox` in `noteDiffScroll.ts`):
+
+- A change with blocks in the note has a marker from the top of its first
+  block to the bottom of its last. A reworded three-line paragraph has a
+  marker three lines tall; an added section has one that spans the section.
+- Removed text has no block in the note. Its marker is 8px tall, centred on
+  the red line that is drawn across the gap the text left while the change is
+  pointed at.
+- The blocks are measured again whenever the note is laid out (an image
+  loading, the dialog or the window resized, the previous version opening or
+  closing, text wrapping again), and the markers follow.
+- They stand in the note's right padding, 12px clear of the text and 8px from
+  the scroll area's edge, which leaves the scrollbar and the dialog's resize
+  handle free. That distance is the same whether or not the note has a
+  scrollbar.
+
+Beside the previous version there is a second set of the same markers, level
+with that version's blocks. There the removed text has a marker of its full
+height, and added text the short one across its green line. They take hovers
+and presses as the note's do; Tab stops only at the note's, which list every
+change once.
+
+A marker that scrolls under a pointer at rest is not hovered: only a pointer
+that moved onto it lights the change. Otherwise the change a press scrolled
+into the pointer's place would take the light from the one that was pressed.
 
 ## Limits
 
@@ -109,7 +140,7 @@ it runs only when asked for like this. It creates the directory and its
   stored for it, which is how the clean-up above leaves a dropped image: its
   version names two files that are not there.
 
-The last revision is the one the bar shows. Down the note, it holds:
+The last revision is the one the markers show. Down the note, it holds:
 
 | Marker | Change                             |
 | ------ | ---------------------------------- |
@@ -182,22 +213,28 @@ the time: `lsof -p <pid> | grep -F .staged` should list only paths under
 ### 3. Look at the note
 
 Open **Note diffs demo** from the projects grid and press the first note,
-**Upload retries: findings and plan**. The bar
-at the right of the note should carry the six markers above, in that order.
-Hover each one, press an orange one to open the previous version, scroll
-either pane, and press Escape twice: once for the previous version, once for
-the note.
+**Upload retries: findings and plan**. The right margin of the note should
+carry the six markers above, in that order, each beside its change. Hover
+each one, press an orange one to open the previous version, scroll either
+pane, and press Escape twice: once for the previous version, once for the
+note.
 
 What to expect:
 
-- The markers are placed as a scrollbar's thumb is, at the same share of the
-  bar as the change is of the note's scrolled height. In a note that scrolls,
-  a marker therefore stands above its block, further above the lower the
-  block is; only in a note that fits do the two sit side by side.
+- Each marker is level with its change and as tall as it: the one for the
+  summary's sentence spans its two lines, the one for the diagram spans the
+  diagram, and the green one runs from the _Rollout_ heading to the end of
+  its list. They move with the text as the note scrolls. In a window too
+  short to show the whole note, the markers of changes further down are out
+  of view until the note is scrolled to them.
 - Hovering tints the changed blocks and paints the changed words. A changed
   diagram is tinted and edged in its marker's colour. The removed paragraph
-  has no block in the note: its marker draws a red line across the gap it
-  left, above _Findings_.
+  has no block in the note: its marker is a short red one above _Findings_,
+  and hovering it draws a red line across the gap the paragraph left, level
+  with the marker.
+- With the previous version open, it has markers of its own beside its
+  blocks: a tall red one beside the removed paragraph, and a short green one
+  where the _Rollout_ section is not.
 - A press puts the change a third of the way down both panes, level in each.
   A change too near the top of the note to reach that line stays where it
   is, still level. For the removed paragraph the previous version shows it

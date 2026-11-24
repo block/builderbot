@@ -45,21 +45,26 @@ export const BLOCK_HEIGHT = 100;
 
 /**
  * Give the blocks under `content` a layout: stacked from the top of
- * `scroller`, each `BLOCK_HEIGHT` tall, as the offsets `measureNoteDiffUnits`
+ * `scroller`, each `blockHeight` tall, as the offsets `measureNoteDiffUnits`
  * reads. `viewport` is how much of them `scroller` shows.
  */
-export function layOut(content: Element, scroller: HTMLElement, viewport: number): void {
+export function layOut(
+  content: Element,
+  scroller: HTMLElement,
+  viewport: number,
+  blockHeight = BLOCK_HEIGHT
+): void {
   const units = extractNoteDiffUnits(content);
   units.forEach(({ element }, index) => {
     Object.defineProperties(element, {
-      offsetTop: { configurable: true, value: index * BLOCK_HEIGHT },
-      offsetHeight: { configurable: true, value: BLOCK_HEIGHT },
+      offsetTop: { configurable: true, value: index * blockHeight },
+      offsetHeight: { configurable: true, value: blockHeight },
       offsetParent: { configurable: true, value: scroller },
     });
   });
   Object.defineProperties(scroller, {
     clientHeight: { configurable: true, value: viewport },
-    scrollHeight: { configurable: true, value: Math.max(viewport, units.length * BLOCK_HEIGHT) },
+    scrollHeight: { configurable: true, value: Math.max(viewport, units.length * blockHeight) },
   });
 }
 

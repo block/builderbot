@@ -7,6 +7,7 @@ import {
   NOTE_DIFF_ATTRIBUTE,
   NOTE_DIFF_REMOVED_HIGHLIGHT,
 } from './noteDiffHighlights';
+import { GAP_MARKER_HEIGHT } from './noteDiffScroll';
 import { NoteDiffState } from './noteDiffState.svelte';
 import { extractNoteDiffUnits, measureNoteDiffUnits } from './noteDiffUnits';
 import { renderNoteMarkdown } from './noteMarkdown';
@@ -82,6 +83,7 @@ function render({
 
   const html = renderNoteMarkdown(shown);
   const onClose = vi.fn();
+  const onSelect = vi.fn<(hunkId: string) => void>();
   const onContentClick = vi.fn<(event: MouseEvent) => void>();
   const props = reactiveProps({
     noteDiff,
@@ -91,6 +93,7 @@ function render({
     currentScrollEl,
     bottomInset,
     onClose,
+    onSelect,
     onContentClick,
     content: createRawSnippet(() => ({
       render: () => `<div class="markdown-content">${html}</div>`,
@@ -105,7 +108,16 @@ function render({
   layOut(contentEl, scrollEl, VIEWPORT);
   props.contentEl = contentEl;
   flushSync();
-  return { props, noteDiff, contentEl, scrollEl, currentScrollEl, onClose, onContentClick };
+  return {
+    props,
+    noteDiff,
+    contentEl,
+    scrollEl,
+    currentScrollEl,
+    onClose,
+    onSelect,
+    onContentClick,
+  };
 }
 
 const marked = (el: Element) =>
@@ -116,6 +128,7 @@ const marked = (el: Element) =>
 const active = (el: Element) =>
   [...el.querySelectorAll(`[${NOTE_DIFF_ACTIVE_ATTRIBUTE}]`)].map((block) => block.textContent);
 const gaps = () => [...document.querySelectorAll<HTMLElement>('.note-diff-gap')];
+const markers = () => [...document.querySelectorAll<HTMLButtonElement>('.note-change-marker')];
 
 /** The reader scrolls a pane: the offset, then the event the browser sends for it. */
 function scrollTo(el: HTMLElement, top: number) {
@@ -151,6 +164,39 @@ describe('NotePreviousPane', () => {
       ['added', `${6 * BLOCK_HEIGHT + 4}px`],
     ]);
     expect(gaps()[0].classList.contains('is-active')).toBe(false);
+  });
+
+  it('carries a marker for each change, level with this version’s blocks', () => {
+    const { scrollEl } = render();
+
+    expect(markers().every((el) => el.closest('.previous-scroll') === scrollEl)).toBe(true);
+    expect(markers().map((el) => [el.dataset.kind, el.style.top, el.style.height])).toEqual([
+      // The removed paragraph is a block here, the third.
+      ['removed', `${2 * BLOCK_HEIGHT}px`, `${BLOCK_HEIGHT}px`],
+      ['modified', `${4 * BLOCK_HEIGHT}px`, `${BLOCK_HEIGHT}px`],
+      // The added one is not: a short marker across its line.
+      ['added', `${6 * BLOCK_HEIGHT + 4 - GAP_MARKER_HEIGHT / 2}px`, `${GAP_MARKER_HEIGHT}px`],
+    ]);
+    expect(markers()[0].closest('[role="group"]')!.getAttribute('aria-label')).toBe(
+      'Changes in the previous version'
+    );
+    // A second set of the note's markers: pressed and hovered, not tabbed to.
+    expect(markers().map((el) => el.tabIndex)).toEqual([-1, -1, -1]);
+  });
+
+  it('lights a change from its marker here, and reports a press on it', () => {
+    const { noteDiff, contentEl, onSelect } = render();
+
+    markers()[0].dispatchEvent(new MouseEvent('pointerenter'));
+    flushSync();
+    expect(active(contentEl)).toEqual(['Logs are kept for a week.']);
+
+    markers()[0].dispatchEvent(new MouseEvent('pointerleave'));
+    flushSync();
+    expect(active(contentEl)).toEqual([]);
+
+    markers()[0].click();
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(noteDiff.hunks[0].id);
   });
 
   it('lights the change being pointed at, with the words it lost', () => {

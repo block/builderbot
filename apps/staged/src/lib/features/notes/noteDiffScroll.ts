@@ -14,6 +14,10 @@
  * pane is there in the other, however different the text above it. Through a
  * stretch only one version has, the other pane holds still, so a change is
  * scrolled to from the pane that has its first block (`hunkLead`).
+ *
+ * The markers and gap lines drawn beside a version are placed in the same
+ * coordinate, inside the element that scrolls it, so they move with the
+ * text (`hunkMarkerBox`, `hunkGapOffset`).
  */
 
 import type { NoteDiffHunk, NoteDiffOp, NoteDiffSide } from './noteDiff';
@@ -65,6 +69,61 @@ export function hunkExtent(
   if (next) return { top: next.top, height: 0 };
   const last = boxes[boxes.length - 1];
   return last ? { top: last.top + last.height, height: 0 } : null;
+}
+
+/** How far from a version's first or last block a gap at that end is drawn. */
+const GAP_EDGE_OFFSET = 4;
+
+/** The height of the marker of a hunk with no block on a side: a tick across its gap line. */
+export const GAP_MARKER_HEIGHT = 8;
+
+/** The least a marker is tall, for a block shorter than that (a rule). */
+export const MIN_MARKER_HEIGHT = 4;
+
+/**
+ * Where the line for a hunk with no unit on a side is drawn: the middle of
+ * the gap its blocks would fill, between the units either side of it, or
+ * just off the one there is at an end of the version. `null` when the side
+ * has nothing measured to place it by.
+ */
+export function hunkGapOffset(
+  hunk: NoteDiffHunk,
+  side: NoteDiffSide,
+  boxes: readonly NoteDiffUnitBox[]
+): number | null {
+  const start = side === 'previous' ? hunk.previousStart : hunk.currentStart;
+  const before = boxes[start - 1];
+  const after = boxes[start];
+  if (before && after) return (before.top + before.height + after.top) / 2;
+  if (after) return after.top - GAP_EDGE_OFFSET;
+  if (before) return before.top + before.height + GAP_EDGE_OFFSET;
+  return null;
+}
+
+/**
+ * Where a hunk's marker stands beside one side's text: level with the
+ * hunk's blocks there, from the top of the first to the bottom of the last.
+ * A hunk with no block on that side gets a short marker centred on its gap
+ * line (`hunkGapOffset`). `null` when there is nothing measured to place it
+ * by.
+ */
+export function hunkMarkerBox(
+  hunk: NoteDiffHunk,
+  side: NoteDiffSide,
+  boxes: readonly NoteDiffUnitBox[]
+): NoteDiffUnitBox | null {
+  const indices = side === 'previous' ? hunk.previousIndices : hunk.currentIndices;
+  if (indices.length === 0) {
+    const gap = hunkGapOffset(hunk, side, boxes);
+    return gap === null ? null : { top: gap - GAP_MARKER_HEIGHT / 2, height: GAP_MARKER_HEIGHT };
+  }
+  const extent = hunkExtent(hunk, side, boxes);
+  if (!extent || extent.height >= MIN_MARKER_HEIGHT) return extent;
+  // Too short to see or press: kept centred on the block.
+  return {
+    top: extent.top - (MIN_MARKER_HEIGHT - extent.height) / 2,
+    height: MIN_MARKER_HEIGHT,
+  };
 }
 
 /** Where a hunk is put on a pane's reference line: the pane, and the offset in it. */

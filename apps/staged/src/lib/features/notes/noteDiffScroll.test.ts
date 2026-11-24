@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest';
 import type { NoteDiffHunk, NoteDiffOp } from './noteDiff';
 import {
   buildScrollAnchors,
+  GAP_MARKER_HEIGHT,
   hunkExtent,
+  hunkGapOffset,
   hunkLead,
+  hunkMarkerBox,
   mapScrollOffset,
   REFERENCE_LINE_FRACTION,
   scrollTopForOffset,
@@ -58,6 +61,68 @@ describe('hunkExtent', () => {
   it('is nowhere on a side with nothing measured', () => {
     expect(hunkExtent(hunk({ kind: 'removed', previousIndices: [0] }), 'current', [])).toBeNull();
     expect(hunkExtent(hunk({ currentIndices: [7] }), 'current', boxes)).toBeNull();
+  });
+});
+
+describe('hunkGapOffset', () => {
+  // 10px between blocks, as margins leave.
+  const boxes = [box(20, 40), box(70, 30), box(110, 60)];
+
+  it('is the middle of the gap between the units either side', () => {
+    const removed = hunk({ kind: 'removed', previousIndices: [1], currentStart: 2 });
+
+    expect(hunkGapOffset(removed, 'current', boxes)).toBe(105);
+  });
+
+  it('is just above the first unit, and just under the last', () => {
+    const first = hunk({ kind: 'removed', previousIndices: [0], currentStart: 0 });
+    const last = hunk({ kind: 'removed', previousIndices: [4], currentStart: 3 });
+
+    expect(hunkGapOffset(first, 'current', boxes)).toBe(16);
+    expect(hunkGapOffset(last, 'current', boxes)).toBe(174);
+  });
+
+  it('reads the side asked for', () => {
+    const added = hunk({ kind: 'added', currentIndices: [1], previousStart: 1, currentStart: 1 });
+
+    expect(hunkGapOffset(added, 'previous', boxes)).toBe(65);
+  });
+
+  it('is nowhere on a side with nothing measured', () => {
+    expect(
+      hunkGapOffset(hunk({ kind: 'removed', previousIndices: [0] }), 'current', [])
+    ).toBeNull();
+  });
+});
+
+describe('hunkMarkerBox', () => {
+  const boxes = [box(20, 40), box(70, 30), box(110, 60), box(180, 1)];
+
+  it('is as tall as the hunk’s blocks and level with them', () => {
+    expect(hunkMarkerBox(hunk({ currentIndices: [1] }), 'current', boxes)).toEqual(box(70, 30));
+    expect(hunkMarkerBox(hunk({ currentIndices: [0, 1, 2] }), 'current', boxes)).toEqual(
+      box(20, 150)
+    );
+    expect(hunkMarkerBox(hunk({ previousIndices: [2] }), 'previous', boxes)).toEqual(box(110, 60));
+  });
+
+  it('is a short marker centred on the gap line where the side has no block', () => {
+    const removed = hunk({ kind: 'removed', previousIndices: [1], currentStart: 2 });
+
+    const marker = hunkMarkerBox(removed, 'current', boxes)!;
+    expect(marker.height).toBe(GAP_MARKER_HEIGHT);
+    expect(marker.top + marker.height / 2).toBe(hunkGapOffset(removed, 'current', boxes));
+  });
+
+  it('keeps a marker tall enough to see beside a block that is not, centred on it', () => {
+    expect(hunkMarkerBox(hunk({ currentIndices: [3] }), 'current', boxes)).toEqual(box(178.5, 4));
+  });
+
+  it('is nowhere on a side with nothing measured', () => {
+    expect(hunkMarkerBox(hunk({ currentIndices: [7] }), 'current', boxes)).toBeNull();
+    expect(
+      hunkMarkerBox(hunk({ kind: 'removed', previousIndices: [0] }), 'current', [])
+    ).toBeNull();
   });
 });
 

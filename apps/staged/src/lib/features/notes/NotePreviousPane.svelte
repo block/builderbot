@@ -13,6 +13,11 @@
   computed from this version's HTML parsed off screen; the blocks read here
   are checked against those, and left unmarked if they differ.
 
+  It carries the diff's markers too, level with this version's blocks: text
+  the revision removed has its full height here, where the note has only a
+  line. They are a second set of the changes the note's markers list, so
+  they take presses (`onSelect`) and hovers but no Tab stop.
+
   The pane scrolls with the note (`currentScrollEl`). Each maps the other's
   place through the blocks both versions hold (noteDiffScroll.ts), so a
   shared block on the reference line in one is on it in the other. The pane
@@ -52,6 +57,7 @@
     type NoteDiffDomUnit,
   } from './noteDiffUnits';
   import NoteDiffGaps from './NoteDiffGaps.svelte';
+  import NoteDiffMarkers from './NoteDiffMarkers.svelte';
   import NoteDiffPaneHeader from './NoteDiffPaneHeader.svelte';
 
   interface Props {
@@ -67,6 +73,8 @@
     /** The height of what stands under the note's scroll area. */
     bottomInset?: number;
     onClose: () => void;
+    /** A marker beside the version was pressed. */
+    onSelect: (hunkId: string) => void;
     /** A press or a key in the version, handled as the note's are. */
     onContentClick?: (event: MouseEvent) => void;
     onContentKeydown?: (event: KeyboardEvent) => void;
@@ -82,6 +90,7 @@
     currentScrollEl,
     bottomInset = 0,
     onClose,
+    onSelect,
     onContentClick,
     onContentKeydown,
     content,
@@ -229,6 +238,13 @@
   >
     {@render content()}
     <NoteDiffGaps {noteDiff} side="previous" showAll />
+    <NoteDiffMarkers
+      {noteDiff}
+      side="previous"
+      label="Changes in the previous version"
+      tabbable={false}
+      {onSelect}
+    />
   </div>
   {#if bottomInset > 0}
     <div class="previous-bottom" style:height="{bottomInset}px"></div>
@@ -246,7 +262,7 @@
   }
 
   /* The note's scroll area over again (`.modal-content` in NoteModal),
-     positioned for the gap lines. The room under the text lets the last
+     positioned for the gap lines and the markers. The room under the text lets the last
      change reach the reference line, a third of the way down; the note's
      pane has the same. */
   .previous-scroll {

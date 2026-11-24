@@ -237,6 +237,36 @@ describe('NoteDiffConnectors', () => {
     expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
   });
 
+  it('does not light a change whose band scrolls under a pointer that came to rest in an empty gutter', () => {
+    // Panes 50px tall, as a long note whose changes are far apart is to its
+    // window: scrolled to the removal, its band is the only one drawn.
+    const { props, noteDiff } = render({ height: 50 });
+    props.scrollTops = { previous: 200, current: 180 };
+    flushSync();
+    expect(bands().map((el) => el.dataset.kind)).toEqual(['removed']);
+    // The pointer is seen over a pane.
+    pointer('pointermove', document.body, 300, 25);
+
+    // Both panes scroll to a block they share: the gutter is empty.
+    props.scrollTops = { previous: 325, current: 225 };
+    flushSync();
+    expect(svg()).toBeNull();
+    // The pointer moves into the gutter and rests there, on no band.
+    pointer('pointermove', document.body, 700, 25);
+
+    // The panes scroll back, and the browser reports the pointer, where it
+    // already is, to the band that arrived under it.
+    props.scrollTops = { previous: 200, current: 180 };
+    flushSync();
+    pointer('pointerenter', fill(band('removed')), 700, 25);
+    pointer('pointermove', fill(band('removed')), 700, 25);
+    expect(noteDiff.hoveredHunkId).toBeNull();
+
+    // The pointer moves on the band: that is a hover.
+    pointer('pointermove', fill(band('removed')), 701, 25);
+    expect(noteDiff.hoveredHunkId).toBe(noteDiff.hunks[0].id);
+  });
+
   it('lets go of a hovered change when its band scrolls out of the gutter', () => {
     const { props, noteDiff } = render();
     noteDiff.select(noteDiff.hunks[1].id, true);

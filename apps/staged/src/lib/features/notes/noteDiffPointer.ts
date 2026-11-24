@@ -41,11 +41,13 @@ export class RestingPointer {
     // A finger has no hover: a tap's would stay lit until the next tap.
     if (event.pointerType === 'touch') return false;
     // Not known to have moved until it has been seen somewhere else. The
-    // watch starts when there is something to draw, which can be after the
+    // watch starts with whoever draws the changes, which can be after the
     // pointer came to rest: the connectors appear when a key opens the
     // previous version, under a pointer that has not been seen since. The
     // move reported for it then is the first one seen, and is no hover. One
-    // that really arrives goes on moving, and its next move is.
+    // that really arrives goes on moving, and its next move is. From then
+    // on the watch must not lapse while the pointer can still move: a move
+    // it missed leaves `at` behind the pointer.
     if (!this.at) return false;
     return event.clientX !== this.at.x || event.clientY !== this.at.y;
   }

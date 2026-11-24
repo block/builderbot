@@ -94,9 +94,8 @@
     return () => observer.disconnect();
   });
 
-  $effect(() => {
-    if (markers.length > 0) return pointer.watch();
-  });
+  // Markers or none, as the connectors do (NoteDiffConnectors.svelte).
+  $effect(() => pointer.watch());
 
   // A marker that is no longer drawn was not left by the pointer or by
   // focus: the previous version's, when its pane closes with the pointer on

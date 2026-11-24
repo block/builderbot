@@ -61,9 +61,11 @@
     })
   );
 
-  $effect(() => {
-    if (connectors.length > 0) return pointer.watch();
-  });
+  // For as long as the gutter is there, bands or none: a pointer that moves
+  // into an empty gutter has to be seen there, or the band a pane later
+  // scrolls under it would be compared with where the pointer last was while
+  // there were bands, and taken for a hover.
+  $effect(() => pointer.watch());
 
   // A wheel or a press on a band is the reader taking the panes over, as it
   // is on the text (see `watchReaderScroll`).

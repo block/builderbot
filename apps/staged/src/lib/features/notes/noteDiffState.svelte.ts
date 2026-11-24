@@ -280,15 +280,15 @@ export class NoteDiffState {
   }
 
   /**
-   * Close the previous version and let go of the selected change, and of a
-   * hovered one: what was hovered may be going with the pane, and an element
-   * that is removed is never left. A pointer still on a marker lights its
-   * change again when it next moves.
+   * Close the previous version and let go of the selected change. A hovered
+   * change is not let go of here: a marker that still has the pointer or
+   * keyboard focus goes on showing its change. A hover whose element goes
+   * with the pane is ended by whoever drew it (`ChangeHover` in
+   * noteDiffPointer.ts).
    */
   close(): void {
     this.split = false;
     this.active = null;
-    this.hovered = null;
     this.follows = false;
   }
 

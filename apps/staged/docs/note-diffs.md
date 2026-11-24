@@ -70,18 +70,22 @@ that moved onto it lights the change. Otherwise the change a press scrolled
 into the pointer's place would take the light from the one that was pressed.
 A pointer that has not been seen to move at all counts as at rest: the bands
 between the panes appear when a key opens the previous version, possibly
-under a pointer that has been still since before they were drawn. The halo
-of a marker goes with the light, so a marker under a resting pointer has
-none.
+under a pointer that has been still since before they were drawn. Once
+mounted, the markers and the bands follow the pointer whether or not they
+have anything drawn, so one that moves into a gutter with no band in it is
+still at rest when a band scrolls under it. The halo of a marker goes with
+the light, so a marker under a resting pointer has none.
 
 A hover ends when the pointer or the focus leaves, and neither is reported
 for an element that is removed. So a hover is also let go of when what was
 hovered is no longer drawn: a band scrolled out of the gutter, the previous
 version's markers and bands when its pane closes, and any marker when its
 markers are taken down (`ChangeHover` in `noteDiffPointer.ts`). Closing the
-previous version, by Escape or otherwise, lets go of the hovered change
-along with the selected one; a pointer still on one of the note's markers
-lights its change again when it next moves.
+previous version, by Escape or otherwise, lets go of the selected change
+only. A hover whose marker is still there is kept: a marker of the note
+that has keyboard focus, or the pointer on it, goes on showing its change
+after Escape, and after the second press that lets go of a change in a
+window too narrow for two panes, until focus or the pointer leaves it.
 
 ## The connectors
 
@@ -411,7 +415,9 @@ What to expect:
   and run off the top or bottom of the gutter, never over the pane headers.
   Tab still stops at the note's markers only.
 - With the pointer on a band, or on a marker beside the previous version,
-  press Escape: the pane closes and nothing in the note stays lit.
+  press Escape: the pane closes and nothing in the note stays lit. Tab to a
+  marker of the note, press Enter and then Escape: the pane closes and the
+  change stays lit while the marker has focus.
 
 With the find field open (Cmd+F) and focused, what Escape does depends on
 whether anything of the diff is held open. While the previous version is

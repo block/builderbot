@@ -560,6 +560,33 @@ describe('NoteModal previous version', () => {
     expect(markers().filter((el) => el.classList.contains('is-pointed'))).toEqual([]);
   });
 
+  it('keeps a change lit by its focused marker after Escape closes the previous version', async () => {
+    const { onClose } = await open();
+    const focused = marker('modified');
+
+    // Tab to the marker, then Enter, which is a button's click.
+    focused.focus();
+    flushSync();
+    await press(focused);
+    expect(previousPane()).not.toBeNull();
+
+    await pressEscape();
+
+    // The selection is let go of and the pane is gone. Focus never left the
+    // marker, so it still shows its change.
+    expect(previousPane()).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(focused);
+    expect(focused.getAttribute('aria-pressed')).toBe('false');
+    expect(focused.classList.contains('is-pointed')).toBe(true);
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+
+    // Until focus leaves it.
+    focused.blur();
+    flushSync();
+    expect(lit(note())).toEqual([]);
+  });
+
   it('closes only the search on Escape in the find field, and keeps the previous version', async () => {
     const { onClose } = await open();
     await press(marker('modified'));
@@ -641,6 +668,32 @@ describe('NoteModal previous version', () => {
     await pressEscape();
     expect(lit(note())).toEqual([]);
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps a change lit by its focused marker when a second press lets go of it in a narrow window', async () => {
+    screen.wide = false;
+    viewport.canSplit = false;
+    await open();
+    const focused = marker('modified');
+
+    // Tab to the marker, then Enter twice: the first selects the change, the
+    // second lets go of it.
+    focused.focus();
+    flushSync();
+    await press(focused);
+    expect(focused.getAttribute('aria-pressed')).toBe('true');
+    await press(focused);
+
+    expect(previousPane()).toBeNull();
+    expect(document.activeElement).toBe(focused);
+    expect(focused.getAttribute('aria-pressed')).toBe('false');
+    expect(focused.classList.contains('is-pointed')).toBe(true);
+    expect(lit(note())).toEqual(['The cache is filled when the app starts.']);
+
+    // Until focus leaves it.
+    focused.blur();
+    flushSync();
+    expect(lit(note())).toEqual([]);
   });
 
   it('starts over when the note is revised under an open previous version', async () => {

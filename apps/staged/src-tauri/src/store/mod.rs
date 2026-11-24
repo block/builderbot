@@ -37,6 +37,7 @@ mod recent_repos;
 pub mod repo_affinities;
 pub mod repo_badges;
 mod reviews;
+mod session_feed;
 mod session_poll;
 mod session_titles;
 mod sessions;
@@ -53,6 +54,8 @@ mod migration_tests;
 #[cfg(test)]
 mod note_versions_tests;
 #[cfg(test)]
+mod session_feed_tests;
+#[cfg(test)]
 mod tags_tests;
 #[cfg(test)]
 mod tests;
@@ -68,6 +71,7 @@ pub use project_notes::DeletedProjectNoteSessions;
 pub use project_search::{ProjectSearchItem, ProjectSearchItemKind};
 pub use project_transfer::{BranchLanding, BranchTransfer, ProjectTransfer};
 pub use repo_badges::{fallback_short_name, next_hue};
+pub use session_feed::{SessionDirty, SessionFeed};
 pub use session_poll::{SessionPoll, SessionPollRequest};
 pub use session_titles::{
     non_empty_acp_title, opens_with_staged_instructions, pending_commit_subject, review_title,
@@ -84,7 +88,7 @@ pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 // =============================================================================
@@ -309,6 +313,10 @@ pub struct Store {
     /// construction so a task above the Tauri boundary can forward changes
     /// to all windows and web clients.
     change_tx: Option<broadcast::Sender<StoreChange>>,
+    /// Feed of session-family writes, which the change feed leaves out.
+    /// `None` (the default) makes every mark a no-op, and an attached feed
+    /// records nothing until its consumer activates it.
+    session_feed: Option<Arc<SessionFeed>>,
 }
 
 impl Store {
@@ -322,6 +330,7 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
             change_tx: None,
+            session_feed: None,
         };
         store.init_schema()?;
         Ok(store)
@@ -334,6 +343,12 @@ impl Store {
         self
     }
 
+    /// Attach the session feed. The caller keeps its own handle to drain it.
+    pub fn with_session_feed(mut self, feed: Arc<SessionFeed>) -> Self {
+        self.session_feed = Some(feed);
+        self
+    }
+
     /// In-memory database for testing.
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, StoreError> {
@@ -341,6 +356,7 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
             change_tx: None,
+            session_feed: None,
         };
         store.init_schema()?;
         Ok(store)

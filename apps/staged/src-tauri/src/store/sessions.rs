@@ -199,12 +199,13 @@ impl Store {
         } else {
             None
         };
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4,
                  owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
              WHERE id = ?5",
             params![status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -255,7 +256,7 @@ impl Store {
             ),
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Finish a detached-recovery claim: move a row that is
@@ -293,7 +294,7 @@ impl Store {
                 CompletionReason::Detached.as_str()
             ],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// [`Self::finish_detached_recovery`] for exactly the `error`/`detached`
@@ -343,7 +344,7 @@ impl Store {
                 observed_error_message,
             ],
         )?;
-        Ok((rows > 0).then_some(now))
+        Ok(self.mark_session_written(id, rows).then_some(now))
     }
 
     /// [`Self::transition_from_running`] for exactly the `running` row the
@@ -376,7 +377,7 @@ impl Store {
              WHERE id = ?5 AND status = 'running' AND updated_at = ?6",
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, observed_updated_at],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Pause a running session after the provider reports a retryable rate or usage limit.
@@ -442,7 +443,7 @@ impl Store {
              WHERE id = ?6 AND status = 'running'",
             params![error_message, rate_limit_resets_at, rate_limit_kind, merged_json, now_timestamp(), id],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Transition session status only if the row is still active *and ours*:
@@ -483,7 +484,7 @@ impl Store {
              WHERE id = ?5 AND (status = 'queued' OR (status = 'running' AND owner_pid = ?6))",
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, owner_pid],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Take over a `running` row whose owner process is gone, making this
@@ -503,7 +504,7 @@ impl Store {
              WHERE id = ?2 AND status = 'running' AND owner_pid IS ?3",
             params![std::process::id(), id, previous_owner],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Atomically transition a session from `Queued` to the given status.
@@ -532,7 +533,7 @@ impl Store {
              WHERE id = ?5 AND status = 'queued'",
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Settle a `disconnected` row, if it is still exactly the row the
@@ -567,7 +568,7 @@ impl Store {
              WHERE id = ?5 AND status = 'disconnected' AND updated_at = ?6",
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, observed_updated_at],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Claim a `disconnected` row for this process, as `running`, to follow
@@ -589,7 +590,7 @@ impl Store {
              WHERE id = ?3 AND status = 'disconnected' AND updated_at = ?4",
             params![now_timestamp(), std::process::id(), id, observed_updated_at],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Atomically claim a queued session for execution by this process.
@@ -605,7 +606,7 @@ impl Store {
              WHERE id = ?3 AND status = 'queued'",
             params![now_timestamp(), std::process::id(), id],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Atomically transition a session to `Running`, but only if it is NOT
@@ -656,7 +657,7 @@ impl Store {
              WHERE id = ?4 AND status NOT IN ('running', 'disconnected')",
             params![now_timestamp(), std::process::id(), agent_id_to_clear, id],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Put a branch session the last app quit ended back on its branch queue.
@@ -682,7 +683,7 @@ impl Store {
                AND branch_id IS NOT NULL",
             params![now_timestamp(), id],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Atomically claim a rate-limited paused session for auto-resume,
@@ -711,7 +712,7 @@ impl Store {
              WHERE id = ?4 AND status = 'paused' AND completion_reason = 'rate_limited'",
             params![provider_metadata_json, now_timestamp(), std::process::id(), id],
         )?;
-        Ok(rows > 0)
+        Ok(self.mark_session_written(id, rows))
     }
 
     /// Sessions an app quit (or a crash, recovered at the next launch) ended
@@ -1470,10 +1471,11 @@ impl Store {
         title: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET acp_title = ?1, updated_at = ?2 WHERE id = ?3",
             params![title, now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 
@@ -1552,10 +1554,11 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let json = serde_json::to_string(pipeline)
             .map_err(|e| StoreError(format!("Failed to serialize pipeline: {e}")))?;
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE sessions SET pipeline = ?1, updated_at = ?2 WHERE id = ?3",
             params![json, now_timestamp(), id],
         )?;
+        self.mark_session_written(id, rows);
         Ok(())
     }
 

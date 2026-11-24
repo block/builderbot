@@ -1,6 +1,6 @@
 //! Session message CRUD operations.
 
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::models::{AcpMessageMetadata, MessageRole, SessionMessage};
 use super::tool_bodies::project_tool_bodies;
@@ -45,6 +45,20 @@ const TRANSCRIPT_METADATA_FILTER: &str = "(
         AND COALESCE(acp_tool_status, '') NOT IN (
             'completed', 'succeeded', 'success', 'failed', 'error', 'cancelled', 'canceled'))
 )";
+/// The event kinds of the hidden rows [`TRANSCRIPT_METADATA_FILTER`] ships:
+/// the only metadata inserts the session feed is told about. The rest are
+/// written for replay and read by nothing in the UI, and chunk rows alone are
+/// a large share of a turn's inserts.
+/// `metadata_inserts_are_marked_exactly_when_the_transcript_reads_them` holds
+/// this list to the filter.
+const TRANSCRIPT_HIDDEN_EVENT_KINDS: [&str; 6] = [
+    "tool_call",
+    "tool_call_update",
+    "plan_update",
+    "available_commands_update",
+    "config_options_update",
+    "pikchr_session_started",
+];
 
 /// Which slice of the visible transcript [`Store::get_session_messages_window`]
 /// returns. `limit` keeps only the newest rows (still delivered oldest first);
@@ -202,7 +216,9 @@ impl Store {
                 image_ids_json
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let message_id = conn.last_insert_rowid();
+        self.mark_message_row(session_id, message_id);
+        Ok(message_id)
     }
 
     /// Insert a visible message that Staged itself authored, tagged with the
@@ -231,7 +247,9 @@ impl Store {
                 event_kind
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let message_id = conn.last_insert_rowid();
+        self.mark_message_row(session_id, message_id);
+        Ok(message_id)
     }
 
     /// Insert a user message and atomically mark a claimed queued follow-up as sent.
@@ -277,6 +295,8 @@ impl Store {
             )));
         }
         tx.commit()?;
+        self.mark_message_row(session_id, message_id);
+        self.mark_session_queue(session_id);
         Ok(message_id)
     }
 
@@ -340,10 +360,19 @@ impl Store {
     /// Update the content of an existing message (used for streaming updates).
     pub fn update_message_content(&self, id: i64, content: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE session_messages SET content = ?1 WHERE id = ?2",
-            params![content, id],
-        )?;
+        // `RETURNING` hands back the session to mark without a second
+        // statement. An id that matches no row returns none, and is no more
+        // an error than it was as a plain `UPDATE`.
+        let session_id: Option<String> = conn
+            .query_row(
+                "UPDATE session_messages SET content = ?1 WHERE id = ?2 RETURNING session_id",
+                params![content, id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(session_id) = session_id {
+            self.mark_message_row(&session_id, id);
+        }
         Ok(())
     }
 
@@ -367,49 +396,56 @@ impl Store {
         let session_mode_state = json_column(metadata.acp_session_mode_state.as_ref());
 
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE session_messages
-             SET acp_event_kind = COALESCE(?1, acp_event_kind),
-                 acp_protocol_version = COALESCE(?2, acp_protocol_version),
-                 acp_agent_capabilities = COALESCE(?3, acp_agent_capabilities),
-                 acp_auth_methods = COALESCE(?4, acp_auth_methods),
-                 acp_agent_info = COALESCE(?5, acp_agent_info),
-                 acp_message_id = COALESCE(?6, acp_message_id),
-                 acp_tool_call_id = COALESCE(?7, acp_tool_call_id),
-                 acp_tool_kind = COALESCE(?8, acp_tool_kind),
-                 acp_tool_status = COALESCE(?9, acp_tool_status),
-                 acp_raw_input = COALESCE(?10, acp_raw_input),
-                 acp_raw_output = COALESCE(?11, acp_raw_output),
-                 acp_content = COALESCE(?12, acp_content),
-                 acp_locations = COALESCE(?13, acp_locations),
-                 acp_usage = COALESCE(?14, acp_usage),
-                 acp_session_info = COALESCE(?15, acp_session_info),
-                 acp_config_options = COALESCE(?16, acp_config_options),
-                 acp_session_mode_state = COALESCE(?17, acp_session_mode_state),
-                 acp_origin = COALESCE(?18, acp_origin)
-             WHERE id = ?19",
-            params![
-                metadata.acp_event_kind.as_deref(),
-                metadata.acp_protocol_version.as_deref(),
-                agent_capabilities,
-                auth_methods,
-                agent_info,
-                metadata.acp_message_id.as_deref(),
-                metadata.acp_tool_call_id.as_deref(),
-                metadata.acp_tool_kind.as_deref(),
-                metadata.acp_tool_status.as_deref(),
-                raw_input,
-                raw_output,
-                content,
-                locations,
-                usage,
-                session_info,
-                config_options,
-                session_mode_state,
-                metadata.acp_origin.as_deref(),
-                id
-            ],
-        )?;
+        let session_id: Option<String> = conn
+            .query_row(
+                "UPDATE session_messages
+                 SET acp_event_kind = COALESCE(?1, acp_event_kind),
+                     acp_protocol_version = COALESCE(?2, acp_protocol_version),
+                     acp_agent_capabilities = COALESCE(?3, acp_agent_capabilities),
+                     acp_auth_methods = COALESCE(?4, acp_auth_methods),
+                     acp_agent_info = COALESCE(?5, acp_agent_info),
+                     acp_message_id = COALESCE(?6, acp_message_id),
+                     acp_tool_call_id = COALESCE(?7, acp_tool_call_id),
+                     acp_tool_kind = COALESCE(?8, acp_tool_kind),
+                     acp_tool_status = COALESCE(?9, acp_tool_status),
+                     acp_raw_input = COALESCE(?10, acp_raw_input),
+                     acp_raw_output = COALESCE(?11, acp_raw_output),
+                     acp_content = COALESCE(?12, acp_content),
+                     acp_locations = COALESCE(?13, acp_locations),
+                     acp_usage = COALESCE(?14, acp_usage),
+                     acp_session_info = COALESCE(?15, acp_session_info),
+                     acp_config_options = COALESCE(?16, acp_config_options),
+                     acp_session_mode_state = COALESCE(?17, acp_session_mode_state),
+                     acp_origin = COALESCE(?18, acp_origin)
+                 WHERE id = ?19
+                 RETURNING session_id",
+                params![
+                    metadata.acp_event_kind.as_deref(),
+                    metadata.acp_protocol_version.as_deref(),
+                    agent_capabilities,
+                    auth_methods,
+                    agent_info,
+                    metadata.acp_message_id.as_deref(),
+                    metadata.acp_tool_call_id.as_deref(),
+                    metadata.acp_tool_kind.as_deref(),
+                    metadata.acp_tool_status.as_deref(),
+                    raw_input,
+                    raw_output,
+                    content,
+                    locations,
+                    usage,
+                    session_info,
+                    config_options,
+                    session_mode_state,
+                    metadata.acp_origin.as_deref(),
+                    id
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(session_id) = session_id {
+            self.mark_metadata_row(&session_id, id);
+        }
         Ok(())
     }
 
@@ -479,7 +515,15 @@ impl Store {
                 metadata.acp_origin.as_deref()
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let message_id = conn.last_insert_rowid();
+        if metadata
+            .acp_event_kind
+            .as_deref()
+            .is_some_and(|kind| TRANSCRIPT_HIDDEN_EVENT_KINDS.contains(&kind))
+        {
+            self.mark_metadata_row(session_id, message_id);
+        }
+        Ok(message_id)
     }
 
     /// Return the ACP metadata rows the transcript needs beyond

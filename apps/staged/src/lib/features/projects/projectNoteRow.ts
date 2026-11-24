@@ -38,7 +38,7 @@ export type ProjectNoteRowLive = {
   nowMs: number;
   /** The running session's ACP title, once it has one. */
   liveTitle?: string;
-  /** The running session's latest agent message. */
+  /** The running session's newest message: agent output, or a reply sent since. */
   liveHint?: string;
   /** Repo sessions the running session has in flight; they take the subtitle over. */
   childBadges?: ChildSessionBadgeProps[];

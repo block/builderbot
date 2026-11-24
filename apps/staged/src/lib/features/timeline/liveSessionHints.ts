@@ -6,7 +6,9 @@ import {
   resolveDisplayRoots,
   type DisplayRootInput,
 } from '../sessions/pathDisplayRoots';
+import { parseQuotedMessage } from '../sessions/composerDraft';
 import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
+import { isStagedResumePrompt } from './stagedResumePrompts';
 
 const HINT_POLL_INTERVAL_MS = 750;
 const MAX_HINT_LENGTH = 72;
@@ -15,6 +17,13 @@ const MAX_HINT_MESSAGES = 40;
 type HintTracker = {
   lastMessageId: number | null;
   messages: SessionMessage[];
+  /**
+   * The id of the session's first user message — the prompt that opened it —
+   * once the transcript has one. A tracker starts from the whole transcript,
+   * so the first user message it sees is the session's first. Every later
+   * user message is a reply.
+   */
+  openingPromptId: number | null;
   rootKey: string;
   displayRoots: string[];
   /**
@@ -44,8 +53,18 @@ function normalizeHintText(text: string): string | undefined {
     .replace(/\s+/g, ' ')
     .trim();
   if (!cleaned) return undefined;
-  if (cleaned.length <= MAX_HINT_LENGTH) return cleaned;
-  return `${cleaned.slice(0, MAX_HINT_LENGTH - 1).trimEnd()}…`;
+  return truncateHint(cleaned);
+}
+
+function truncateHint(text: string): string {
+  if (text.length <= MAX_HINT_LENGTH) return text;
+  let end = MAX_HINT_LENGTH - 1;
+  // `slice` counts UTF-16 units, and a character outside the BMP (most emoji)
+  // is a pair of them. When the last unit kept is the first of a pair, drop
+  // it too: by itself it renders as a replacement glyph.
+  const lastKept = text.charCodeAt(end - 1);
+  if (lastKept >= 0xd800 && lastKept <= 0xdbff) end -= 1;
+  return `${text.slice(0, end).trimEnd()}…`;
 }
 
 function withTrailingEllipsis(text: string): string {
@@ -93,40 +112,95 @@ function formatAssistantHint(content: string): string | undefined {
   return undefined;
 }
 
+/**
+ * A line that opens or closes a fenced code block: the fence and, on an
+ * opening line, its language tag. A run of backticks with more backticks after
+ * it on the same line is inline code, not a fence, and is left alone.
+ */
+const FENCE_MARKER_LINE = /^[ \t]*(?:`{3,}[^`\n]*|~{3,}.*)$/gm;
+
+/**
+ * Typed text on one line. Unlike `normalizeHintText`, which is for agent
+ * output, this keeps what the user wrote: the content of a fenced block stays
+ * (only its fence lines go), and `<` and `>` are text, not tags.
+ */
+function normalizeReplyText(text: string): string {
+  return text.replace(FENCE_MARKER_LINE, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** What stands in for a reply that is attachments and no text. */
+function attachmentPlaceholder(count: number): string {
+  return count === 1 ? 'Attachment' : `${count} attachments`;
+}
+
+/**
+ * The hint for a `user` row that is not the opening prompt: the text the user
+ * typed, or nothing when the row has none to show.
+ *
+ * Left out of the text, because they are not the user's own words:
+ * - the tagged blocks Staged wraps around a prompt (`XML_BLOCK_TAGS`: action
+ *   instructions, branch history, launch context, Pikchr grammar);
+ * - the quoted passage of a reply to a note selection.
+ *
+ * Rows that yield nothing, so the hint stays on whatever is older:
+ * - a row that is all tagged block and has no attachment, which is how Staged
+ *   writes a Pikchr correction or a `write_note` reminder;
+ * - one of Staged's resume prompts (`STAGED_RESUME_PROMPTS`): the automatic
+ *   resume after a rate-limit or network pause or after a relaunch, and a
+ *   Resume button's prompt, which is the same text as the first of those.
+ *
+ * Every other `user` row shows, typed or not. A message a project agent sends
+ * with `continue_repo_session` is stored as a plain row and is a real
+ * instruction to the session, so it shows like a reply. A row with no text
+ * left but with attachments (`imageIds`, which holds images and PDFs alike)
+ * shows a placeholder: the rows Staged writes by itself carry none, so an
+ * attachment marks a message somebody sent.
+ *
+ * A new tag that Staged wraps around a prompt must be added to
+ * `XML_BLOCK_TAGS`. Agent output gets a generic strip of anything shaped like
+ * a tag (`normalizeHintText`); a reply does not, because `<` and `>` in typed
+ * text are text. `stripXmlTags` is therefore the only thing that takes a
+ * wrapper out of a reply, and it removes whole, balanced blocks of the listed
+ * tags and nothing else. A wrapper with an unlisted tag shows raw in the
+ * subtitle, tags and body, and so does whatever is left of a listed one that
+ * is unclosed or nested in itself.
+ */
+function formatUserHint(message: SessionMessage): string | undefined {
+  const typed = parseQuotedMessage(stripXmlTags(message.content))
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n');
+  const text = normalizeReplyText(typed);
+  if (text) return isStagedResumePrompt(text) ? undefined : truncateHint(text);
+  const attachments = message.imageIds?.length ?? 0;
+  return attachments > 0 ? attachmentPlaceholder(attachments) : undefined;
+}
+
+/**
+ * The newest message with something to show, whichever side wrote it: a tool
+ * call, assistant text, or a reply from the user. `messages` is in id order
+ * (the order the rows were written), so the walk from the end is by recency.
+ *
+ * The prompt that opened the session (`openingPromptId`) is not a reply: the
+ * row's title already speaks for it, and a session nobody has replied to
+ * keeps its fallback label until the agent says something.
+ */
 function deriveHint(
   messages: SessionMessage[],
-  displayRoots?: DisplayRootInput
+  displayRoots: DisplayRootInput,
+  openingPromptId: number | null
 ): string | undefined {
-  let latestToolHint: { id: number; text: string } | null = null;
-  let latestAssistantHint: { id: number; text: string } | null = null;
-
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (!latestToolHint && message.role === 'tool_call') {
-      const hint = formatToolCallHint(message.content, displayRoots);
-      if (hint) {
-        latestToolHint = { id: message.id, text: hint };
-      }
+    let hint: string | undefined;
+    if (message.role === 'tool_call') {
+      hint = formatToolCallHint(message.content, displayRoots);
+    } else if (message.role === 'assistant') {
+      hint = formatAssistantHint(message.content);
+    } else if (message.role === 'user' && message.id !== openingPromptId) {
+      hint = formatUserHint(message);
     }
-    if (!latestAssistantHint && message.role === 'assistant') {
-      const hint = formatAssistantHint(message.content);
-      if (hint) {
-        latestAssistantHint = { id: message.id, text: hint };
-      }
-    }
-    if (latestToolHint && latestAssistantHint) {
-      break;
-    }
-  }
-
-  if (latestToolHint && (!latestAssistantHint || latestToolHint.id >= latestAssistantHint.id)) {
-    return latestToolHint.text;
-  }
-  if (latestAssistantHint) {
-    return latestAssistantHint.text;
-  }
-  if (latestToolHint) {
-    return latestToolHint.text;
+    if (hint) return hint;
   }
   return undefined;
 }
@@ -286,6 +360,10 @@ export function createLiveSessionHints(
       if (destroyed || !hintTrackers.has(sessionId)) return;
 
       if (updatedMessages.length > 0) {
+        if (tracker.openingPromptId === null) {
+          tracker.openingPromptId =
+            updatedMessages.find((message) => message.role === 'user')?.id ?? null;
+        }
         tracker.messages = mergeHintMessages(
           tracker.messages,
           updatedMessages,
@@ -296,7 +374,7 @@ export function createLiveSessionHints(
       }
 
       const nextHint =
-        deriveHint(tracker.messages, tracker.displayRoots) ??
+        deriveHint(tracker.messages, tracker.displayRoots, tracker.openingPromptId) ??
         (tracker.messages.length === 0 ? derivePipelineHint(session.pipeline) : undefined);
       if (nextHint) {
         setHint(sessionId, nextHint);
@@ -361,6 +439,7 @@ export function createLiveSessionHints(
           hintTrackers.set(sessionId, {
             lastMessageId: null,
             messages: [],
+            openingPromptId: null,
             rootKey: '',
             displayRoots: [],
             titleOnly,

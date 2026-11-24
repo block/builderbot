@@ -1,7 +1,7 @@
 /**
  * Badge assembly for the repo sessions a running project session spawned.
  *
- * A running project session normally shows its latest agent message as a
+ * A running project session normally shows its newest message as a
  * subtitle. When it has repo sessions in flight, those badges say more than
  * the hint does, so they take the subtitle's place until the children finish.
  */
@@ -77,7 +77,7 @@ export function runningChildSessionIds(childrenBySession: Record<string, ChildSe
 }
 
 /**
- * The subtitle a running project-session row should show: the live agent hint,
+ * The subtitle a running project-session row should show: the live hint,
  * unless child badges have taken the row's meta line over.
  */
 export function runningSecondaryMeta(

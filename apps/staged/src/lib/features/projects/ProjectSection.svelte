@@ -280,7 +280,7 @@
     return `draft:project-session:${projectId}`;
   }
 
-  // ── Live session hints/titles (latest agent message + ACP title for running notes) ──
+  // ── Live session hints/titles (newest message + ACP title for running notes) ──
   let liveSessionHints = $state<Record<string, string>>({});
   let liveSessionTitles = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(

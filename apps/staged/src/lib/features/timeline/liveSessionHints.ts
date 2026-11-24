@@ -6,6 +6,7 @@ import {
   resolveDisplayRoots,
   type DisplayRootInput,
 } from '../sessions/pathDisplayRoots';
+import { parseQuotedMessage } from '../sessions/composerDraft';
 import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
 
 const HINT_POLL_INTERVAL_MS = 750;
@@ -15,6 +16,13 @@ const MAX_HINT_MESSAGES = 40;
 type HintTracker = {
   lastMessageId: number | null;
   messages: SessionMessage[];
+  /**
+   * The id of the session's first user message — the prompt that opened it —
+   * once the transcript has one. A tracker starts from the whole transcript,
+   * so the first user message it sees is the session's first. Every later
+   * user message is a reply.
+   */
+  openingPromptId: number | null;
   rootKey: string;
   displayRoots: string[];
   /**
@@ -93,40 +101,46 @@ function formatAssistantHint(content: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The text the user typed in a reply. Staged wraps what it adds to a prompt in
+ * tagged blocks (action instructions, branch history, …) and a reply to a
+ * note selection carries the quoted passage; neither is the user's own words,
+ * so both are left out. A message Staged wrote by itself (a Pikchr correction,
+ * a `write_note` reminder) is all wrapper and yields nothing.
+ */
+function formatUserHint(content: string): string | undefined {
+  const typed = parseQuotedMessage(stripXmlTags(content))
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join(' ');
+  return normalizeHintText(typed);
+}
+
+/**
+ * The newest message with something to show, whichever side wrote it: a tool
+ * call, assistant text, or a reply from the user. `messages` is in id order
+ * (the order the rows were written), so the walk from the end is by recency.
+ *
+ * The prompt that opened the session (`openingPromptId`) is not a reply: the
+ * row's title already speaks for it, and a session nobody has replied to
+ * keeps its fallback label until the agent says something.
+ */
 function deriveHint(
   messages: SessionMessage[],
-  displayRoots?: DisplayRootInput
+  displayRoots?: DisplayRootInput,
+  openingPromptId: number | null = null
 ): string | undefined {
-  let latestToolHint: { id: number; text: string } | null = null;
-  let latestAssistantHint: { id: number; text: string } | null = null;
-
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (!latestToolHint && message.role === 'tool_call') {
-      const hint = formatToolCallHint(message.content, displayRoots);
-      if (hint) {
-        latestToolHint = { id: message.id, text: hint };
-      }
+    let hint: string | undefined;
+    if (message.role === 'tool_call') {
+      hint = formatToolCallHint(message.content, displayRoots);
+    } else if (message.role === 'assistant') {
+      hint = formatAssistantHint(message.content);
+    } else if (message.role === 'user' && message.id !== openingPromptId) {
+      hint = formatUserHint(message.content);
     }
-    if (!latestAssistantHint && message.role === 'assistant') {
-      const hint = formatAssistantHint(message.content);
-      if (hint) {
-        latestAssistantHint = { id: message.id, text: hint };
-      }
-    }
-    if (latestToolHint && latestAssistantHint) {
-      break;
-    }
-  }
-
-  if (latestToolHint && (!latestAssistantHint || latestToolHint.id >= latestAssistantHint.id)) {
-    return latestToolHint.text;
-  }
-  if (latestAssistantHint) {
-    return latestAssistantHint.text;
-  }
-  if (latestToolHint) {
-    return latestToolHint.text;
+    if (hint) return hint;
   }
   return undefined;
 }
@@ -286,6 +300,10 @@ export function createLiveSessionHints(
       if (destroyed || !hintTrackers.has(sessionId)) return;
 
       if (updatedMessages.length > 0) {
+        if (tracker.openingPromptId === null) {
+          tracker.openingPromptId =
+            updatedMessages.find((message) => message.role === 'user')?.id ?? null;
+        }
         tracker.messages = mergeHintMessages(
           tracker.messages,
           updatedMessages,
@@ -296,7 +314,7 @@ export function createLiveSessionHints(
       }
 
       const nextHint =
-        deriveHint(tracker.messages, tracker.displayRoots) ??
+        deriveHint(tracker.messages, tracker.displayRoots, tracker.openingPromptId) ??
         (tracker.messages.length === 0 ? derivePipelineHint(session.pipeline) : undefined);
       if (nextHint) {
         setHint(sessionId, nextHint);
@@ -361,6 +379,7 @@ export function createLiveSessionHints(
           hintTrackers.set(sessionId, {
             lastMessageId: null,
             messages: [],
+            openingPromptId: null,
             rootKey: '',
             displayRoots: [],
             titleOnly,

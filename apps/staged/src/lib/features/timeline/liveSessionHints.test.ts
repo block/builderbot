@@ -380,3 +380,186 @@ describe('createLiveSessionHints setPaused', () => {
     expect(getSession.mock.calls.length).toBe(calls);
   });
 });
+
+describe('createLiveSessionHints user replies', () => {
+  let getSessionMessages: ReturnType<typeof vi.fn>;
+  let getSessionMessagesSince: ReturnType<typeof vi.fn>;
+  let createLiveSessionHints: LiveSessionHintsModule['createLiveSessionHints'];
+  let poller: LiveSessionHintPoller | null;
+  let latestHints: Record<string, string>;
+
+  type Row = { id: number; role: string; content: string; createdAt: number };
+  const row = (id: number, role: string, content: string): Row => ({
+    id,
+    role,
+    content,
+    createdAt: id,
+  });
+
+  const OPENING_PROMPT = row(
+    1,
+    'user',
+    '<action>\nThe user is requesting a note.\n</action>\n\nSummarise the cache layer'
+  );
+  const TURN_END = row(2, 'assistant', 'Done');
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    getSessionMessages = vi.fn().mockResolvedValue({ data: [] });
+    getSessionMessagesSince = vi.fn().mockResolvedValue([]);
+    vi.doMock('../../api/commands', () => ({
+      getSession: vi.fn().mockResolvedValue(session()),
+      getSessionMessages,
+      getSessionMessagesSince,
+      resolvePathAliases: vi.fn().mockResolvedValue([]),
+    }));
+    ({ createLiveSessionHints } = await import('./liveSessionHints'));
+    poller = null;
+    latestHints = {};
+  });
+
+  afterEach(() => {
+    poller?.destroy();
+    vi.doUnmock('../../api/commands');
+    vi.useRealTimers();
+  });
+
+  /** Start tracking `s1` from `transcript` and run the first poll. */
+  async function track(transcript: Row[]): Promise<void> {
+    getSessionMessages.mockResolvedValue({ data: transcript });
+    poller = createLiveSessionHints((hints) => {
+      latestHints = hints;
+    });
+    poller.syncRunningSessionIds(['s1']);
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  /** Run the next poll tick, which reads `rows` as the transcript's new tail. */
+  async function tick(rows: Row[]): Promise<void> {
+    getSessionMessagesSince.mockResolvedValueOnce(rows);
+    await vi.advanceTimersByTimeAsync(750);
+  }
+
+  it('shows a reply sent after a completed turn in place of that turn’s last message', async () => {
+    // What a reload reads: the reply is already the transcript's newest row.
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', 'Also cover the eviction policy')]);
+
+    expect(latestHints).toEqual({ s1: 'Also cover the eviction policy' });
+  });
+
+  it('switches to the reply when it arrives while the session is tracked', async () => {
+    await track([OPENING_PROMPT, TURN_END]);
+    expect(latestHints).toEqual({ s1: 'Done' });
+
+    await tick([TURN_END, row(3, 'user', 'Also cover the eviction policy')]);
+
+    expect(getSessionMessagesSince).toHaveBeenLastCalledWith('s1', 2);
+    expect(latestHints).toEqual({ s1: 'Also cover the eviction policy' });
+  });
+
+  it('lets newer agent content replace the reply', async () => {
+    const reply = row(3, 'user', 'Also cover the eviction policy');
+    await track([OPENING_PROMPT, TURN_END, reply]);
+    expect(latestHints).toEqual({ s1: 'Also cover the eviction policy' });
+
+    const toolCall = row(4, 'tool_call', 'Read');
+    await tick([reply, toolCall]);
+    expect(latestHints).toEqual({ s1: 'Reading…' });
+
+    await tick([toolCall, row(5, 'assistant', 'Looking at the eviction code')]);
+    expect(latestHints).toEqual({ s1: 'Looking at the eviction code' });
+  });
+
+  it('keeps the reply while the agent has produced nothing newer', async () => {
+    const reply = row(3, 'user', 'Also cover the eviction policy');
+    await track([OPENING_PROMPT, TURN_END, reply]);
+
+    await tick([reply]);
+    await tick([reply]);
+
+    expect(latestHints).toEqual({ s1: 'Also cover the eviction policy' });
+  });
+
+  it('shows the latest of several replies', async () => {
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(3, 'user', 'Also cover the eviction policy'),
+      row(4, 'user', 'And keep it short'),
+    ]);
+
+    expect(latestHints).toEqual({ s1: 'And keep it short' });
+  });
+
+  it('shows no hint for a session that only has its opening prompt', async () => {
+    await track([OPENING_PROMPT]);
+    expect(latestHints).toEqual({});
+
+    // Still nothing once the tracker is polling increments.
+    await tick([OPENING_PROMPT]);
+    expect(latestHints).toEqual({});
+  });
+
+  it('follows agent content as before in a session with no reply', async () => {
+    await track([OPENING_PROMPT, row(2, 'tool_call', 'Read')]);
+    expect(latestHints).toEqual({ s1: 'Reading…' });
+
+    const text = row(3, 'assistant', 'Reading the cache module');
+    await tick([row(2, 'tool_call', 'Read'), text]);
+    expect(latestHints).toEqual({ s1: 'Reading the cache module' });
+
+    await tick([text, row(4, 'tool_call', 'Read')]);
+    expect(latestHints).toEqual({ s1: 'Reading…' });
+  });
+
+  it('shows the text the user typed, not the blocks Staged wrapped around it', async () => {
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(
+        3,
+        'user',
+        '<action>\nThe user is asking you to update the linked note.\n</action>\n\n' +
+          '<branch-history>\nEarlier sessions…\n</branch-history>\n\n' +
+          'Tighten   the intro\nand drop the last section'
+      ),
+    ]);
+
+    expect(latestHints).toEqual({ s1: 'Tighten the intro and drop the last section' });
+  });
+
+  it('leaves the quoted passage out of a reply to a note selection', async () => {
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(
+        3,
+        'user',
+        '<!-- note-quote: Overview › Caching -->\n> Entries expire after five minutes.\n\n' +
+          'Is that configurable?'
+      ),
+    ]);
+
+    expect(latestHints).toEqual({ s1: 'Is that configurable?' });
+  });
+
+  it('skips a message Staged wrote on the user’s behalf', async () => {
+    // A `write_note` reminder is a user row that is all action block: there is
+    // nothing the user typed in it, so the agent's last message stays.
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(3, 'user', '<action>\nYour turn ended without a `write_note` call.\n</action>'),
+    ]);
+
+    expect(latestHints).toEqual({ s1: 'Done' });
+  });
+
+  it('truncates a long reply', async () => {
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', 'word '.repeat(40))]);
+
+    expect(latestHints.s1).toHaveLength(72);
+    expect(latestHints.s1.endsWith('…')).toBe(true);
+  });
+});

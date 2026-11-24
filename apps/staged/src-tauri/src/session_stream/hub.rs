@@ -563,6 +563,8 @@ impl SessionStreamHub {
             frame,
         } in outbox
         {
+            #[cfg(feature = "perf-harness")]
+            crate::perf_harness::stream_frames::sent(&frame);
             match sink.send(frame) {
                 Ok(()) => {}
                 Err(SinkError::Closed) => self.disconnect(&client_id, Some(connection)),

@@ -33,6 +33,8 @@ mod note_media;
 pub mod note_tool;
 pub mod note_transfer;
 pub mod paths;
+#[cfg(feature = "perf-harness")]
+mod perf_harness;
 pub mod pikchr_mcp;
 pub(crate) mod pikchr_subsession;
 pub(crate) mod pikchr_validation;
@@ -1859,6 +1861,9 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(move |app| {
+            #[cfg(feature = "perf-harness")]
+            perf_harness::start(app);
+
             note_media::stream::start(
                 media_stream,
                 media_index,

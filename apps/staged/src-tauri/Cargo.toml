@@ -138,6 +138,12 @@ tauri = { version = "2.12.1", features = ["test"] }
 # is hidden from PATH prepends so shims another build left in the shared
 # ~/.staged/packages tree cannot resolve.
 no-managed-acp-tools = []
+# perf-harness: compiles the load-test harness hooks in `src/perf_harness.rs`
+# (a loopback server with the web API, an eval route into the webviews and
+# counters). Off in every release and dev recipe; only
+# `apps/staged/scripts/perf-harness` builds with it, and a binary that has it does
+# nothing with it until that harness sets its environment variables.
+perf-harness = []
 
 # Debug binaries archived — uncomment when needed
 # [[bin]]

@@ -218,6 +218,8 @@ impl Store {
         )?;
         let message_id = conn.last_insert_rowid();
         self.mark_message_row(session_id, message_id);
+        #[cfg(feature = "perf-harness")]
+        crate::perf_harness::metrics::message_stored(content);
         Ok(message_id)
     }
 
@@ -373,6 +375,8 @@ impl Store {
         if let Some(session_id) = session_id {
             self.mark_message_row(&session_id, id);
         }
+        #[cfg(feature = "perf-harness")]
+        crate::perf_harness::metrics::message_stored(content);
         Ok(())
     }
 

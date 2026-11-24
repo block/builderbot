@@ -100,7 +100,7 @@ pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 // =============================================================================
@@ -318,8 +318,14 @@ pub struct ResolvedSession {
 // Store
 // =============================================================================
 
+/// The connection's lock. The load-test harness build times it.
+#[cfg(not(feature = "perf-harness"))]
+type ConnMutex = std::sync::Mutex<Connection>;
+#[cfg(feature = "perf-harness")]
+type ConnMutex = crate::perf_harness::store_lock::TimedMutex<Connection>;
+
 pub struct Store {
-    conn: Mutex<Connection>,
+    conn: ConnMutex,
     /// Change feed for mutating methods. `None` (the default, and what unit
     /// tests get) makes every publish a no-op; the app wires a sender in at
     /// construction so a task above the Tauri boundary can forward changes
@@ -340,7 +346,7 @@ impl Store {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: ConnMutex::new(conn),
             change_tx: None,
             session_feed: None,
         };
@@ -366,7 +372,7 @@ impl Store {
     pub fn in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: ConnMutex::new(conn),
             change_tx: None,
             session_feed: None,
         };
@@ -377,7 +383,7 @@ impl Store {
     /// Holds the connection as a long write does, for tests of what must not
     /// wait on it.
     #[cfg(test)]
-    pub(crate) fn hold_connection(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn hold_connection(&self) -> impl std::ops::Deref<Target = Connection> + '_ {
         self.conn.lock().unwrap()
     }
 

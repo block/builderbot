@@ -266,6 +266,14 @@ ci-local:
     echo "ci-local: passed: ${labels[*]}"
 
 # ============================================================================
+# Performance
+# ============================================================================
+
+# Load-test the app with fake agents and measure it (see scripts/perf-harness/README.md; `just perf-harness --help`)
+perf-harness *ARGS:
+    node scripts/perf-harness/run.mjs {{ ARGS }}
+
+# ============================================================================
 # Maintenance
 # ============================================================================
 

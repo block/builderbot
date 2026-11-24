@@ -8,6 +8,10 @@ use crate::store::{PipelineKind, Session, Store};
 /// The next user turn a resumed repo session gets. Resume is SDK-native
 /// (`load_session` restores the conversation), so this only has to say what
 /// happened and what to check first.
+///
+/// Both resume prompts here are repeated in the app's
+/// `stagedResumePrompts.ts`, which keeps them out of a session's live
+/// subtitle; see `AUTO_RETRY_RESUME_PROMPT` in `rate_limit_scheduler.rs`.
 pub(crate) const REPO_SESSION_RESUME_PROMPT: &str = "Staged was closed and relaunched while you \
      were working, so your previous turn was interrupted. Check the working tree (for example \
      `git status` and `git log -1`) before continuing, then continue where you left off.";

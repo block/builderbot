@@ -35,6 +35,14 @@ use retry_schedule::{
     USAGE_LIMIT_RETRY_JITTER_MS,
 };
 
+/// The resume prompt for a session paused by a provider limit.
+///
+/// A resume prompt is stored as a plain user row, and the app keeps it out of
+/// a session's live subtitle by matching its text, so this and
+/// `NETWORK_RESUME_PROMPT` are repeated in `stagedResumePrompts.ts`
+/// (`STAGED_RESUME_PROMPTS`). `stagedResumePrompts.test.ts` reads this file
+/// and fails when the two sides differ; a new prompt needs a
+/// `…RESUME_PROMPT` name for that test to find it.
 pub(crate) const AUTO_RETRY_RESUME_PROMPT: &str = "Continue where you left off.";
 /// The resume prompt for a session paused by a network failure. The agent's
 /// turn was cut off mid-request, so it is told to check its work first.

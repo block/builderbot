@@ -8,6 +8,7 @@ import {
 } from '../sessions/pathDisplayRoots';
 import { parseQuotedMessage } from '../sessions/composerDraft';
 import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
+import { isStagedResumePrompt } from './stagedResumePrompts';
 
 const HINT_POLL_INTERVAL_MS = 750;
 const MAX_HINT_LENGTH = 72;
@@ -52,8 +53,12 @@ function normalizeHintText(text: string): string | undefined {
     .replace(/\s+/g, ' ')
     .trim();
   if (!cleaned) return undefined;
-  if (cleaned.length <= MAX_HINT_LENGTH) return cleaned;
-  return `${cleaned.slice(0, MAX_HINT_LENGTH - 1).trimEnd()}…`;
+  return truncateHint(cleaned);
+}
+
+function truncateHint(text: string): string {
+  if (text.length <= MAX_HINT_LENGTH) return text;
+  return `${text.slice(0, MAX_HINT_LENGTH - 1).trimEnd()}…`;
 }
 
 function withTrailingEllipsis(text: string): string {
@@ -102,18 +107,58 @@ function formatAssistantHint(content: string): string | undefined {
 }
 
 /**
- * The text the user typed in a reply. Staged wraps what it adds to a prompt in
- * tagged blocks (action instructions, branch history, …) and a reply to a
- * note selection carries the quoted passage; neither is the user's own words,
- * so both are left out. A message Staged wrote by itself (a Pikchr correction,
- * a `write_note` reminder) is all wrapper and yields nothing.
+ * A line that opens or closes a fenced code block: the fence and, on an
+ * opening line, its language tag. A run of backticks with more backticks after
+ * it on the same line is inline code, not a fence, and is left alone.
  */
-function formatUserHint(content: string): string | undefined {
-  const typed = parseQuotedMessage(stripXmlTags(content))
+const FENCE_MARKER_LINE = /^[ \t]*(?:`{3,}[^`\n]*|~{3,}.*)$/gm;
+
+/**
+ * Typed text on one line. Unlike `normalizeHintText`, which is for agent
+ * output, this keeps what the user wrote: the content of a fenced block stays
+ * (only its fence lines go), and `<` and `>` are text, not tags.
+ */
+function normalizeReplyText(text: string): string {
+  return text.replace(FENCE_MARKER_LINE, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** What stands in for a reply that is attachments and no text. */
+function attachmentPlaceholder(count: number): string {
+  return count === 1 ? 'Attachment' : `${count} attachments`;
+}
+
+/**
+ * The hint for a `user` row that is not the opening prompt: the text the user
+ * typed, or nothing when the row has none to show.
+ *
+ * Left out of the text, because they are not the user's own words:
+ * - the tagged blocks Staged wraps around a prompt (`XML_BLOCK_TAGS`: action
+ *   instructions, branch history, launch context, Pikchr grammar);
+ * - the quoted passage of a reply to a note selection.
+ *
+ * Rows that yield nothing, so the hint stays on whatever is older:
+ * - a row that is all tagged block and has no attachment, which is how Staged
+ *   writes a Pikchr correction or a `write_note` reminder;
+ * - one of Staged's resume prompts (`STAGED_RESUME_PROMPTS`): the automatic
+ *   resume after a rate-limit or network pause or after a relaunch, and a
+ *   Resume button's prompt, which is the same text as the first of those.
+ *
+ * Every other `user` row shows, typed or not. A message a project agent sends
+ * with `continue_repo_session` is stored as a plain row and is a real
+ * instruction to the session, so it shows like a reply. A row with no text
+ * left but with attachments (`imageIds`, which holds images and PDFs alike)
+ * shows a placeholder: the rows Staged writes by itself carry none, so an
+ * attachment marks a message somebody sent.
+ */
+function formatUserHint(message: SessionMessage): string | undefined {
+  const typed = parseQuotedMessage(stripXmlTags(message.content))
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
-    .join(' ');
-  return normalizeHintText(typed);
+    .join('\n');
+  const text = normalizeReplyText(typed);
+  if (text) return isStagedResumePrompt(text) ? undefined : truncateHint(text);
+  const attachments = message.imageIds?.length ?? 0;
+  return attachments > 0 ? attachmentPlaceholder(attachments) : undefined;
 }
 
 /**
@@ -127,8 +172,8 @@ function formatUserHint(content: string): string | undefined {
  */
 function deriveHint(
   messages: SessionMessage[],
-  displayRoots?: DisplayRootInput,
-  openingPromptId: number | null = null
+  displayRoots: DisplayRootInput,
+  openingPromptId: number | null
 ): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
@@ -138,7 +183,7 @@ function deriveHint(
     } else if (message.role === 'assistant') {
       hint = formatAssistantHint(message.content);
     } else if (message.role === 'user' && message.id !== openingPromptId) {
-      hint = formatUserHint(message.content);
+      hint = formatUserHint(message);
     }
     if (hint) return hint;
   }

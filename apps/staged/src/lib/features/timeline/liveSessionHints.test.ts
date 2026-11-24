@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from '../../types';
+import { STAGED_RESUME_PROMPTS } from './stagedResumePrompts';
 
 type LiveSessionHintsModule = typeof import('./liveSessionHints');
 type LiveSessionHintPoller = ReturnType<LiveSessionHintsModule['createLiveSessionHints']>;
@@ -388,12 +389,13 @@ describe('createLiveSessionHints user replies', () => {
   let poller: LiveSessionHintPoller | null;
   let latestHints: Record<string, string>;
 
-  type Row = { id: number; role: string; content: string; createdAt: number };
-  const row = (id: number, role: string, content: string): Row => ({
+  type Row = { id: number; role: string; content: string; createdAt: number; imageIds?: string[] };
+  const row = (id: number, role: string, content: string, imageIds?: string[]): Row => ({
     id,
     role,
     content,
     createdAt: id,
+    ...(imageIds ? { imageIds } : {}),
   });
 
   const OPENING_PROMPT = row(
@@ -561,5 +563,113 @@ describe('createLiveSessionHints user replies', () => {
 
     expect(latestHints.s1).toHaveLength(72);
     expect(latestHints.s1.endsWith('…')).toBe(true);
+  });
+
+  // The backend stores a resume prompt as a plain user row, with no action
+  // block around it: nobody typed it, so it must not read as a reply.
+  describe.each(Object.entries(STAGED_RESUME_PROMPTS))('the resume prompt %s', (_name, prompt) => {
+    it('leaves the agent’s last message showing', async () => {
+      await track([OPENING_PROMPT, TURN_END, row(3, 'user', prompt)]);
+
+      expect(latestHints).toEqual({ s1: 'Done' });
+    });
+
+    it('leaves an earlier reply showing', async () => {
+      const reply = row(3, 'user', 'Also cover the eviction policy');
+      await track([OPENING_PROMPT, TURN_END, reply]);
+      expect(latestHints).toEqual({ s1: 'Also cover the eviction policy' });
+
+      await tick([reply, row(4, 'user', prompt)]);
+
+      expect(latestHints).toEqual({ s1: 'Also cover the eviction policy' });
+    });
+
+    it('gives way to what the agent writes after the resume', async () => {
+      const resume = row(3, 'user', prompt);
+      await track([OPENING_PROMPT, TURN_END, resume]);
+
+      await tick([resume, row(4, 'assistant', 'Picking up the eviction section')]);
+
+      expect(latestHints).toEqual({ s1: 'Picking up the eviction section' });
+    });
+  });
+
+  it('shows a reply that goes on from a resume prompt’s words', async () => {
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(3, 'user', 'Continue where you left off. Skip the benchmarks this time'),
+    ]);
+
+    expect(latestHints).toEqual({
+      s1: 'Continue where you left off. Skip the benchmarks this time',
+    });
+  });
+
+  it('shows a message a project agent sent with continue_repo_session', async () => {
+    // Stored as a plain user row, like a typed reply: it is an instruction to
+    // the session and the transcript shows it as a user bubble.
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(3, 'user', 'Rebase onto main and re-run the cache tests'),
+    ]);
+
+    expect(latestHints).toEqual({ s1: 'Rebase onto main and re-run the cache tests' });
+  });
+
+  it('shows the content of a reply that is only a fenced block', async () => {
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(3, 'user', '```ts\nconst ttl = 300;\ncache.set(key, value, ttl);\n```'),
+    ]);
+
+    expect(latestHints).toEqual({ s1: 'const ttl = 300; cache.set(key, value, ttl);' });
+  });
+
+  it('keeps a fenced block’s content in line with the text around it', async () => {
+    await track([
+      OPENING_PROMPT,
+      TURN_END,
+      row(3, 'user', 'Use this instead:\n\n~~~\nttl = 300\n~~~\n\nand keep `ttl` an int'),
+    ]);
+
+    expect(latestHints).toEqual({ s1: 'Use this instead: ttl = 300 and keep `ttl` an int' });
+  });
+
+  it.each(['use Vec<String> here', 'if a < b and c > d'])(
+    'keeps angle brackets in typed text: %s',
+    async (typed) => {
+      await track([OPENING_PROMPT, TURN_END, row(3, 'user', typed)]);
+
+      expect(latestHints).toEqual({ s1: typed });
+    }
+  );
+
+  it('shows a placeholder for a reply that is an attachment and no text', async () => {
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', '', ['img-1'])]);
+
+    expect(latestHints).toEqual({ s1: 'Attachment' });
+  });
+
+  it('counts the attachments of a reply with several and no text', async () => {
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', '  \n', ['img-1', 'img-2'])]);
+
+    expect(latestHints).toEqual({ s1: '2 attachments' });
+  });
+
+  it('shows the typed text of a reply that also has an attachment', async () => {
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', 'Match this mock-up', ['img-1'])]);
+
+    expect(latestHints).toEqual({ s1: 'Match this mock-up' });
+  });
+
+  it('skips an empty user row with no attachment', async () => {
+    // The agent's echo of a delivered message is stored this way, and so is a
+    // row whose attachment list came back empty.
+    await track([OPENING_PROMPT, TURN_END, row(3, 'user', ''), row(4, 'user', '', [])]);
+
+    expect(latestHints).toEqual({ s1: 'Done' });
   });
 });

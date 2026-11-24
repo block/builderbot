@@ -157,6 +157,35 @@ describe('NewProjectForm location', () => {
 // its buttons) presses Create. There is no listener on the window, which
 // used to create the project for a Return on a focused Cancel, and under any
 // dialog opened over the splash screen.
+describe('NewProjectForm Name field', () => {
+  afterEach(() => {
+    if (component) unmount(component);
+    component = null;
+    document.body.innerHTML = '';
+  });
+
+  // Safari offers a saved login or the contact name on this field unless it
+  // matches Safari's `search` keyword, and that exemption holds only while
+  // `autocomplete` is `off` or absent.
+  it('carries the attributes that stop Safari offering AutoFill', () => {
+    const { target } = open();
+    const input = target.querySelector<HTMLInputElement>('#project-name')!;
+
+    expect(input.getAttribute('name')).toBe('search');
+    expect(input.getAttribute('autocomplete')).toBe('off');
+  });
+
+  it('keeps its typing attributes beside them', () => {
+    const { target } = open();
+    const input = target.querySelector<HTMLInputElement>('#project-name')!;
+
+    expect(input.getAttribute('autocorrect')).toBe('off');
+    expect(input.getAttribute('autocapitalize')).toBe('sentences');
+    expect(input.getAttribute('spellcheck')).toBe('false');
+    expect(input.hasAttribute('enterkeyhint')).toBe(false);
+  });
+});
+
 describe('NewProjectForm Return key', () => {
   beforeEach(() => {
     createProject.mockReset().mockResolvedValue(created);

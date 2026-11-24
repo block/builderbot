@@ -22,6 +22,7 @@
   import { parseGitHubUrl } from '../../shared/githubUrl';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { autofocusOnOpen } from '../../shared/focusAfterDialogEnter';
+  import { NO_SAFARI_AUTOFILL } from '../../shared/safariAutofill';
   import {
     findEnabledSubmitButton,
     isDefaultActionKeydown,
@@ -223,9 +224,9 @@
     <Input
       bind:value={name}
       id="project-name"
+      {...NO_SAFARI_AUTOFILL}
       placeholder="e.g., Add dark mode, Fix login bug"
       disabled={saving}
-      autocomplete="off"
       autocorrect="off"
       autocapitalize="sentences"
       spellcheck={false}

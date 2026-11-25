@@ -29,11 +29,14 @@
 //!   as they always did. The same if a reader cannot be opened.
 //! - **Timing.** Each connection is behind its own [`TimedMutex`], named, so
 //!   a slow wait or hold reports which connection it was.
+//! - **All readers busy.** A read then waits for whichever reader is
+//!   released first ([`ReadPool::checkout`]), not for one picked in advance.
 
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
 
@@ -102,6 +105,44 @@ pub(super) struct ReadPool {
     readers: Vec<TimedMutex<Connection>>,
     /// Where the next checkout starts looking, so readers share the load.
     next: AtomicUsize,
+    /// How many checkouts are waiting for a reader to be released. Held
+    /// while a waiter looks for a free reader and while a release wakes
+    /// one, so a release between the look and the wait is not missed.
+    waiting: Mutex<usize>,
+    /// Signalled, under `waiting`, each time a reader is released while a
+    /// checkout waits.
+    released: Condvar,
+}
+
+/// A reader checked out of a [`ReadPool`]. Dropping it releases the
+/// connection and wakes a checkout waiting for one.
+pub(crate) struct PooledReader<'a> {
+    /// `Some` until dropped; taken so the connection is free before a
+    /// waiter is woken.
+    conn: Option<TimedGuard<'a, Connection>>,
+    pool: &'a ReadPool,
+}
+
+impl Deref for PooledReader<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("the reader is held until drop")
+    }
+}
+
+impl Drop for PooledReader<'_> {
+    fn drop(&mut self) {
+        drop(self.conn.take());
+        let waiting = self
+            .pool
+            .waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *waiting > 0 {
+            self.pool.released.notify_one();
+        }
+    }
 }
 
 impl ReadPool {
@@ -110,6 +151,8 @@ impl ReadPool {
         Self {
             readers: Vec::new(),
             next: AtomicUsize::new(0),
+            waiting: Mutex::new(0),
+            released: Condvar::new(),
         }
     }
 
@@ -135,7 +178,7 @@ impl ReadPool {
         }
         Self {
             readers,
-            next: AtomicUsize::new(0),
+            ..Self::empty()
         }
     }
 
@@ -145,33 +188,90 @@ impl ReadPool {
         self.readers.len()
     }
 
-    /// A free reader if there is one, otherwise the next in turn once it is
-    /// free. `None` when the pool is empty.
+    /// A free reader if there is one, otherwise whichever is released
+    /// first. `None` when the pool is empty.
+    ///
+    /// A poisoned reader is handed out like any other: it is still a good
+    /// connection, a panic mid-read changed nothing.
     #[track_caller]
-    pub(super) fn checkout(&self) -> Option<TimedGuard<'_, Connection>> {
-        let count = self.readers.len();
-        if count == 0 {
+    pub(super) fn checkout(&self) -> Option<PooledReader<'_>> {
+        if self.readers.is_empty() {
             return None;
         }
+        let began = Instant::now();
+        if let Some(conn) = self.free_reader(began) {
+            return Some(self.pooled(conn));
+        }
+        // All busy. Every release takes `waiting` before it decides whether
+        // to signal, so one that happens after the look below finds this
+        // checkout counted and wakes it.
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        *waiting += 1;
+        let conn = loop {
+            if let Some(conn) = self.free_reader(began) {
+                break conn;
+            }
+            waiting = self
+                .released
+                .wait(waiting)
+                .unwrap_or_else(PoisonError::into_inner);
+        };
+        *waiting -= 1;
+        // The reader a release signalled for may have gone to a checkout
+        // that was not waiting, and this one then took another's: pass the
+        // signal on rather than leave a waiter asleep beside a free reader.
+        if *waiting > 0 {
+            self.released.notify_one();
+        }
+        drop(waiting);
+        Some(self.pooled(conn))
+    }
+
+    /// The first reader that is free right now, looking from the next in
+    /// turn. `began` is when the checkout started, for the lock's timing.
+    #[track_caller]
+    fn free_reader(&self, began: Instant) -> Option<TimedGuard<'_, Connection>> {
+        let count = self.readers.len();
         let start = self.next.fetch_add(1, Ordering::Relaxed) % count;
         for offset in 0..count {
-            if let Some(guard) = self.readers[(start + offset) % count].try_lock() {
-                return Some(guard);
+            let reader = &self.readers[(start + offset) % count];
+            if let Some(conn) = reader.try_lock_waiting_since(began) {
+                return Some(conn);
             }
         }
-        // All busy: wait for one. A poisoned reader is still a good
-        // connection; a panic mid-read changed nothing.
-        Some(match self.readers[start].lock() {
-            Ok(guard) => guard,
-            Err(poison) => poison.into_inner(),
-        })
+        None
+    }
+
+    fn pooled<'a>(&'a self, conn: TimedGuard<'a, Connection>) -> PooledReader<'a> {
+        PooledReader {
+            conn: Some(conn),
+            pool: self,
+        }
+    }
+}
+
+/// What a store read runs on: a pooled reader, or the write connection when
+/// the store has no readers.
+pub(super) enum ReadConn<'a> {
+    Reader(PooledReader<'a>),
+    Writer(TimedGuard<'a, Connection>),
+}
+
+impl Deref for ReadConn<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        match self {
+            Self::Reader(conn) => conn,
+            Self::Writer(conn) => conn,
+        }
     }
 }
 
 /// A connection checked out for one store read, inside a read transaction
 /// that ends when the guard drops (see the module docs).
 pub(crate) struct ReadGuard<'a> {
-    conn: TimedGuard<'a, Connection>,
+    conn: ReadConn<'a>,
     /// Whether `BEGIN` ran, so drop has a transaction to end.
     snapshot: bool,
 }
@@ -179,7 +279,7 @@ pub(crate) struct ReadGuard<'a> {
 impl<'a> ReadGuard<'a> {
     /// Start a read on `conn`. If `BEGIN` fails (it takes no lock, so it
     /// should not), the read goes ahead without one snapshot, logged.
-    pub(super) fn begin(conn: TimedGuard<'a, Connection>) -> Self {
+    pub(super) fn begin(conn: ReadConn<'a>) -> Self {
         let snapshot = match conn.execute_batch("BEGIN DEFERRED") {
             Ok(()) => true,
             Err(e) => {
@@ -440,5 +540,61 @@ mod tests {
             (finished_early, read.join().unwrap().unwrap())
         });
         assert_eq!(waiting, (false, 0));
+    }
+
+    /// With every reader busy, a read gets whichever is released first. It
+    /// used to pick one reader in advance and wait for that one, however
+    /// many of the others went idle meanwhile.
+    #[test]
+    fn a_waiting_read_takes_whichever_reader_is_released_first() {
+        let store = Store::in_memory().unwrap();
+        for released in 0..READERS {
+            let mut held = store.hold_readers();
+            let (waited, read) = std::thread::scope(|scope| {
+                let read = scope.spawn(|| store.list_projects().map(|p| p.len()));
+                std::thread::sleep(Duration::from_millis(100));
+                let waited = !read.is_finished();
+                // One reader goes idle; the rest stay busy.
+                drop(held.remove(released));
+                let deadline = Instant::now() + PATIENCE;
+                while !read.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let took_it = read.is_finished();
+                // Lets a read that is still waiting finish, so the scope ends.
+                drop(held);
+                (waited, took_it.then(|| read.join().unwrap().unwrap()))
+            });
+            assert!(waited, "the read ran with every reader busy");
+            assert_eq!(
+                read,
+                Some(0),
+                "the read did not take the released reader (the {released}th held)"
+            );
+        }
+    }
+
+    /// More waiting reads than readers: each release wakes one, and none
+    /// is left asleep.
+    #[test]
+    fn every_waiting_read_is_served_as_readers_are_released() {
+        let store = Store::in_memory().unwrap();
+        let held = store.hold_readers();
+        std::thread::scope(|scope| {
+            let reads: Vec<_> = (0..READERS * 3)
+                .map(|_| scope.spawn(|| store.list_projects().map(|p| p.len())))
+                .collect();
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(reads.iter().all(|read| !read.is_finished()));
+            drop(held);
+            let deadline = Instant::now() + PATIENCE;
+            while reads.iter().any(|read| !read.is_finished()) {
+                assert!(Instant::now() < deadline, "a waiting read was never woken");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            for read in reads {
+                assert_eq!(read.join().unwrap().unwrap(), 0);
+            }
+        });
     }
 }

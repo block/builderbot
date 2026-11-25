@@ -64,10 +64,19 @@ impl<T> TimedMutex<T> {
     /// The lock if it is free right now, without waiting; `None` if another
     /// thread holds it. A poisoned lock is taken like a free one: what it
     /// guards is a connection, which a panic does not leave half-changed.
+    #[cfg(test)]
     #[track_caller]
     pub(crate) fn try_lock(&self) -> Option<TimedGuard<'_, T>> {
+        self.try_lock_waiting_since(Instant::now())
+    }
+
+    /// [`Self::try_lock`] for a caller that has been waiting for this lock
+    /// or one like it since `began` (a pool handing out whichever of its
+    /// locks frees first): the wait is timed from then, so a slow one is
+    /// still reported.
+    #[track_caller]
+    pub(crate) fn try_lock_waiting_since(&self, began: Instant) -> Option<TimedGuard<'_, T>> {
         let caller = Location::caller();
-        let began = Instant::now();
         let guard = match self.inner.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(poison)) => poison.into_inner(),

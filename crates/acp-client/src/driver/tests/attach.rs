@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// - `replaced`: the pinned process is gone and the proxy started another.
 /// - `eof`: the proxy loses its remote process after the load.
 /// - `hang`: the turn goes on after the load, silently.
+/// - `mute`: `initialize` is never answered.
 /// - `cancel`: `session/cancel` ends the turn with `result` and `idle`.
 /// - `cancel-silent`: `session/cancel` is accepted with no frames.
 /// - `interrupt`: as `cancel`, with the running tool call `t1` failed live
@@ -67,6 +68,7 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/^.*"id":"\([^"]*\)".*$/\1/p')
   case "$line" in
     *'"method":"initialize"'*)
+      [ "$mode" = mute ] && continue
       case "$mode" in
         claude)
           tool t1
@@ -700,6 +702,54 @@ async fn a_process_that_is_gone_settles_process_gone() {
             latest_prompt: LatestPrompt::Replayed,
         })
     );
+}
+
+/// An attach's setup steps run on the driver's step deadline
+/// (`with_setup_step_timeout`), as a session start's do. It used the 90s
+/// constant whatever the driver said, and this test then waits that long.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_setup_times_out_on_the_drivers_step_deadline() {
+    let log = log_path("mute");
+    let local = tokio::task::LocalSet::new();
+    let (outcome, waited) = local
+        .run_until(async {
+            let driver = driver(&log, "mute", ScriptedProbe::running(), true)
+                .with_setup_step_timeout(Duration::from_millis(300));
+            let store: Arc<dyn Store> = Arc::new(TranscriptStore(stored_transcript()));
+            let writer: Arc<dyn MessageWriter> = Arc::new(TranscriptLog::default());
+            let began = std::time::Instant::now();
+            let attached = driver
+                .attach_with_timing(
+                    "staged-session",
+                    "sess-1",
+                    None,
+                    &std::env::temp_dir(),
+                    &store,
+                    &writer,
+                    None,
+                    TIMING,
+                )
+                .expect("the proxy spawns");
+            let outcome = tokio::time::timeout(Duration::from_secs(30), attached.settled())
+                .await
+                .expect("the attach gives up on the driver's deadline, not after 90s");
+            (outcome, began.elapsed())
+        })
+        .await;
+
+    // The step's timeout ends the connection, and the teardown that
+    // follows closes the proxy's stdout, so the attach settles as it does
+    // for any connection that failed with its transport gone.
+    assert_eq!(outcome, Ok(AttachOutcome::TransportLost));
+    assert!(
+        waited < Duration::from_secs(20),
+        "the attach waited {waited:?} for a 300ms step deadline"
+    );
+    let sent = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    assert!(sent.contains(r#""method":"initialize""#), "{sent}");
+    assert!(!sent.contains(r#""method":"session/load""#), "{sent}");
 }
 
 /// `Requested ACP process has exited`: the turn is over and a new process

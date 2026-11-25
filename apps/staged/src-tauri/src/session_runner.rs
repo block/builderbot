@@ -2331,15 +2331,20 @@ pub fn start_session(
             let mut note_followup_attempts = 0;
             let mut include_images = true;
             let mut startup_restarts = startup_restart::StartupRestarts::default();
+            // The config fallback notices the turn being started over has
+            // already shown; empty for any other connection.
+            let mut carried_config_fallbacks = crate::agent::ShownConfigFallbacks::default();
 
             loop {
                 remote_outbox_collected_for_turn.set(false);
                 remote_outbox_read_error.replace(None);
                 let activity = Arc::new(ActivityClock::new());
+                let shown_config_fallbacks = std::mem::take(&mut carried_config_fallbacks);
                 let writer = Arc::new(
                     MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
                         .with_note_slot(Arc::clone(&note_slot))
-                        .with_activity_clock(Arc::clone(&activity)),
+                        .with_activity_clock(Arc::clone(&activity))
+                        .with_shown_config_fallbacks(Arc::clone(&shown_config_fallbacks)),
                 );
                 // The token the connection observes. A child of the session's
                 // so a Stop reaches it, but one this loop can also fire on its
@@ -2558,6 +2563,8 @@ pub fn start_session(
                 // A connection that failed before its prompt went out is
                 // started over once (see `startup_restart`): its turn's
                 // prompt row is already stored, and the agent never got it.
+                // A config fallback its setup announced is not announced
+                // again by the next connection.
                 if startup_restarts
                     .after_turn(
                         &config.session_id,
@@ -2572,6 +2579,7 @@ pub fn start_session(
                     .is_some()
                 {
                     include_images = images_this_attempt;
+                    carried_config_fallbacks = shown_config_fallbacks;
                     continue;
                 }
 

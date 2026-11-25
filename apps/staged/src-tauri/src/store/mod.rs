@@ -443,7 +443,7 @@ impl Store {
     /// Holds every read-only connection as long reads do, for tests of what
     /// must not wait on them.
     #[cfg(test)]
-    pub(crate) fn hold_readers(&self) -> Vec<TimedGuard<'_, Connection>> {
+    pub(crate) fn hold_readers(&self) -> Vec<connections::PooledReader<'_>> {
         (0..self.readers.len())
             .map(|_| self.readers.checkout().expect("the pool has readers"))
             .collect()
@@ -457,8 +457,8 @@ impl Store {
     #[track_caller]
     pub(crate) fn read_conn(&self) -> ReadGuard<'_> {
         let conn = match self.readers.checkout() {
-            Some(reader) => reader,
-            None => self.conn.lock().unwrap(),
+            Some(reader) => connections::ReadConn::Reader(reader),
+            None => connections::ReadConn::Writer(self.conn.lock().unwrap()),
         };
         ReadGuard::begin(conn)
     }

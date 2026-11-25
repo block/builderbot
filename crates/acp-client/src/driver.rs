@@ -8744,6 +8744,7 @@ async fn load_acp_session(
             &init_response.auth_methods,
             auth_selection,
             "load ACP session",
+            Some(existing_id),
         ),
     )
     .await??;
@@ -8867,6 +8868,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                     &init_response.auth_methods,
                     auth_selection,
                     "create ACP session",
+                    None,
                 ),
             )
             .await??;
@@ -9057,6 +9059,7 @@ async fn send_session_setup_request<Req, MakeRequest>(
     auth_methods: &[AuthMethod],
     auth_selection: Option<&AcpAuthenticationSelection>,
     operation: &str,
+    loading_session: Option<&str>,
 ) -> Result<Req::Response, String>
 where
     Req: JsonRpcRequest,
@@ -9092,23 +9095,46 @@ where
                 )),
             }
         }
-        Err(error) if is_session_not_found_answer(&error) => Err(format!(
-            "{SESSION_NOT_FOUND_PREFIX} (failed to {operation}): {error:?}"
-        )),
+        Err(error)
+            if loading_session
+                .is_some_and(|session_id| is_session_not_found_answer(&error, session_id)) =>
+        {
+            Err(format!(
+                "{SESSION_NOT_FOUND_PREFIX} (failed to {operation}): {error:?}"
+            ))
+        }
         Err(error) => Err(format!("Failed to {operation}: {error:?}")),
     }
 }
 
-/// Whether the agent answered a session request by saying it has no such
-/// session: `-32002` (resource not found), which the Claude bridge answers a
-/// `session/load` for an unknown session with, or an error whose message says
-/// the session was not found.
-fn is_session_not_found_answer(error: &agent_client_protocol::Error) -> bool {
+/// Whether the agent answered a `session/load` of `session_id` by saying it
+/// has no such session: `-32002` (resource not found), which the Claude
+/// bridge answers a load of an unknown session with, or an error whose
+/// message says "session not found" or "session <that id> not found".
+///
+/// Only asked about a load (`loading_session` in
+/// [`send_session_setup_request`]): `session/new` asks for no session, so
+/// nothing it is refused with means one is missing. And only those two
+/// phrasings, so that an error which merely mentions a session and
+/// something not found ("MCP session config not found", "session file not
+/// found") stays the plain failure it is.
+fn is_session_not_found_answer(error: &agent_client_protocol::Error, session_id: &str) -> bool {
     if error.code == ErrorCode::ResourceNotFound {
         return true;
     }
     let message = error.message.to_ascii_lowercase();
-    message.contains("session") && message.contains("not found")
+    let session_id = session_id.to_ascii_lowercase();
+    let words: Vec<&str> = message
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .collect();
+    let not_found = |rest: &[&str]| rest.starts_with(&["not", "found"]);
+    words.iter().enumerate().any(|(index, word)| {
+        *word == "session"
+            && (not_found(&words[index + 1..])
+                || (words.get(index + 1) == Some(&session_id.as_str())
+                    && not_found(&words[index + 2..])))
+    })
 }
 
 async fn authenticate_with_explicit_method(
@@ -9500,6 +9526,7 @@ mod tests {
                     &methods,
                     None,
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -9693,6 +9720,7 @@ mod tests {
                     &methods,
                     None,
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ()))
@@ -9829,6 +9857,7 @@ mod tests {
                     &methods,
                     Some(&selection),
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -9880,6 +9909,7 @@ mod tests {
                     &methods,
                     Some(&selection),
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -9954,6 +9984,7 @@ mod tests {
                     &methods,
                     Some(&selection),
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -10192,19 +10223,100 @@ mod tests {
         use super::ErrorCode;
         use agent_client_protocol::Error;
 
-        assert!(super::is_session_not_found_answer(
-            &Error::resource_not_found(None)
-        ));
+        let not_found = |error: &Error| super::is_session_not_found_answer(error, "abc-123");
+        let internal = |message: &str| Error::new(ErrorCode::InternalError.into(), message);
+
+        assert!(not_found(&Error::resource_not_found(None)));
         // An agent that says so in an internal error instead.
-        assert!(super::is_session_not_found_answer(&Error::new(
-            ErrorCode::InternalError.into(),
-            "Session not found: abc"
+        assert!(not_found(&internal("Session not found: abc-123")));
+        assert!(not_found(&internal("session not found")));
+        assert!(not_found(&internal("Session abc-123 not found")));
+        assert!(not_found(&internal(
+            "No session: session 'ABC-123' not found."
         )));
-        assert!(!super::is_session_not_found_answer(&Error::internal_error()));
-        assert!(!super::is_session_not_found_answer(&Error::new(
-            ErrorCode::InternalError.into(),
-            "model not found"
+
+        assert!(!not_found(&Error::internal_error()));
+        assert!(!not_found(&internal("model not found")));
+        // A session and something not found, but not the session.
+        assert!(!not_found(&internal("MCP session config not found")));
+        assert!(!not_found(&internal("session file not found")));
+        assert!(!not_found(&internal("Session other-id not found")));
+        assert!(!not_found(&internal(
+            "session abc-123: working directory not found"
         )));
+    }
+
+    /// `session/new` asks for no session, so a refusal that reads like one
+    /// being missing is an ordinary failure, not something to start fresh
+    /// from: neither by code nor by message.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refused_session_new_never_reads_as_session_not_found() {
+        use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+        use agent_client_protocol::Error;
+
+        for refusal in [
+            Error::resource_not_found(None),
+            Error::new(super::ErrorCode::InternalError.into(), "Session not found"),
+        ] {
+            let agent = agent_client_protocol::Agent
+                .builder()
+                .on_receive_request(
+                    async |request: InitializeRequest, responder, _cx| {
+                        responder.respond(InitializeResponse::new(request.protocol_version))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let refusal = refusal.clone();
+                        async move |_request: NewSessionRequest, responder, _cx| {
+                            responder.respond_with_error(refusal.clone())
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                );
+            let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+            let handler = Arc::new(AcpNotificationHandler::new(
+                Arc::new(BasicMessageWriter::new()),
+                false,
+                vec![],
+                CancellationToken::new(),
+            ));
+
+            let error = agent_client_protocol::Client
+                .connect_with(agent, async |connection| {
+                    Ok(setup_acp_session(AcpSessionSetupContext {
+                        connection: &connection,
+                        working_dir: Path::new("/tmp"),
+                        store: &store,
+                        handler: &handler,
+                        our_session_id: "local-session",
+                        acp_session_id: None,
+                        config_options: &[],
+                        mcp_servers: &[],
+                        agent_label: "Claude",
+                        auth_selection: None,
+                        unattended_session_mode: None,
+                        timeline: None,
+                    })
+                    .await
+                    .map(|_| ()))
+                })
+                .await
+                .expect("protocol should succeed")
+                .expect_err("a refused session/new fails setup");
+
+            assert!(
+                error.starts_with("Failed to create ACP session: "),
+                "{error}"
+            );
+            let timeline = super::SetupTimeline::start(
+                "local-session",
+                super::ACP_SETUP_TIMEOUT_HEADLINE,
+                super::ACP_SETUP_STEP_TIMEOUT,
+            );
+            assert_eq!(super::classify_setup_failure(&timeline, &error), None);
+        }
     }
 
     /// A store holding `boundaries` as its replay boundaries.

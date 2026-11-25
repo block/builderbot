@@ -91,7 +91,16 @@ pub struct MessageWriter {
     /// attachments. That goes for every later connection: an ordinary
     /// resume of the session as much as an attach catching it up.
     sent_prompts: std::sync::Mutex<Vec<String>>,
+    /// The config fallback notices already written for the turn this writer
+    /// records (see [`MessageWriter::with_shown_config_fallbacks`]).
+    shown_config_fallbacks: ShownConfigFallbacks,
 }
+
+/// The config fallback notices a turn has shown so far. A turn whose
+/// connection is started over (see `session_runner::startup_restart`) hands
+/// the same set to the next connection's writer, so a selection the agent
+/// substitutes again on the retry is not announced twice.
+pub(crate) type ShownConfigFallbacks = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
 
 /// The title of a tool call recorded from an update that names none (see
 /// [`MessageWriter::update_tool_call_title`]); a later update's title
@@ -344,6 +353,7 @@ impl MessageWriter {
             note_slot: None,
             activity: None,
             sent_prompts: std::sync::Mutex::new(Vec::new()),
+            shown_config_fallbacks: ShownConfigFallbacks::default(),
         }
     }
 
@@ -401,6 +411,15 @@ impl MessageWriter {
     /// tell how long the agent has been silent.
     pub fn with_activity_clock(mut self, clock: Arc<super::ActivityClock>) -> Self {
         self.activity = Some(clock);
+        self
+    }
+
+    /// Share the set of config fallback notices already shown with the
+    /// writers of a turn's other connections: a notice in `shown` is not
+    /// written again, and one this writer writes is added to it. Without
+    /// this each writer announces every fallback it is told of.
+    pub(crate) fn with_shown_config_fallbacks(mut self, shown: ShownConfigFallbacks) -> Self {
+        self.shown_config_fallbacks = shown;
         self
     }
 
@@ -852,6 +871,22 @@ impl acp_client::MessageWriter for MessageWriter {
         self.heard_from_agent();
         self.finalize().await;
 
+        // A started-over connection applies the same selections again; the
+        // reader has already been told.
+        let first_time = self
+            .shown_config_fallbacks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(notice.to_string());
+        if !first_time {
+            log::debug!(
+                "Session {}: config fallback notice already shown for this turn; not repeating \
+                 it",
+                self.session_id
+            );
+            return;
+        }
+
         let notice = notice.to_string();
         self.queue_write(move |store, session_id| {
             if let Err(e) = store.add_authored_session_message(
@@ -945,7 +980,10 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use super::{format_tool_call_content, stored_tool_call_title, MessageWriter};
+    use super::{
+        format_tool_call_content, stored_tool_call_title, MessageWriter, ShownConfigFallbacks,
+        CONFIG_OPTION_FALLBACK_EVENT,
+    };
     use crate::store::{MessageRole, Session, Store};
     use acp_client::{
         AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
@@ -959,6 +997,68 @@ mod tests {
         store.create_session(&session).expect("create session");
         let writer = MessageWriter::new(session.id.clone(), Arc::clone(&store));
         (store, session.id, writer)
+    }
+
+    /// The session's config fallback notices, in order.
+    async fn fallback_notices(store: &Store, session_id: &str) -> Vec<String> {
+        store.flush_writes().await;
+        store
+            .get_session_messages(session_id)
+            .unwrap()
+            .into_iter()
+            .filter(|message| {
+                message.acp.acp_event_kind.as_deref() == Some(CONFIG_OPTION_FALLBACK_EVENT)
+            })
+            .map(|message| message.content)
+            .collect()
+    }
+
+    /// A turn whose connection is started over gets a second writer, and
+    /// the retry's setup substitutes the same model again. The reader is
+    /// told once.
+    #[tokio::test]
+    async fn a_started_over_connection_does_not_repeat_a_config_fallback_notice() {
+        use acp_client::MessageWriter as _;
+
+        let (store, session_id, first) = setup_writer();
+        let shown = ShownConfigFallbacks::default();
+        let first = first.with_shown_config_fallbacks(Arc::clone(&shown));
+        first
+            .on_config_option_fallback("Using sonnet: fable is gone.")
+            .await;
+
+        let retry = MessageWriter::new(session_id.clone(), Arc::clone(&store))
+            .with_shown_config_fallbacks(shown);
+        retry
+            .on_config_option_fallback("Using sonnet: fable is gone.")
+            .await;
+        // A different substitution on the retry is still news.
+        retry
+            .on_config_option_fallback("Using medium effort.")
+            .await;
+
+        assert_eq!(
+            fallback_notices(&store, &session_id).await,
+            ["Using sonnet: fable is gone.", "Using medium effort."]
+        );
+    }
+
+    /// Writers that share nothing (a later turn of the session, a Pikchr
+    /// correction's connection) each announce the fallback, as before.
+    #[tokio::test]
+    async fn separate_connections_each_announce_a_config_fallback() {
+        use acp_client::MessageWriter as _;
+
+        let (store, session_id, first) = setup_writer();
+        first
+            .on_config_option_fallback("Using sonnet: fable is gone.")
+            .await;
+        let later = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+        later
+            .on_config_option_fallback("Using sonnet: fable is gone.")
+            .await;
+
+        assert_eq!(fallback_notices(&store, &session_id).await.len(), 2);
     }
 
     #[tokio::test]
@@ -1024,8 +1124,6 @@ mod tests {
             .await;
         writer.append_text("Switching to the second thing.").await;
         writer.finalize().await;
-        store.flush_writes().await;
-
         store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         let rows: Vec<(MessageRole, &str)> = messages
@@ -1100,8 +1198,6 @@ mod tests {
                 std::slice::from_ref(&image.id),
             )
             .await;
-        store.flush_writes().await;
-
         store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         assert_eq!(messages.len(), 1);

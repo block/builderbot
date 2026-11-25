@@ -7,9 +7,13 @@
 //!   start is tried once more on a fresh agent process: on a machine where
 //!   the session's thread was not scheduled for a minute and a half, the
 //!   next attempt usually goes through, and otherwise the session ends in
-//!   `error` exactly as before, one attempt later. Nothing new is written for
-//!   the user: the turn's prompt row is stored before the loop and the retry
-//!   sends the same prompt.
+//!   `error` exactly as before, one attempt later. The user sees nothing
+//!   twice: the turn's prompt row is stored before the loop and the retry
+//!   sends the same prompt, and a config fallback notice the first attempt
+//!   wrote (its setup got as far as a substituted model) is not written
+//!   again when the retry applies the same selections
+//!   (`MessageWriter::with_shown_config_fallbacks`). The hidden rows setup
+//!   records (initialize, modes, config options) are written by each attempt.
 //! - The agent has no session by the stored id
 //!   (`acp_client::SetupFailure::SessionNotFound`) and nothing the agent said is
 //!   recorded for the session (`acp_client::agent_output_recorded`). Earlier

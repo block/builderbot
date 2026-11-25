@@ -240,6 +240,7 @@ impl AcpDriver {
             unattended_session_mode: self.unattended_session_mode.clone(),
             blox: self.blox_process.clone(),
             timing,
+            setup_step_timeout: self.setup_step_timeout,
         };
         let writer = Arc::clone(writer);
         let task_transport = Arc::clone(&transport);
@@ -708,6 +709,9 @@ struct AttachContext {
     unattended_session_mode: Option<String>,
     blox: Option<BloxProcess>,
     timing: AttachTiming,
+    /// Each setup step's deadline: the driver's, as a session start uses
+    /// (see `AcpDriver::with_setup_step_timeout`).
+    setup_step_timeout: Duration,
 }
 
 async fn run_attach(
@@ -727,7 +731,7 @@ async fn run_attach(
     let timeline = SetupTimeline::start(
         &context.our_session_id,
         "Timed out attaching to the ACP session",
-        ACP_SETUP_STEP_TIMEOUT,
+        context.setup_step_timeout,
     );
     // Each step has its own deadline; a step's timeout is its error.
     let setup = setup_acp_session(AcpSessionSetupContext {

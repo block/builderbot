@@ -139,6 +139,67 @@ async fn initialize_is_answered_while_the_session_thread_is_blocked() {
     }
 }
 
+fn initialize_request() -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "staged-test", "version": "1"}
+        }
+    })
+}
+
+/// A client that keeps its connection to the server open between requests
+/// must not be able to start a new MCP session once the guard is dropped:
+/// neither on that connection nor on a new one, and from the moment the
+/// drop returns, not some time after.
+#[tokio::test]
+async fn nothing_is_served_on_a_kept_alive_connection_after_the_guard_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..20 {
+        let server = crate::note_tool::start_note_mcp_server(
+            format!("session-dropped-{round}"),
+            crate::note_tool::new_submission_slot(),
+            dir.path().join("draft.md"),
+        )
+        .unwrap();
+        let url = server.url();
+        // One connection, kept in the client's pool between requests.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(1)
+            .build()
+            .unwrap();
+        let post = || {
+            client
+                .post(&url)
+                .header("Accept", "application/json, text/event-stream")
+                .json(&initialize_request())
+                .send()
+        };
+
+        let before = rpc_result(post().await.expect("initialize while the server lives")).await;
+        assert_eq!(before["result"]["protocolVersion"], "2025-11-25");
+
+        drop(server);
+        // Either the connection is already closed (and a new one refused),
+        // or the request reaches the server and is turned away.
+        match post().await {
+            Err(_) => {}
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                assert_eq!(
+                    status,
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    "round {round}: a dropped server answered initialize: {body}"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn run_blocking_returns_the_value_and_reports_a_panic() {
     assert_eq!(super::run_blocking(|| 7).await, Ok(7));

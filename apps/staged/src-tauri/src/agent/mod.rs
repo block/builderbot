@@ -56,6 +56,7 @@ impl acp_client::Store for Store {
 // Re-export writer for backward compatibility
 pub use activity::ActivityClock;
 pub use writer::MessageWriter;
+pub(crate) use writer::ShownConfigFallbacks;
 
 fn replay_boundaries_from_messages(
     messages: Vec<SessionMessage>,

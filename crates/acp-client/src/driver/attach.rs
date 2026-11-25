@@ -722,24 +722,26 @@ async fn run_attach(
         .lock()
         .await
         .start_prompt(context.agent_session_id.clone());
-    let timeline = SetupTimeline::start(&context.our_session_id, ACP_SETUP_TIMEOUT);
-    let setup = tokio::time::timeout_at(
-        timeline.deadline(),
-        setup_acp_session(AcpSessionSetupContext {
-            connection,
-            working_dir: &context.working_dir,
-            store: &context.store,
-            handler,
-            our_session_id: &context.our_session_id,
-            acp_session_id: Some(&context.agent_session_id),
-            config_options: &[],
-            mcp_servers: &context.mcp_servers,
-            agent_label: &context.agent_label,
-            auth_selection: context.auth_selection.as_ref(),
-            unattended_session_mode: context.unattended_session_mode.as_deref(),
-            timeline: Some(&timeline),
-        }),
+    let timeline = SetupTimeline::start(
+        &context.our_session_id,
+        "Timed out attaching to the ACP session",
+        ACP_SETUP_STEP_TIMEOUT,
     );
+    // Each step has its own deadline; a step's timeout is its error.
+    let setup = setup_acp_session(AcpSessionSetupContext {
+        connection,
+        working_dir: &context.working_dir,
+        store: &context.store,
+        handler,
+        our_session_id: &context.our_session_id,
+        acp_session_id: Some(&context.agent_session_id),
+        config_options: &[],
+        mcp_servers: &context.mcp_servers,
+        agent_label: &context.agent_label,
+        auth_selection: context.auth_selection.as_ref(),
+        unattended_session_mode: context.unattended_session_mode.as_deref(),
+        timeline: Some(&timeline),
+    });
     tokio::pin!(setup);
     let setup_result = tokio::select! {
         result = &mut setup => result,
@@ -756,10 +758,8 @@ async fn run_attach(
         }
     };
     match setup_result {
-        Ok(Ok(_)) => timeline.completed(),
-        Ok(Err(e))
-            if transport.first_signal().is_some() || formatted_error_is_transport_closed(&e) =>
-        {
+        Ok(_) => timeline.completed(),
+        Err(e) if transport.first_signal().is_some() || formatted_error_is_transport_closed(&e) => {
             timeline.failed(&e);
             log::info!(
                 "ACP session {}: attach lost its transport during setup: {e}",
@@ -767,15 +767,9 @@ async fn run_attach(
             );
             return Ok(lost_outcome(transport));
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             timeline.failed(&e);
             return Err(e);
-        }
-        Err(_) => {
-            return Err(timeline.timed_out(&format!(
-                "Timed out attaching to the ACP session after {}s",
-                ACP_SETUP_TIMEOUT.as_secs()
-            )))
         }
     }
     handler.finish_catch_up().await;

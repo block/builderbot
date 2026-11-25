@@ -12,6 +12,34 @@ import { EXPECTED_EXECUTABLE_ROOTS } from '../lib/safety.mjs';
 const run = promisify(execFile);
 const LSOF_EVERY = 3;
 
+/**
+ * The CPU time of a set of processes that changes, as one running total:
+ * call it with each sample's processes (`[{ pid, cpuSeconds }]`) and it
+ * returns the total so far. Each process adds what it used since the sample
+ * before; one seen for the first time adds all it has used. So a process
+ * that exits keeps what it had added, where a sum over the processes alive
+ * at each sample loses a process's whole lifetime when it exits (and the
+ * difference of two such sums can be negative). What a process uses after
+ * its last sample is not seen, nor is one that starts and exits between two
+ * samples.
+ */
+export function cpuMeter() {
+  let total = 0;
+  let last = new Map();
+  return (processes) => {
+    const now = new Map();
+    for (const { pid, cpuSeconds } of processes) {
+      const before = last.get(pid);
+      // Less than before is a new process under a reused pid (or one that
+      // has exited, which `ps` shows with no time): it starts from nothing.
+      total += before === undefined || cpuSeconds < before ? cpuSeconds : cpuSeconds - before;
+      now.set(pid, cpuSeconds);
+    }
+    last = now;
+    return total;
+  };
+}
+
 export function startSampler({ appPid, browserPid, runDir, realStaged, allowedExecutables }) {
   const samples = [];
   const openUnderRealStaged = new Map();
@@ -28,8 +56,9 @@ export function startSampler({ appPid, browserPid, runDir, realStaged, allowedEx
   const fromExpectedPlace = (args) =>
     args.startsWith('(') || !args.split(' ')[0].includes('/') || inExpectedPlace(args);
 
-  const sum = (processes) => ({
-    cpuSeconds: processes.reduce((total, p) => total + p.cpuSeconds, 0),
+  const meters = { app: cpuMeter(), children: cpuMeter(), browser: cpuMeter() };
+  const sum = (group, processes) => ({
+    cpuSeconds: meters[group](processes),
     rssKb: processes.reduce((total, p) => total + p.rssKb, 0),
     processes: processes.length,
   });
@@ -43,9 +72,9 @@ export function startSampler({ appPid, browserPid, runDir, realStaged, allowedEx
       const browser = browserPid ? tree(all, browserPid) : [];
       samples.push({
         t: Date.now(),
-        app: sum(app.slice(0, 1)),
-        children: sum(app.slice(1)),
-        browser: sum(browser),
+        app: sum('app', app.slice(0, 1)),
+        children: sum('children', app.slice(1)),
+        browser: sum('browser', browser),
       });
       const watched = [...app, ...browser, ...tree(all, process.pid)];
       for (const p of watched) {

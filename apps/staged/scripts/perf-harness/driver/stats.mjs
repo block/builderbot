@@ -49,17 +49,24 @@ export function histogramMs(histogram) {
 
 /**
  * CPU and memory of a set of processes over a window, from
- * `{ t, cpuSeconds, rssKb }` samples taken once a second. `samples` says how
+ * `{ t, cpuSeconds, rssKb }` samples taken once a second, `cpuSeconds` a
+ * running total (see `cpuMeter` in `sampler.mjs`). The CPU is what was used
+ * between the first and the last sample, and the percentage is of that
+ * span (`spanSeconds`), not of the window: the samples nearest the window's
+ * ends can each be half a second inside or outside it. `samples` says how
  * many there were: far fewer than the window's seconds means the sampler
  * itself was starved and the figures rest on little.
  */
-export function processUsage(samples, seconds) {
+export function processUsage(samples) {
   if (samples.length < 2) return null;
-  const cpu = samples[samples.length - 1].cpuSeconds - samples[0].cpuSeconds;
+  const [first, last] = [samples[0], samples[samples.length - 1]];
+  const cpu = last.cpuSeconds - first.cpuSeconds;
+  const span = (last.t - first.t) / 1000;
   const rss = samples.map((s) => s.rssKb / 1024);
   return {
     cpuSeconds: round(cpu, 2),
-    cpuPercent: round((cpu / seconds) * 100, 1),
+    cpuPercent: span > 0 ? round((cpu / span) * 100, 1) : null,
+    spanSeconds: round(span, 2),
     rssMaxMb: round(Math.max(...rss), 1),
     rssMeanMb: round(rss.reduce((a, b) => a + b, 0) / rss.length, 1),
     processesMax: Math.max(...samples.map((s) => s.processes)),

@@ -18,6 +18,7 @@ import { listProcesses, tree } from '../lib/processes.mjs';
 import { isInside, resolveExisting } from '../lib/safety.mjs';
 import { createClient, launchApp } from './app.mjs';
 import { openBrowserFrontend, openDesktopFrontend } from './frontend.mjs';
+import { olderHooksWarning } from './hooks.mjs';
 import { agentLoad, backendResult, frontendResult, mountedRows } from './measure.mjs';
 import { expectedChunksPerSecond, overloadReason } from './overload.mjs';
 import { startSampler } from './sampler.mjs';
@@ -37,8 +38,6 @@ let frontend;
 let sampler;
 let phase = 'starting the app';
 
-/** The hooks version this driver was written against; see `HOOKS_VERSION` in the app's `perf_harness/metrics.rs`. */
-const HOOKS_WANTED = 2;
 /** A window is not judged overloaded on less than this much of it. */
 const OVERLOAD_AFTER_S = 10;
 
@@ -421,13 +420,7 @@ async function runScenario({ name, index, api, projects, profiles, streamSupport
       promptBytes: Buffer.byteLength(promptFor(viewed)),
       sessionRowBytes,
     },
-    backend: backendResult({
-      metrics,
-      usage,
-      seconds,
-      frontendKind: frontend.kind,
-      streamSupported,
-    }),
+    backend: backendResult({ metrics, usage, frontendKind: frontend.kind, streamSupported }),
     frontend: {
       ...frontendResult({ collected, usage, seconds, streamSupported }),
       subtitleStaleness,
@@ -470,11 +463,8 @@ async function main() {
   const { api, dataDir, hooks } = await startApp();
   log(`app running, pid ${app.pid}, data in ${dataDir}`);
   result.hooks = hooks;
-  if (hooks < HOOKS_WANTED) {
-    result.warnings.push(
-      `the app's harness hooks are version ${hooks} and this harness expects ${HOOKS_WANTED}: there is no subtitle staleness figure, tool output is counted with text in agentWriteToStoredMs, and the backend percentiles are coarse (half an octave)`
-    );
-  }
+  const older = olderHooksWarning(hooks);
+  if (older) result.warnings.push(older);
   writeResult(dataDir);
   // Commands this tree does not have answer "Unknown command".
   const streamSupported = await api.invoke('check_session_stream', {}).then(
@@ -495,7 +485,9 @@ async function main() {
 
   phase = 'opening the frontend';
   if (params.frontend === 'browser') {
-    // The app's own webview loaded the frontend too; park it, so the browser is the only client.
+    // The app's own webview asked for the frontend too. It has no token, so
+    // it was refused (hooks before version 3 served it); park it either
+    // way, so the browser is the only client.
     await api.evalInWebviews(`location.replace('about:blank');`);
     frontend = await openBrowserFrontend({
       api,

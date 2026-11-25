@@ -1,29 +1,50 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { createServer, type IncomingMessage } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  createClient,
+  TOKEN_COOKIE,
+  TOKEN_HEADER,
+  tokenCookie,
+  tokenCookieScript,
+} from './driver/app.mjs';
 import { connection } from './driver/cdp.mjs';
-import { agentLoad, frontendResult, mountedRows } from './driver/measure.mjs';
+import { HOOKS_WANTED, olderHooksWarning } from './driver/hooks.mjs';
+import { agentLoad, backendResult, frontendResult, mountedRows } from './driver/measure.mjs';
 import { expectedChunksPerSecond, overloadReason } from './driver/overload.mjs';
+import { cpuMeter } from './driver/sampler.mjs';
 import { plan } from './driver/scenarios.mjs';
 import { startStaleness } from './driver/staleness.mjs';
 import { outdatedFor, stampsIn, storedStamps } from './driver/stamps.mjs';
 import { distribution, histogramMs, processUsage } from './driver/stats.mjs';
 import { compareChat, subtitleRound, verifyChat } from './driver/verify.mjs';
-import { chooseTargetDir, defaultTargetDir } from './lib/build.mjs';
+import {
+  builtMarker,
+  cachedBinaryDir,
+  chooseTargetDir,
+  defaultTargetDir,
+  replaceCachedBinary,
+} from './lib/build.mjs';
+import { tryLock, withLock } from './lib/lock.mjs';
 import { parseParams } from './lib/params.mjs';
-import { compare, summarize } from './lib/report.mjs';
+import { compare, differingParams, summarize } from './lib/report.mjs';
 import { isolationProblem, scrubbedEnv } from './lib/safety.mjs';
 
 let scratch: string;
@@ -180,6 +201,184 @@ describe('the cargo target directory', () => {
   });
 });
 
+describe('the build cache', () => {
+  it('drops every port’s marker of a profile when that profile’s binary is replaced', () => {
+    const cache = join(scratch, 'cache');
+    const from = join(scratch, 'cargo-target', 'debug');
+    mkdirSync(join(from, 'resources'), { recursive: true });
+    writeFileSync(join(from, 'Staged'), 'built for 47612');
+    writeFileSync(join(from, 'resources', 'guide.md'), 'guide');
+    // What an earlier build for another port left: its binary and its marker.
+    mkdirSync(cachedBinaryDir(cache, 'debug'), { recursive: true });
+    writeFileSync(join(cachedBinaryDir(cache, 'debug'), 'Staged'), 'built for 47611');
+    writeFileSync(join(cachedBinaryDir(cache, 'debug'), 'stale'), 'from the older build');
+    for (const [profile, port] of [
+      ['debug', 47611],
+      ['debug', 47612],
+      ['release', 47611],
+    ] as const)
+      writeFileSync(builtMarker(cache, profile, port), 'then');
+
+    const binaryDir = replaceCachedBinary({ from, cache, profile: 'debug' });
+
+    expect(binaryDir).toBe(cachedBinaryDir(cache, 'debug'));
+    expect(readFileSync(join(binaryDir, 'Staged'), 'utf8')).toBe('built for 47612');
+    expect(readFileSync(join(binaryDir, 'resources', 'guide.md'), 'utf8')).toBe('guide');
+    expect(existsSync(join(binaryDir, 'stale'))).toBe(false);
+    // Neither port may be skipped to until its build has finished and written
+    // its own marker; the other profile's binary was not touched.
+    expect(existsSync(builtMarker(cache, 'debug', 47611))).toBe(false);
+    expect(existsSync(builtMarker(cache, 'debug', 47612))).toBe(false);
+    expect(existsSync(builtMarker(cache, 'release', 47611))).toBe(true);
+  });
+});
+
+describe('the build lock', () => {
+  /** A pid that is not running: a child that has exited. */
+  const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
+
+  it('is held by one taker at a time and free again once released', () => {
+    const lock = join(scratch, 'build.lock');
+    const first = tryLock(lock);
+    expect(first.release).toBeTypeOf('function');
+    expect(tryLock(lock)).toEqual({ heldBy: process.pid });
+    first.release?.();
+    expect(existsSync(lock)).toBe(false);
+    const second = tryLock(lock);
+    expect(second.release).toBeTypeOf('function');
+    second.release?.();
+    // Nothing of a taking is left beside the lock.
+    expect(readdirSync(scratch)).toEqual([]);
+  });
+
+  it('is taken over from a holder that is no longer running, and only from that one', () => {
+    const lock = join(scratch, 'build.lock');
+    const dead = deadPid();
+    expect(tryLock(lock, dead).release).toBeTypeOf('function');
+    const taken = tryLock(lock);
+    expect(taken.release).toBeTypeOf('function');
+    // The dead holder's lock was moved aside under its own name, which is
+    // what stops a late second takeover from moving the new lock.
+    const buried = readdirSync(scratch).filter((name) => name.startsWith('build.lock.dead-'));
+    expect(buried).toHaveLength(1);
+    expect(tryLock(lock)).toEqual({ heldBy: process.pid });
+    taken.release?.();
+
+    // Kept for an hour, then cleared by the next taker.
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(join(scratch, buried[0]), old, old);
+    tryLock(lock).release?.();
+    expect(readdirSync(scratch)).toEqual([]);
+  });
+
+  it('runs the work holding the lock, waits for a holder, and lets go when the work throws', () => {
+    const lock = join(scratch, 'build.lock');
+    expect(withLock(lock, () => tryLock(lock).heldBy)).toBe(process.pid);
+    expect(() =>
+      withLock(lock, () => {
+        throw new Error('the build failed');
+      })
+    ).toThrow('the build failed');
+    expect(existsSync(lock)).toBe(false);
+
+    // Held by a process that ends after a moment: the wait is announced, and
+    // the work runs once the holder is gone. Not a child of this process: the
+    // wait does not return to the event loop, so a child that exited would
+    // never be reaped and would still count as running.
+    const holder = Number(
+      spawnSync('/bin/sh', ['-c', 'sleep 0.5 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' })
+        .stdout
+    );
+    expect(tryLock(lock, holder).release).toBeTypeOf('function');
+    const said: string[] = [];
+    expect(
+      withLock(lock, () => 'built', { say: (text: string) => said.push(text), every: 50 })
+    ).toBe('built');
+    expect(said).toEqual([
+      `waiting for the harness build of process ${holder}, which holds ${lock}`,
+    ]);
+  });
+});
+
+describe('the run’s token', () => {
+  let seen: { url: string; headers: IncomingMessage['headers'] }[];
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+  beforeEach(async () => {
+    seen = [];
+    // The app's rule: nothing without the token.
+    server = createServer((request, response) => {
+      seen.push({ url: request.url ?? '', headers: request.headers });
+      if (request.headers[TOKEN_HEADER] !== 'the-run-token') {
+        response.writeHead(401).end('perf-harness: this port takes the run’s token');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    port = (server.address() as AddressInfo).port;
+  });
+  afterEach(() => new Promise((resolve) => server.close(resolve)));
+
+  it('goes with every request the driver makes, commands and harness routes alike', async () => {
+    const api = createClient({ port, token: 'the-run-token' });
+    expect(await api.invoke('list_projects')).toEqual({ ok: true });
+    expect(await api.metrics()).toEqual({ ok: true });
+    await api.resetMetrics();
+    expect(await api.outdated({ a: 3 }, 1700000000123)).toEqual({ ok: true });
+    await api.evalInWebviews('1');
+    await api.takeResults();
+    expect(seen.map((request) => request.url)).toEqual([
+      '/api/invoke/list_projects',
+      '/perf/metrics',
+      '/perf/metrics/reset',
+      '/perf/outdated?at=1700000000123',
+      '/perf/eval',
+      '/perf/results',
+    ]);
+    for (const request of seen) expect(request.headers[TOKEN_HEADER]).toBe('the-run-token');
+    // The driver's commands are still told from the page's.
+    expect(seen[0].headers['x-perf-driver']).toBe('1');
+  });
+
+  it('fails a command the app refuses, with the status', async () => {
+    const api = createClient({ port, token: 'another-run' });
+    await expect(api.invoke('list_projects')).rejects.toThrow(/list_projects: 401/);
+    await expect(api.metrics()).rejects.toThrow(/\/perf\/metrics: 401/);
+  });
+
+  it('reaches the page as a cookie no script can read, set before the page loads', () => {
+    const api = createClient({ port, token: 'the-run-token' });
+    expect(tokenCookie(api)).toEqual({
+      name: TOKEN_COOKIE,
+      value: 'the-run-token',
+      url: `http://127.0.0.1:${port}`,
+      httpOnly: true,
+      sameSite: 'Strict',
+    });
+    // The desktop webview has no such door: the document sets it, for the
+    // session only.
+    expect(tokenCookieScript(api)).toBe(
+      `document.cookie = "${TOKEN_COOKIE}=the-run-token; path=/; SameSite=Strict";`
+    );
+  });
+});
+
+describe('older hooks', () => {
+  it('says what a result lacks for each version behind, and nothing when current', () => {
+    expect(olderHooksWarning(HOOKS_WANTED)).toBeNull();
+    expect(olderHooksWarning(HOOKS_WANTED + 1)).toBeNull();
+    const two = olderHooksWarning(2);
+    expect(two).toContain(`version 2 and this harness expects ${HOOKS_WANTED}`);
+    expect(two).toContain('answered any local process');
+    expect(two).toContain('no piecesBehind');
+    expect(two).not.toContain('no subtitle staleness figure');
+    const one = olderHooksWarning(1);
+    expect(one).toContain('no subtitle staleness figure');
+    expect(one).toContain('answered any local process');
+  });
+});
+
 describe('the DevTools connection', () => {
   /** A socket that records what is sent and lets a test deliver events. */
   function fakeSocket() {
@@ -261,23 +460,54 @@ describe('stamps', () => {
   });
 
   it('measures how out of date a row is from when the first newer piece was stored', () => {
-    const answer = { newestSeq: 8, newerSeq: 6, newerStoredMs: 1700000000400, floor: false };
-    // The store has held seq 6 for 350 ms and the row still shows seq 5, three pieces back.
-    expect(outdatedFor(5, answer, 1700000000750)).toEqual({ ms: 350, pieces: 3, floor: false });
+    // The row shows seq 25, a tool call. Its output steps took 26 to 30 and
+    // the text after it 31 and 32: seven sequence numbers on, two pieces a
+    // row can show, which is what the app counts.
+    const answer = {
+      newestSeq: 32,
+      newerSeq: 31,
+      newerStoredMs: 1700000000400,
+      newerCount: 2,
+      floor: false,
+    };
+    // The store has held seq 31 for 350 ms.
+    expect(outdatedFor(answer, 1700000000750)).toEqual({
+      behind: true,
+      ms: 350,
+      pieces: 2,
+      floor: false,
+    });
     // Stored after the page was read: the row was not behind when it was looked at.
-    expect(outdatedFor(5, answer, 1700000000390)).toEqual({ ms: 0, pieces: 0, floor: false });
+    const current = { behind: false, ms: 0, pieces: 0, floor: false };
+    expect(outdatedFor(answer, 1700000000390)).toEqual(current);
     // Nothing newer stored.
     expect(
-      outdatedFor(8, { newestSeq: 8, newerSeq: null, newerStoredMs: null, floor: false }, 1)
-    ).toEqual({ ms: 0, pieces: 0, floor: false });
-    // A row that shows nothing is behind by everything stored.
+      outdatedFor(
+        { newestSeq: 8, newerSeq: null, newerStoredMs: null, newerCount: 0, floor: false },
+        1
+      )
+    ).toEqual(current);
+    // Further behind than the app keeps: least values.
     expect(
       outdatedFor(
-        null,
-        { newestSeq: 4, newerSeq: 1, newerStoredMs: 1700000000000, floor: true },
+        {
+          newestSeq: 400,
+          newerSeq: 145,
+          newerStoredMs: 1700000000000,
+          newerCount: 256,
+          floor: true,
+        },
         1700000002000
       )
-    ).toEqual({ ms: 2000, pieces: 4, floor: true });
+    ).toEqual({ behind: true, ms: 2000, pieces: 256, floor: true });
+    // Hooks that do not count: behind, by an unknown number of pieces, and
+    // never by a difference of sequence numbers.
+    expect(
+      outdatedFor(
+        { newestSeq: 32, newerSeq: 31, newerStoredMs: 1700000000400, floor: false },
+        1700000000750
+      )
+    ).toEqual({ behind: true, ms: 350, pieces: null, floor: false });
   });
 });
 
@@ -300,6 +530,7 @@ describe('subtitle staleness', () => {
   it('asks the app about what each mounted row shows, page first', async () => {
     const order: string[] = [];
     const asked: Record<string, number>[] = [];
+    const askedAt: (number | undefined)[] = [];
     const frontend = {
       evaluate: async () => {
         order.push('page');
@@ -310,16 +541,19 @@ describe('subtitle staleness', () => {
       },
     };
     const api = {
-      outdated: async (shown: Record<string, number>) => {
+      outdated: async (shown: Record<string, number>, at?: number) => {
         order.push('app');
         asked.push(shown);
+        askedAt.push(at);
         return {
-          // Seq 8 was stored 600 ms before the page was read; the row shows 7 of 10.
-          a: { newestSeq: 10, newerSeq: 8, newerStoredMs: 4400, floor: false },
+          // Seq 8 was stored 600 ms before the page was read. The row shows
+          // 7 and the newest is 14, but 9 to 13 are a tool call's output:
+          // two pieces a row can show, not seven.
+          a: { newestSeq: 14, newerSeq: 8, newerStoredMs: 4400, newerCount: 2, floor: false },
           // Up to date.
-          b: { newestSeq: 5, newerSeq: null, newerStoredMs: null, floor: false },
+          b: { newestSeq: 5, newerSeq: null, newerStoredMs: null, newerCount: 0, floor: false },
           // Mounted and showing nothing, with three pieces stored.
-          d: { newestSeq: 3, newerSeq: 1, newerStoredMs: 4900, floor: false },
+          d: { newestSeq: 3, newerSeq: 1, newerStoredMs: 4900, newerCount: 3, floor: false },
         };
       },
     };
@@ -329,9 +563,13 @@ describe('subtitle staleness', () => {
     expect(order.slice(0, 2)).toEqual(['page', 'app']);
     // The unmounted row is not asked about; a row with no stamp is asked as 0.
     expect(asked[0]).toEqual({ a: 7, b: 5, d: 0 });
+    // With when the page was read, so the app counts what was stored by then.
+    expect(askedAt[0]).toBe(5000);
     expect(figures).toMatchObject({ rows: 3, floors: 0, over1s: 0, stoppedEarly: null });
     expect(figures?.outdatedMs).toMatchObject({ max: 600, p50: 100 });
-    expect(figures?.piecesBehind?.max).toBe(3);
+    // The app's count of showable pieces, not `newestSeq - seq`.
+    expect(figures?.piecesBehind).toMatchObject({ max: 3, p50: 2 });
+    expect(figures?.piecesBehind?.count).toBe((figures?.samples ?? 0) * 3);
     expect(figures?.outdatedMs?.count).toBe((figures?.samples ?? 0) * 3);
     expect(figures?.upToDate).toBe(figures?.samples);
     expect(figures?.nothingShown).toBe(figures?.samples);
@@ -368,6 +606,25 @@ describe('subtitle staleness', () => {
       samples: 2,
       stoppedEarly: 'the DevTools connection closed',
     });
+  });
+
+  it('has no pieces figure from hooks that do not count them, and still times the rows', async () => {
+    let asks = 0;
+    const sampler = startStaleness({
+      api: {
+        outdated: async () => {
+          asks += 1;
+          return { a: { newestSeq: 9, newerSeq: 4, newerStoredMs: 700, floor: false } };
+        },
+      },
+      frontend: { evaluate: async () => ({ at: 1000, rows: [row('a', 3)] }) },
+      sessions,
+      every: 5,
+    });
+    await vi.waitFor(() => expect(asks).toBeGreaterThan(1));
+    const figures = await sampler.stop();
+    expect(figures?.piecesBehind).toBeNull();
+    expect(figures?.outdatedMs).toMatchObject({ max: 300 });
   });
 });
 
@@ -524,20 +781,78 @@ describe('figures', () => {
     expect(distribution([1, 2, 3, 4])).toMatchObject({ count: 4, p50: 3, max: 4, mean: 2.5 });
   });
 
-  it('takes CPU as the difference across the window', () => {
+  it('takes CPU between the first and last sample, as a share of the time between them', () => {
     const samples = [
-      { t: 0, cpuSeconds: 10, rssKb: 102_400, processes: 1 },
-      { t: 1, cpuSeconds: 11, rssKb: 204_800, processes: 2 },
+      { t: 10_400, cpuSeconds: 10, rssKb: 102_400, processes: 1 },
+      { t: 11_400, cpuSeconds: 10.5, rssKb: 153_600, processes: 2 },
+      { t: 12_900, cpuSeconds: 11, rssKb: 204_800, processes: 2 },
     ];
-    expect(processUsage(samples, 2)).toEqual({
+    // One CPU second over the 2.5 s the samples span: 40 %, whatever the
+    // length of the window they were picked for.
+    expect(processUsage(samples)).toEqual({
       cpuSeconds: 1,
-      cpuPercent: 50,
+      cpuPercent: 40,
+      spanSeconds: 2.5,
       rssMaxMb: 200,
       rssMeanMb: 150,
       processesMax: 2,
-      samples: 2,
+      samples: 3,
     });
-    expect(processUsage(samples.slice(1), 2)).toBeNull();
+    expect(processUsage(samples.slice(2))).toBeNull();
+    const together = samples.slice(0, 2).map((sample) => ({ ...sample, t: 5 }));
+    expect(processUsage(together)?.cpuPercent).toBeNull();
+  });
+
+  it('keeps the CPU of a process that exits, and counts a new one from nothing', () => {
+    const meter = cpuMeter();
+    const p = (pid: number, cpuSeconds: number) => ({ pid, cpuSeconds });
+    // Two agents that have run for a while.
+    expect(meter([p(10, 5), p(11, 3)])).toBe(8);
+    expect(meter([p(10, 6), p(11, 3.5)])).toBe(9.5);
+    // One exits. A sum over the living would fall to 6.5, and the window's
+    // difference would be negative; its 3.5 s stay counted.
+    expect(meter([p(10, 6.5)])).toBe(10);
+    // A git process seen once, with all it has used so far.
+    expect(meter([p(10, 6.5), p(12, 0.25)])).toBe(10.25);
+    expect(meter([p(10, 7)])).toBe(10.75);
+    // A pid used again by another process starts over; so does one `ps`
+    // lists with no time left as it exits.
+    expect(meter([p(10, 7), p(12, 0.1)])).toBe(10.85);
+    expect(meter([p(10, 0)])).toBe(10.85);
+    expect(meter([])).toBe(10.85);
+    // Two meters do not share what they have seen.
+    expect(cpuMeter()([p(10, 7)])).toBe(7);
+  });
+
+  it('counts the stream frames a client took apart from the ones none did', () => {
+    const histogram = { count: 0, sumUs: 0, maxUs: 0, buckets: [] };
+    const metrics = (hooks: number, frames: object) => ({
+      hooks,
+      commands: {},
+      streamFrames: frames,
+      storeLock: { wait: histogram, hold: histogram },
+      stampToStored: { text: histogram, tool: histogram },
+    });
+    const usage = { app: [], children: [], browser: [] };
+    const result = (hooks: number, frames: object) =>
+      backendResult({
+        metrics: metrics(hooks, frames),
+        usage,
+        frontendKind: 'browser',
+        streamSupported: true,
+      }).streamTotals;
+    expect(
+      result(3, {
+        'full.delta': { frames: 40, bytes: 4000, dropped: 2 },
+        'summary.delta': { frames: 60, bytes: 600, dropped: 0 },
+      })
+    ).toEqual({ frames: 100, bytes: 4600, dropped: 2 });
+    // Hooks that counted a frame before it was sent cannot say.
+    expect(result(2, { 'full.delta': { frames: 40, bytes: 4000 } })).toEqual({
+      frames: 40,
+      bytes: 4000,
+      dropped: null,
+    });
   });
 
   it('counts a row as mounted only when it was on the page at both ends of the window', () => {
@@ -660,6 +975,28 @@ describe('reports', () => {
     expect(summary).not.toContain('stream frames sent');
     expect(summarize(result('new', { frames: 7, bytes: 70 }, 1))).toMatch(
       /stream frames sent\s+\|\s+7 \|/
+    );
+  });
+
+  it('calls two runs like for like when they differ only in where they were built', () => {
+    const before = result('before', { frames: 7, bytes: 70 }, 2);
+    const after = result('after', { frames: 7, bytes: 70 }, 3);
+    // The README's recipe: the second run names another tree.
+    after.params = {
+      ...after.params,
+      appDir: '/other/checkout/apps/staged',
+      targetDir: '/tmp/other-target',
+      port: 47612,
+      skipBuild: true,
+    };
+    expect(differingParams(before.params, after.params)).toEqual([]);
+    expect(compare(before, after)).not.toContain('not like for like');
+
+    // A different load is still called out, among the keys that are not.
+    after.params = { ...after.params, rate: 8, sessionsPerProject: 6 };
+    expect(differingParams(before.params, after.params)).toEqual(['sessionsPerProject', 'rate']);
+    expect(compare(before, after)).toContain(
+      'warning: the two runs differ in sessionsPerProject, rate; their figures are not like for like'
     );
   });
 

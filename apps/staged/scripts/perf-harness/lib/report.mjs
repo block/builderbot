@@ -16,6 +16,7 @@ export const HEADLINES = [
   ['backend.commandTotals.count', 'commands served'],
   ['backend.commandTotals.wireBytes', 'command bytes sent (wire)'],
   ['backend.streamTotals.frames', 'stream frames sent'],
+  ['backend.streamTotals.dropped', 'stream frames no client took (queue full, client gone)'],
   ['backend.streamTotals.bytes', 'stream bytes sent (JSON, before the transport)'],
   ['backend.storeLock.waitMs.count', 'store lock takes'],
   ['backend.storeLock.waitMs.p95', 'store lock wait p95 ms'],
@@ -191,17 +192,37 @@ export function summarize(result) {
   ].join('\n');
 }
 
+/**
+ * Parameters that say how a run was named, built or served, and nothing
+ * about what was measured: two runs that differ in these alone are like for
+ * like. `appDir` and `targetDir` are here because the documented way to
+ * compare two trees gives the second run an `--app-dir`.
+ */
+const NOT_THE_LOAD = [
+  'label',
+  'out',
+  'localStorage',
+  'keep',
+  'skipBuild',
+  'appDir',
+  'targetDir',
+  'port',
+];
+
+/** The parameters whose values differ between two runs and make their figures not like for like. */
+export function differingParams(a, b) {
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(
+    (key) => !NOT_THE_LOAD.includes(key) && JSON.stringify(a[key]) !== JSON.stringify(b[key])
+  );
+}
+
 /** The difference between two result files, scenario by scenario. `all` lists every numeric figure. */
 export function compare(a, b, { all = false } = {}) {
   const out = [
     `A: ${a.label} (${a.tree.head?.slice(0, 12) ?? '?'}, ${a.frontend}, localStorage ${JSON.stringify(a.params.localStorage)})`,
     `B: ${b.label} (${b.tree.head?.slice(0, 12) ?? '?'}, ${b.frontend}, localStorage ${JSON.stringify(b.params.localStorage)})`,
   ];
-  const differing = Object.keys(a.params).filter(
-    (key) =>
-      !['label', 'out', 'localStorage', 'keep', 'skipBuild'].includes(key) &&
-      JSON.stringify(a.params[key]) !== JSON.stringify(b.params[key])
-  );
+  const differing = differingParams(a.params, b.params);
   if (a.frontend !== b.frontend) out.push('warning: the two runs measured different frontends');
   for (const [side, result] of [
     ['A', a],

@@ -19,22 +19,26 @@ export function stampsIn(text) {
 }
 
 /**
- * How out of date a row is: `{ ms, pieces, floor }`.
+ * How out of date a row is: `{ behind, ms, pieces, floor }`.
  *
- * `shownSeq` is the stamp the row showed at `at` (the page's clock, epoch
- * ms; `null` for none) and `answer` the app's for it (`/perf/outdated`):
- * the first stamp stored after that one and when it was stored. `ms` is for
- * how long the store had held something newer than the row showed, and 0
- * when it held nothing newer at `at`. `pieces` is how many stamps the row
- * was behind. `floor` says the row was further behind than the app keeps
- * track of, so `ms` is a least value.
+ * `answer` is the app's (`/perf/outdated`) for the stamp the row showed at
+ * `at` (the page's clock, epoch ms): the first stamp stored after that one,
+ * when it was stored, and how many the store held at `at`. `behind` says
+ * the store held something newer at `at`; `ms` for how long it had, and 0
+ * when it had not. `pieces` is how many pieces the row could have shown and
+ * did not: the app's count of showable stamps (text and tool calls) newer
+ * than the one shown. It is not a difference of sequence numbers, which
+ * would count a tool call's output steps, and those are never shown. `null`
+ * from hooks that do not count. `floor` says the row was further behind
+ * than the app keeps track of, so `ms` and `pieces` are least values.
  */
-export function outdatedFor(shownSeq, answer, at) {
+export function outdatedFor(answer, at) {
   if (answer.newerSeq === null || answer.newerStoredMs > at)
-    return { ms: 0, pieces: 0, floor: false };
+    return { behind: false, ms: 0, pieces: 0, floor: false };
   return {
+    behind: true,
     ms: at - answer.newerStoredMs,
-    pieces: answer.newestSeq - (shownSeq ?? answer.newerSeq - 1),
+    pieces: answer.newerCount ?? null,
     floor: answer.floor,
   };
 }

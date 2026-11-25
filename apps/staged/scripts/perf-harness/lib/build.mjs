@@ -6,6 +6,17 @@
 // ordinary builds of the tree use: that one may be shared between worktrees
 // and hold the binary a running dev app was started from, which a build
 // with another feature set and dev URL would replace.
+//
+// That directory is by default one for every tree, so a harness build of
+// another tree can be writing it at the same time. A lock in it is held
+// from before `cargo build` until the binary has been copied out, so what a
+// run copies is what it built.
+//
+// The binary has its port compiled in (the dev URL), and the cache keeps
+// one binary per profile. A marker per port says which port that binary was
+// built for, and every marker of the profile goes when the binary is
+// replaced: `--skip-build` then finds only the port of the binary that is
+// really there.
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -14,6 +25,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -21,6 +33,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import { withLock } from './lock.mjs';
 import { resolveExisting } from './safety.mjs';
 
 /** The identifier keeps the webview's own data apart from a real install's, on top of the throwaway HOME. */
@@ -54,6 +67,34 @@ export function chooseTargetDir({ requested, treeTargetDir }) {
   return chosen;
 }
 
+/** Where a tree's cache keeps the binary of a profile, and the marker that says which port it was built for. */
+export const cachedBinaryDir = (cache, profile) => join(cache, 'target', profile);
+export const builtMarker = (cache, profile, port) => join(cache, `built-${profile}-${port}`);
+
+/**
+ * Put the binary cargo just built in `from` (and what goes beside it) into
+ * the cache, in place of the one there. Every marker of the profile is
+ * removed first, whatever port it names: each vouched for the binary that
+ * is about to go.
+ */
+export function replaceCachedBinary({ from, cache, profile }) {
+  const binaryDir = cachedBinaryDir(cache, profile);
+  mkdirSync(cache, { recursive: true });
+  for (const name of readdirSync(cache)) {
+    if (name.startsWith(`built-${profile}-`)) rmSync(join(cache, name), { force: true });
+  }
+  rmSync(binaryDir, { recursive: true, force: true });
+  mkdirSync(binaryDir, { recursive: true });
+  for (const part of ['Staged', 'resources', 'stagedctl']) {
+    if (existsSync(join(from, part)))
+      cpSync(join(from, part), join(binaryDir, part), {
+        recursive: true,
+        mode: constants.COPYFILE_FICLONE,
+      });
+  }
+  return binaryDir;
+}
+
 function run(what, file, args, options) {
   console.error(`[perf-harness] ${what}`);
   const result = spawnSync(file, args, { stdio: ['ignore', 2, 2], ...options });
@@ -70,9 +111,9 @@ export function build({ appDir, profile, port, skipBuild, targetDir: requested }
   const dist = join(cache, 'dist');
   const tauri = join(appDir, 'src-tauri');
   // A run uses the copy of the binary kept here, whatever is built later.
-  const binaryDir = join(cache, 'target', profile);
+  const binaryDir = cachedBinaryDir(cache, profile);
   const binary = join(binaryDir, 'Staged');
-  const built = join(cache, `built-${profile}-${port}`);
+  const built = builtMarker(cache, profile, port);
   if (skipBuild) {
     if (!existsSync(built) || !existsSync(binary) || !existsSync(join(dist, 'index.html'))) {
       throw new Error(
@@ -95,23 +136,31 @@ export function build({ appDir, profile, port, skipBuild, targetDir: requested }
   // cargo calls build there too.
   const env = { ...process.env, TAURI_CONFIG: tauriConfig(port), CARGO_TARGET_DIR: targetDir };
   console.error(`[perf-harness] cargo target directory: ${targetDir}`);
-  mkdirSync(cache, { recursive: true });
-  rmSync(built, { force: true });
   const staged = metadata.packages.find((p) => p.name === 'Staged');
   if (!staged || !('perf-harness' in staged.features)) {
     throw new Error(
       `${tauri} has no \`perf-harness\` cargo feature: this tree predates the harness hooks. Apply the commit that added src-tauri/src/perf_harness.rs to it (the touch points outside that module are listed at its top), then run again.`
     );
   }
-  run('staging the stagedctl sidecar', 'bash', ['scripts/prepare-stagedctl-sidecar.sh'], {
-    cwd: appDir,
-    env,
-  });
-  run(
-    `cargo build --features perf-harness (${profile})`,
-    'cargo',
-    ['build', '--features', 'perf-harness', ...(profile === 'release' ? ['--release'] : [])],
-    { cwd: tauri, env }
+  // Held until the binary is out of the shared directory. A build that
+  // fails leaves the cache, and so the markers, as they were.
+  mkdirSync(targetDir, { recursive: true });
+  withLock(
+    join(targetDir, 'perf-harness-build.lock'),
+    () => {
+      run('staging the stagedctl sidecar', 'bash', ['scripts/prepare-stagedctl-sidecar.sh'], {
+        cwd: appDir,
+        env,
+      });
+      run(
+        `cargo build --features perf-harness (${profile})`,
+        'cargo',
+        ['build', '--features', 'perf-harness', ...(profile === 'release' ? ['--release'] : [])],
+        { cwd: tauri, env }
+      );
+      replaceCachedBinary({ from: join(targetDir, profile), cache, profile });
+    },
+    { say: (text) => console.error(`[perf-harness] ${text}`) }
   );
   run(
     'vite build',
@@ -127,16 +176,6 @@ export function build({ appDir, profile, port, skipBuild, targetDir: requested }
     ],
     { cwd: appDir }
   );
-  const from = join(targetDir, profile);
-  rmSync(binaryDir, { recursive: true, force: true });
-  mkdirSync(binaryDir, { recursive: true });
-  for (const part of ['Staged', 'resources', 'stagedctl']) {
-    if (existsSync(join(from, part)))
-      cpSync(join(from, part), join(binaryDir, part), {
-        recursive: true,
-        mode: constants.COPYFILE_FICLONE,
-      });
-  }
   writeFileSync(built, new Date().toISOString());
   return { binary, binaryDir, dist };
 }

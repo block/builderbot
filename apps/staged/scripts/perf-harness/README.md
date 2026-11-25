@@ -60,7 +60,13 @@ A run stops by itself, with a partial result, when:
    (`$TMPDIR/staged-perf-harness/cargo-target`, or `--target-dir`), whatever `CARGO_TARGET_DIR` is
    set to, and refuses the one the tree's ordinary builds use: that one may be shared between
    worktrees, and building there with another feature set and dev URL replaces the binary a running
-   dev app was started from. The first build of a tree is therefore a full one.
+   dev app was started from. The first build of a tree is therefore a full one. The harness's
+   directory is shared by every tree it builds, so a lock in it (`perf-harness-build.lock`) is held
+   from before `cargo build` until the binary has been copied to the tree's cache: a build of
+   another tree at the same time waits, and each run stages the binary it built. A lock left by a
+   build that was killed is taken over. The binary has its port compiled in, and the cache keeps
+   one binary per profile with a marker per port; replacing the binary removes every marker of that
+   profile, so `--skip-build` works only for the port the cached binary was built for.
 2. Copies the binary, the frontend, a Node and the harness itself into a throwaway run directory,
    and starts the driver there under a throwaway `HOME` and a minimal `PATH`.
 3. The driver starts the app, seeds projects (local git repositories, one branch per session) through
@@ -138,10 +144,17 @@ not read changes nothing.
 
 `--app-dir <other checkout>/apps/staged` builds and measures another tree with this harness. That
 tree needs the `perf-harness` cargo feature: `src-tauri/src/perf_harness.rs`, the directory beside
-it, and the one-line touch points listed at the top of that file. On a tree without the session
+it, and the touch points listed at the top of that file. On a tree without the session
 stream, leave out `perf_harness/stream_frames.rs` and its call in `session_stream/hub.rs`; the
 driver asks the app whether it has the stream, and reports the stream figures as absent when it
 does not. The page selectors are all in `driver/ui.mjs` if a tree's markup differs.
+
+`compare` warns that two runs are not like for like when their parameters differ, and names the
+ones that do. Parameters that only say how a run was named, built or served are left out of that:
+`--label`, `--out`, `--keep`, `--skip-build`, `--app-dir`, `--target-dir` and `--port`. So the
+before/after recipe at the top compares without a warning, and a warning means the load, the
+window, the frontend or the profile really differed. `--local-storage` is shown on each side
+instead.
 
 ### Which frontend
 
@@ -166,19 +179,29 @@ All figures are per scenario, over the measured window only. A figure that could
 Backend (`backend.*`):
 
 - `process`: the app process's CPU seconds, CPU % of one core and resident memory, sampled once a
-  second with `ps`. `childProcesses` is what it started (the fake agents, git).
+  second with `ps`. The CPU is what was used between the first and the last sample of the window,
+  and the percentage is of the time between those two (`spanSeconds`), which can be up to a second
+  shorter or longer than the window. `childProcesses` is what it started (the fake agents, git),
+  added up process by process: each adds what it used since the sample before, so one that exits
+  inside the window keeps what it had used. A process that starts and exits between two samples
+  (most of git's) is never seen, and neither is what a process uses after its last sample.
 - `commands`: every command served over the web API by name, with count, errors, response body
   bytes on the wire (after compression) and time. Browser frontend only; the driver's own calls are
   excluded.
-- `streamFrames`: session stream frames handed to a client, by level (`summary`, `full`) and kind,
-  with their size as JSON before the transport. Counted at the hub, so it covers both transports.
+- `streamFrames`: session stream frames a client's sink took, by level (`summary`, `full`) and
+  kind, with their size as JSON before the transport. Counted at the hub once the sink has
+  answered, so it covers both transports. `dropped` counts the frames the hub sent that no sink
+  took (a browser client's queue was full, or the client had gone): those reached nobody and are
+  in neither `frames` nor `bytes`, so the backend's total and the page's still agree when a queue
+  overflows. `streamTotals.dropped` is their sum, and `null` from hooks before version 3.
 - `storeLock`: how long each taker waited for the store's one connection lock, and how long it was
   held. Every database access in the app is one take.
 - `agentWriteToStoredMs`: from the fake agent writing a piece of output to its row being written.
   `text` includes the wait for the message writer, which writes a session's text at most once every
   150 ms, by design. `tool` is a tool call's
   row and the growing output of one in flight, both written at once. This is the figure that shows
-  writes backing up behind the lock.
+  writes backing up behind the lock. A piece is counted once per write however often its row
+  holds its stamp (a Bash call's row holds it twice, in the command and in the description).
 
 Frontend (`frontend.*`):
 
@@ -209,10 +232,14 @@ Frontend (`frontend.*`):
   long before the reading that piece was stored: for how long the store had held something newer
   than the row showed. It is 0 for a row showing the newest piece. One sample is one row at one
   reading, so the percentiles are over rows and time alike, and a row that stops updating raises
-  them for as long as it is stuck. `piecesBehind` is the same in pieces, `upToDate` and `over1s` the
+  them for as long as it is stuck. `piecesBehind` is the same in pieces: how many pieces a subtitle
+  would show (text and tool calls) the store held at the reading that are newer than the one
+  shown, counted by the app. It is not a difference of sequence numbers, which would add a tool
+  call's output steps, and those never show in a subtitle. `upToDate` and `over1s` are the
   share of samples at 0 and above a second, `nothingShown` samples of a row with no stamp in it yet,
   and `floors` samples where the row was further behind than the 256 pieces per session the app
-  keeps (then the figure is a lower bound). `null` when the app's hooks are older than this harness.
+  keeps (then both figures are lower bounds). `null` when the app's hooks cannot answer
+  (`piecesBehind` alone when they are version 2).
   In `hidden` the page is not updated while it is hidden, so the figure grows with the window: there
   it says how far behind a hidden page gets, and `catchUpAfterShownMs` how fast it recovers.
 - `renderer`: the renderer's own task, script, layout and style seconds, and `browserProcess`, the
@@ -263,6 +290,9 @@ The app keeps everything in `$HOME/.staged` and has no override, so isolation is
   run's own `bin` plus `/usr/bin:/bin:/usr/sbin:/sbin`, and a stand-in `$SHELL` without login files
   (the app captures a login shell's environment). No agent tool of the user's is on that `PATH`,
   and `STAGED_ACP_TOOLS_DIR` holds only the fake agent.
+- The app's harness port is on `127.0.0.1` and serves nothing, neither a command nor the event
+  socket nor the frontend, to a caller without the run's token (see "The hooks in the app"). The
+  token is made per run and kept in the run directory, which only its owner can read.
 - While it runs, every third second `lsof` lists the open files of the app, everything it started,
   the browser and the driver. A file under the real `~/.staged`, or a program from outside the run
   directory and the system directories, is recorded in the result's `safety` section and fails the
@@ -279,13 +309,34 @@ Everything is in `src-tauri/src/perf_harness.rs` and `src-tauri/src/perf_harness
 does nothing until `STAGED_PERF_HARNESS_PORT` is set. Then it serves, on `127.0.0.1` only and only
 for that `Host` and `Origin`, the app's web API and frontend (`web_server::start` is a stub in this
 repository) plus `/perf/eval`, `/perf/result(s)`, `/perf/metrics`, `/perf/metrics/reset` and
-`/perf/outdated`, which need the run's token. It adds no stored field, column or migration: what it
-keeps (histograms, counters, and the last 256 showable stamps of each session with the time each
-was stored) is in memory.
+`/perf/outdated`. It adds no stored field, column or migration: what it keeps (histograms,
+counters, and the last 256 showable stamps of each session with the time each was stored) is in
+memory.
 
-The metrics snapshot carries `hooks`, the version of these hooks (2). A tree measured through
-`--app-dir` with older hooks still runs: the result records its version, the summary says which
-figures are missing or coarser, and `subtitleStaleness` is `null`.
+Every route needs the run's token: `/api/invoke/*` and `/api/events` run commands and carry session
+text, and the web server in this repository puts no credential of its own on them. A request
+without the token gets 401, and one for another `Host` or from another `Origin` gets 403 whatever
+it sends.
+
+- The driver sends the token as the `x-perf-token` header on every request.
+- The page cannot: its calls are the app's own code, which knows of no token, and a browser sets no
+  header on a WebSocket. It gets the token as a cookie (`staged_perf_token`), which the browser
+  then adds by itself to the document, its assets, every `fetch` and the handshake of the event
+  socket, where the app checks it. For headless Chromium the driver sets the cookie through
+  DevTools (`Network.setCookie`) before the page first loads: `HttpOnly`, so no script reads it,
+  the page's included; `SameSite=Strict`; for the run's origin; in a browser profile made for the
+  run and deleted with it. For the desktop webview there is no such door, so the driver sets it
+  with a script through `/perf/eval` (which needs the header) as a session cookie. Until then the
+  webview's own request for the frontend is refused, which in a browser run leaves the browser as
+  the app's only client.
+- `/perf/*` takes the header only, never the cookie.
+
+The metrics snapshot carries `hooks`, the version of these hooks (3). A tree measured through
+`--app-dir` with older hooks still runs: the driver sends the token to hooks that do not ask for
+it, the result records their version, and the summary says what is missing or coarser. Version 1
+has no `subtitleStaleness`; version 2 has it without `piecesBehind`, counts a stream frame before
+it is sent (no `dropped`), counts a tool call whose row holds its stamp twice as two, and puts
+only `/perf/*` behind the token.
 
 ## Limits
 
@@ -308,5 +359,7 @@ figures are missing or coarser, and `subtitleStaleness` is `null`.
   `renderer` is the figure for main-thread work.
 - The debug profile is the default because it builds fastest; `--profile release` measures an
   optimized backend.
-- macOS only (`ps`, `lsof`, the activation policy), and one run at a time per `--port`.
+- macOS only (`ps`, `lsof`, the activation policy), and one run at a time per `--port`. Two runs
+  of one tree at once are not supported even on two ports: the tree's cache holds one binary per
+  profile, and the second build replaces it.
 - The isolation is by environment and checked by observation; it is not a sandbox.

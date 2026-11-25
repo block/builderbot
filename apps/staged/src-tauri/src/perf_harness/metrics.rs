@@ -1,7 +1,7 @@
 //! The counters the harness reads over `/perf/metrics`. All in memory, and
 //! nothing is recorded until [`activate`] is called.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,10 +53,37 @@ struct Command {
     max_us: u64,
 }
 
+/// Frames the hub sent, of one level and kind. `frames` and `bytes` are
+/// those a sink took; `dropped` those it did not (a full queue, a client
+/// that had gone), which reached nobody.
 #[derive(Default)]
 struct Frames {
     frames: u64,
     bytes: u64,
+    dropped: u64,
+}
+
+impl Tables {
+    fn count_frame(&mut self, level: &str, kind: &str, bytes: u64, delivered: bool) {
+        let entry = self.frames.entry(format!("{level}.{kind}")).or_default();
+        if delivered {
+            entry.frames += 1;
+            entry.bytes += bytes;
+        } else {
+            entry.dropped += 1;
+        }
+    }
+
+    fn frames_json(&self) -> Value {
+        self.frames
+            .iter()
+            .map(|(key, f)| {
+                let counts = json!({ "frames": f.frames, "bytes": f.bytes, "dropped": f.dropped });
+                (key.clone(), counts)
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    }
 }
 
 pub(super) fn activate() {
@@ -103,13 +130,10 @@ pub(super) fn is_active() -> bool {
     ACTIVE.load(Relaxed)
 }
 
-/// A session stream frame of `bytes` handed to a client, by level and kind.
-pub(super) fn stream_frame(level: &str, kind: &str, bytes: u64) {
-    tables(|tables| {
-        let entry = tables.frames.entry(format!("{level}.{kind}")).or_default();
-        entry.frames += 1;
-        entry.bytes += bytes;
-    });
+/// A session stream frame of `bytes` the hub sent a client, by level and
+/// kind, and whether the client's sink took it.
+pub(super) fn stream_frame(level: &str, kind: &str, bytes: u64, delivered: bool) {
+    tables(|tables| tables.count_frame(level, kind, bytes, delivered));
 }
 
 /// A message row's content was just written. The fake agent stamps its
@@ -119,19 +143,21 @@ pub(super) fn stream_frame(level: &str, kind: &str, bytes: u64) {
 /// Streamed text is flushed on a timer (`agent/writer.rs`), so for text the
 /// figure includes up to one flush interval by design. Tool calls and their
 /// output are written at once and share a figure.
+///
+/// A stamp is counted once per write however often the content holds it: a
+/// tool call's row stores the call's whole input, and the fake agent puts a
+/// Bash call's stamp in both its command and its description.
 pub(crate) fn message_stored(content: &str) {
     if !ACTIVE.load(Relaxed) {
         return;
     }
-    let mut stamps = stamps_newest_first(content);
-    let Some(newest) = stamps.next() else {
+    let Some((agent, newest, _)) = stamps_newest_first(content).next() else {
         return;
     };
-    let (agent, seq, _) = newest;
     // A row rewritten without new output must not count again as slower.
     let last = tables(|tables| match tables.stamps.get_mut(agent) {
-        Some(last) => Some(std::mem::replace(last, seq.max(*last))),
-        None => tables.stamps.insert(agent.to_string(), seq),
+        Some(last) => Some(std::mem::replace(last, newest.max(*last))),
+        None => tables.stamps.insert(agent.to_string(), newest),
     });
     let now_ms = now_ms();
     let histogram = if agent.starts_with('x') {
@@ -139,23 +165,17 @@ pub(crate) fn message_stored(content: &str) {
     } else {
         &TOOL_STAMP_TO_STORED
     };
-    // Newest first, as read.
-    let fresh: Vec<u64> = std::iter::once(newest)
-        .chain(stamps)
-        .take_while(|(other, seq, _)| *other == agent && !last.is_some_and(|last| *seq <= last))
-        .take(MAX_STAMPS_PER_WRITE)
-        .map(|(_, seq, sent_ms)| {
-            histogram.record(now_ms.saturating_sub(sent_ms) * 1_000);
-            seq
-        })
-        .collect();
+    let fresh = fresh_stamps(content, last);
+    for &(_, sent_ms) in &fresh {
+        histogram.record(now_ms.saturating_sub(sent_ms) * 1_000);
+    }
     // Tool output (`o`) is never a row's subtitle.
     if fresh.is_empty() || !agent.starts_with(['x', 't']) {
         return;
     }
     tables(|tables| {
         let kept = tables.showable.entry(agent[1..].to_string()).or_default();
-        for &seq in fresh.iter().rev() {
+        for &(seq, _) in fresh.iter().rev() {
             if kept.len() == SHOWABLE_KEPT {
                 kept.pop_front();
             }
@@ -167,6 +187,24 @@ pub(crate) fn message_stored(content: &str) {
     });
 }
 
+/// `(seq, epoch ms)` of the stamps a write stores for the first time,
+/// newest first: those of the newest stamp's kind and agent above `last`,
+/// the newest one an earlier write of that kind and agent stored. Each
+/// sequence number once, however often the content holds its stamp.
+fn fresh_stamps(content: &str, last: Option<u64>) -> Vec<(u64, u64)> {
+    let mut stamps = stamps_newest_first(content).peekable();
+    let Some(&(agent, _, _)) = stamps.peek() else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    stamps
+        .take_while(|(other, seq, _)| *other == agent && !last.is_some_and(|last| *seq <= last))
+        .filter(|(_, seq, _)| seen.insert(*seq))
+        .take(MAX_STAMPS_PER_WRITE)
+        .map(|(_, seq, sent_ms)| (seq, sent_ms))
+        .collect()
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -175,19 +213,24 @@ fn now_ms() -> u64 {
 
 /// For each fake agent in `shown` (`{ "<agent>": seq }`, the stamp its
 /// session's row shows, 0 for none): whether the store holds something
-/// newer that the row could show, and since when.
+/// newer that the row could show, since when, and how much.
 ///
 /// The answer per agent is `null` when nothing of it has been stored, and
-/// otherwise `{ newestSeq, newerSeq, newerStoredMs, floor }`: `newerSeq` is
-/// the first stamp stored after the one shown and `newerStoredMs` when its
-/// row was written (epoch ms), both `null` when the row shows the newest.
-/// `floor` says the stamps between were no longer kept, so the row has
-/// been behind for at least that long.
+/// otherwise `{ newestSeq, newerSeq, newerStoredMs, newerCount, floor }`:
+/// `newerSeq` is the first stamp stored after the one shown and
+/// `newerStoredMs` when its row was written (epoch ms), both `null` when
+/// the row shows the newest. `newerCount` is how many showable stamps newer
+/// than the one shown were stored by `at`, when the row was read (epoch ms;
+/// all of them without it). It is a count of what a row can show, not a
+/// difference of sequence numbers: one sequence runs through text, tool
+/// calls and tool output, and tool output is never shown. `floor` says the
+/// stamps between were no longer kept, so the row has been behind for at
+/// least that long and by at least that many.
 ///
 /// Read from memory, so the harness can ask on a timer during a measurement
 /// without taking the store's lock. Never reset: it describes the store,
 /// not a window.
-pub(super) fn outdated(shown: &HashMap<String, u64>) -> Value {
+pub(super) fn outdated(shown: &HashMap<String, u64>, at: Option<u64>) -> Value {
     tables(|tables| {
         shown
             .iter()
@@ -201,10 +244,16 @@ pub(super) fn outdated(shown: &HashMap<String, u64>) -> Value {
                         .filter(|s| s.seq > shown_seq)
                         .min_by_key(|s| s.seq);
                     let oldest = kept.iter().map(|s| s.seq).min();
+                    let newer_count = kept
+                        .iter()
+                        .filter(|s| s.seq > shown_seq)
+                        .filter(|s| at.map_or(true, |at| s.stored_ms <= at))
+                        .count();
                     json!({
                         "newestSeq": newest,
                         "newerSeq": newer.map(|s| s.seq),
                         "newerStoredMs": newer.map(|s| s.stored_ms),
+                        "newerCount": newer_count,
                         "floor": newer.is_some()
                             && kept.len() == SHOWABLE_KEPT
                             && oldest.is_some_and(|oldest| oldest > shown_seq),
@@ -250,8 +299,11 @@ pub(super) fn reset() {
 }
 
 /// What these hooks can do, for a driver newer or older than they are:
-/// 2 added [`outdated`], the `o` stamp kind and the finer histograms.
-const HOOKS_VERSION: u32 = 2;
+/// 2 added [`outdated`], the `o` stamp kind and the finer histograms; 3 put
+/// every route behind the run's token, counts a stamp once per write,
+/// added `newerCount` to [`outdated`], and counts a stream frame when its
+/// sink has taken it, with the ones not taken apart.
+const HOOKS_VERSION: u32 = 3;
 
 pub(super) fn snapshot() -> Value {
     let commands = |table: &BTreeMap<String, Command>| -> Value {
@@ -271,11 +323,7 @@ pub(super) fn snapshot() -> Value {
             .into()
     };
     tables(|tables| {
-        let frames: serde_json::Map<_, _> = tables
-            .frames
-            .iter()
-            .map(|(key, f)| (key.clone(), json!({ "frames": f.frames, "bytes": f.bytes })))
-            .collect();
+        let frames = tables.frames_json();
         json!({
             "hooks": HOOKS_VERSION,
             "pid": std::process::id(),
@@ -299,7 +347,10 @@ pub(super) fn snapshot() -> Value {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{activate, message_stored, outdated, stamps_newest_first, SHOWABLE_KEPT};
+    use super::{
+        activate, fresh_stamps, message_stored, outdated, stamps_newest_first, Tables,
+        SHOWABLE_KEPT,
+    };
 
     #[test]
     fn stamps_are_read_newest_first() {
@@ -328,18 +379,72 @@ mod tests {
         // A row rewritten with nothing new adds nothing.
         message_stored("pfm-xout1-3-1700000000100 a pfm-xout1-4-1700000000200 b");
 
-        let behind = outdated(&shown("out1", 3));
+        let behind = outdated(&shown("out1", 3), None);
         assert_eq!(behind["out1"]["newestSeq"], 5);
         assert_eq!(behind["out1"]["newerSeq"], 4);
         assert!(behind["out1"]["newerStoredMs"].as_u64().unwrap() > 1_700_000_000_200);
         assert_eq!(behind["out1"]["floor"], false);
 
-        let current = outdated(&shown("out1", 5));
+        let current = outdated(&shown("out1", 5), None);
         assert_eq!(current["out1"]["newestSeq"], 5);
         assert!(current["out1"]["newerSeq"].is_null());
         assert!(current["out1"]["newerStoredMs"].is_null());
+        assert_eq!(current["out1"]["newerCount"], 0);
 
-        assert!(outdated(&shown("nobody", 0))["nobody"].is_null());
+        assert!(outdated(&shown("nobody", 0), None)["nobody"].is_null());
+    }
+
+    #[test]
+    fn pieces_behind_are_the_showable_stamps_newer_than_the_one_shown() {
+        activate();
+        // One sequence through the three kinds: a tool call (25), five
+        // steps of its output (26 to 30), then text (31).
+        message_stored(
+            r#"{"name":"Read","input":{"file_path":"/w/pfm-tout3-25-1700000000100.ts"}}"#,
+        );
+        for seq in 26..=30 {
+            message_stored(&format!("output so far pfm-oout3-{seq}-1700000000200"));
+        }
+        message_stored("pfm-xout3-31-1700000000300 text");
+
+        // By sequence numbers the row is 6 behind; it can show one thing more.
+        let behind = outdated(&shown("out3", 25), None);
+        assert_eq!(behind["out3"]["newestSeq"], 31);
+        assert_eq!(behind["out3"]["newerSeq"], 31);
+        assert_eq!(behind["out3"]["newerCount"], 1);
+        assert_eq!(outdated(&shown("out3", 0), None)["out3"]["newerCount"], 2);
+
+        // A piece stored after the row was read is not one it was behind by.
+        let stored = behind["out3"]["newerStoredMs"].as_u64().unwrap();
+        let before = outdated(&shown("out3", 25), Some(stored - 1));
+        assert_eq!(before["out3"]["newerCount"], 0);
+        let after = outdated(&shown("out3", 25), Some(stored));
+        assert_eq!(after["out3"]["newerCount"], 1);
+    }
+
+    #[test]
+    fn a_stamp_a_row_holds_twice_is_counted_once() {
+        // A Bash call as the fake agent sends it and the writer stores it:
+        // the stamp in the command and again in the description.
+        let bash = r#"{"name":"Bash","input":{"command":"run pfm-tdup1-7-1700000000100","description":"Run pfm-tdup1-7-1700000000100"}}"#;
+        assert_eq!(fresh_stamps(bash, None), [(7, 1_700_000_000_100)]);
+        assert_eq!(fresh_stamps(bash, Some(6)), [(7, 1_700_000_000_100)]);
+        assert_eq!(fresh_stamps(bash, Some(7)), []);
+        // Text flushed together keeps every piece, newest first, and stops
+        // at what an earlier write stored.
+        let text =
+            "pfm-xdup1-3-1700000000100 a\npfm-xdup1-4-1700000000200 b\npfm-xdup1-5-1700000000300 c";
+        assert_eq!(
+            fresh_stamps(text, Some(3)),
+            [(5, 1_700_000_000_300), (4, 1_700_000_000_200)]
+        );
+
+        // And once among what a row can show.
+        activate();
+        message_stored(bash);
+        let kept = outdated(&shown("dup1", 0), None);
+        assert_eq!(kept["dup1"]["newestSeq"], 7);
+        assert_eq!(kept["dup1"]["newerCount"], 1);
     }
 
     #[test]
@@ -348,11 +453,29 @@ mod tests {
         for seq in 1..=(SHOWABLE_KEPT as u64 + 10) {
             message_stored(&format!("pfm-xout2-{seq}-1700000000000"));
         }
-        let behind = outdated(&shown("out2", 2));
+        let behind = outdated(&shown("out2", 2), None);
         assert_eq!(behind["out2"]["newestSeq"], SHOWABLE_KEPT as u64 + 10);
         assert_eq!(behind["out2"]["newerSeq"], 11);
         assert_eq!(behind["out2"]["floor"], true);
-        assert_eq!(outdated(&shown("out2", 11))["out2"]["floor"], false);
+        // A least value: only what is kept can be counted.
+        assert_eq!(behind["out2"]["newerCount"], SHOWABLE_KEPT);
+        assert_eq!(outdated(&shown("out2", 11), None)["out2"]["floor"], false);
+    }
+
+    #[test]
+    fn a_frame_counts_as_sent_only_when_its_sink_took_it() {
+        let mut tables = Tables::default();
+        tables.count_frame("full", "delta", 100, true);
+        tables.count_frame("full", "delta", 40, true);
+        tables.count_frame("full", "delta", 900, false);
+        tables.count_frame("summary", "snapshot", 7, false);
+        let frames = tables.frames_json();
+        assert_eq!(frames["full.delta"]["frames"], 2);
+        assert_eq!(frames["full.delta"]["bytes"], 140);
+        assert_eq!(frames["full.delta"]["dropped"], 1);
+        assert_eq!(frames["summary.snapshot"]["frames"], 0);
+        assert_eq!(frames["summary.snapshot"]["bytes"], 0);
+        assert_eq!(frames["summary.snapshot"]["dropped"], 1);
     }
 
     #[test]

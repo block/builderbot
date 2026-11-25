@@ -27,22 +27,26 @@ const latency = (bySurface) =>
     ])
   );
 
-export function backendResult({ metrics, usage, seconds, frontendKind, streamSupported }) {
+export function backendResult({ metrics, usage, frontendKind, streamSupported }) {
   // Desktop commands go over Tauri IPC, which the harness port never sees.
   const commands = frontendKind === 'browser' ? commandTable(metrics.commands) : null;
   return {
-    process: processUsage(usage.app, seconds),
-    childProcesses: processUsage(usage.children, seconds),
+    process: processUsage(usage.app),
+    childProcesses: processUsage(usage.children),
     commands,
     commandTotals: commands && {
       count: total(commands, 'count'),
       wireBytes: total(commands, 'wireBytes'),
     },
     streamFrames: streamSupported ? metrics.streamFrames : null,
+    // `frames` and `bytes` are what a client's sink took. `dropped` is what
+    // the hub sent and no sink took (a full queue, a client gone); hooks
+    // before version 3 counted those as sent and have no such figure.
     streamTotals: streamSupported
       ? {
           frames: total(metrics.streamFrames, 'frames'),
           bytes: total(metrics.streamFrames, 'bytes'),
+          dropped: (metrics.hooks ?? 1) >= 3 ? total(metrics.streamFrames, 'dropped') : null,
         }
       : null,
     storeLock: {
@@ -115,9 +119,7 @@ export function frontendResult({ collected, usage, seconds, streamSupported }) {
       renderer &&
       Object.fromEntries(Object.entries(renderer).map(([key, value]) => [key, round(value, 2)])),
     browserProcess:
-      usage.browser.length && usage.browser[0].processes
-        ? processUsage(usage.browser, seconds)
-        : null,
+      usage.browser.length && usage.browser[0].processes ? processUsage(usage.browser) : null,
     pageHidden: probe.hidden,
   };
 }

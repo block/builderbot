@@ -43,7 +43,8 @@ export function startStaleness({ api, frontend, sessions, every = SAMPLE_EVERY_M
         const { at, rows } = await frontend.evaluate(ui.rows(sessions));
         const shown = rows.filter((row) => row.row);
         const answers = await api.outdated(
-          Object.fromEntries(shown.map((row) => [row.tag, row.seq ?? 0]))
+          Object.fromEntries(shown.map((row) => [row.tag, row.seq ?? 0])),
+          at
         );
         if (answers === null) {
           unsupported = true;
@@ -56,11 +57,12 @@ export function startStaleness({ api, frontend, sessions, every = SAMPLE_EVERY_M
           // Nothing of the session is stored yet: nothing to be behind.
           if (!answer) continue;
           mounted.add(row.tag);
-          const gap = outdatedFor(row.seq, answer, at);
-          if (row.seq === null && gap.pieces > 0) nothingShown += 1;
+          const gap = outdatedFor(answer, at);
+          if (row.seq === null && gap.behind) nothingShown += 1;
           if (gap.floor) floors += 1;
           ms.push(gap.ms);
-          pieces.push(gap.pieces);
+          // Hooks older than the count answer without one.
+          if (gap.pieces !== null) pieces.push(gap.pieces);
         }
       } catch (error) {
         // The window's own collection reports a lost page or app.

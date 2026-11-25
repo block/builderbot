@@ -7,7 +7,8 @@
 //! - refuses to run unless its data directory is inside [`ROOT_ENV`], so the
 //!   hooks can never be pointed at a real `~/.staged`;
 //! - never activates (no Dock icon, no window on screen, no focus taken);
-//! - serves, on `127.0.0.1` only, the web API and the built frontend (the
+//! - serves, on `127.0.0.1` only and only to a caller that sends the
+//!   run's token ([`TOKEN_ENV`]), the web API and the built frontend (the
 //!   web server proper is stubbed, see `web_server::start`) plus the
 //!   `/perf/*` routes in [`server`]: evaluate a script in the desktop
 //!   webviews, hand a result back, read and reset the counters, ask
@@ -19,10 +20,11 @@
 //!   stored.
 //!
 //! The touch points outside this module are one line each: the call in
-//! `lib.rs`'s setup, the lock's type in `store/mod.rs`, the two message
-//! writers in `store/messages.rs` and the send in `session_stream/hub.rs`.
-//! Only the last, with [`stream_frames`], needs the session stream; a tree
-//! without the stream takes the rest unchanged.
+//! `lib.rs`'s setup, the lock's type in `store/mod.rs` and the message
+//! writers in `store/messages.rs`. The send in `session_stream/hub.rs` has
+//! two, one before it and one after, with its outcome bound to a name
+//! between them. Only that one, with [`stream_frames`], needs the session
+//! stream; a tree without the stream takes the rest unchanged.
 
 mod guard;
 mod histogram;
@@ -37,7 +39,9 @@ const PORT_ENV: &str = "STAGED_PERF_HARNESS_PORT";
 const ROOT_ENV: &str = "STAGED_PERF_HARNESS_ROOT";
 /// The built frontend to serve.
 const DIST_ENV: &str = "STAGED_PERF_HARNESS_DIST";
-/// What a caller of `/perf/*` must send as `x-perf-token`.
+/// What every caller of the port must send: the driver as the
+/// `x-perf-token` header, the harness's own page as a cookie (see
+/// [`server`]).
 const TOKEN_ENV: &str = "STAGED_PERF_HARNESS_TOKEN";
 
 /// Called first thing in the app's setup, before the data directory is

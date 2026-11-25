@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { TOKEN_HEADER, tokenCookie, tokenCookieScript } from './app.mjs';
 import { launchBrowser } from './cdp.mjs';
 import { sleep, until } from './util.mjs';
 
@@ -26,6 +27,13 @@ const overridesScript = (overrides) =>
   `(() => { try { for (const [key, value] of Object.entries(${JSON.stringify(overrides)})) localStorage.setItem(key, value); } catch (_) {} })();`;
 
 const asyncBody = (body) => `(async () => { ${body} })()`;
+
+/**
+ * Whether the document is the app's refusal of a caller without the run's
+ * token (`perf_harness/server.rs` answers 401 with this text) and not the
+ * app's page.
+ */
+const REFUSED = `(document.body ? document.body.textContent : '').startsWith('perf-harness:')`;
 
 export async function openBrowserFrontend({
   api,
@@ -55,6 +63,11 @@ export async function openBrowserFrontend({
   await page.send('Page.addScriptToEvaluateOnNewDocument', {
     source: `${overridesScript(localStorage)}\n${PROBE}`,
   });
+  // The app serves this page nothing without the run's token, and the page
+  // is the app's own code, which knows of no token: the browser is given it
+  // as a cookie before the page first loads.
+  const { success } = await page.send('Network.setCookie', tokenCookie(api));
+  if (!success) throw new Error('the browser did not take the cookie that holds the run’s token');
   const evaluate = async (body) => {
     const { result, exceptionDetails } = await page.send('Runtime.evaluate', {
       expression: asyncBody(body),
@@ -81,6 +94,8 @@ export async function openBrowserFrontend({
         () => evaluate(`return document.readyState === 'complete' && !!window.__stagedPerf;`),
         { timeout: 120_000 }
       );
+      if (await evaluate(`return ${REFUSED};`))
+        throw new Error('the app refused the page: the browser did not send the run’s token');
     },
     async reset() {
       await evaluate('window.__stagedPerf.reset(); return true;');
@@ -186,7 +201,7 @@ export async function openDesktopFrontend({ api, localStorage }) {
     const run = async () => {
       await api.takeResults();
       const script = `(async () => { let out; try { out = await ${asyncBody(body)}; } catch (e) { out = { __error: String((e && e.stack) || e) }; }
-        await fetch('/perf/result', { method: 'POST', headers: { 'x-perf-token': ${JSON.stringify(api.token)} }, body: JSON.stringify(out ?? null) }); })();`;
+        await fetch('/perf/result', { method: 'POST', headers: { ${JSON.stringify(TOKEN_HEADER)}: ${JSON.stringify(api.token)} }, body: JSON.stringify(out ?? null) }); })();`;
       const windows = await api.evalInWebviews(script);
       if (windows.length === 0) throw new Error('the app has no webview to run a script in');
       const [answer] = await until('a script to answer from the webview', async () => {
@@ -206,16 +221,21 @@ export async function openDesktopFrontend({ api, localStorage }) {
     pid: null,
     evaluate,
     async reload() {
-      // The overrides are set, then the page is loaded again so the app
-      // boots with them; the probe goes in as soon as the document exists.
-      await api.evalInWebviews(`${overridesScript(localStorage)} location.reload();`);
+      // The webview's first load was refused: it had no token. The
+      // document that refusal left is of the app's origin, so it can set
+      // the cookie the next load is served for. The overrides are set, then
+      // the page is loaded again so the app boots with them; the probe goes
+      // in as soon as the document exists.
+      await api.evalInWebviews(
+        `${tokenCookieScript(api)} ${overridesScript(localStorage)} location.reload();`
+      );
       await sleep(1500);
       await until(
         'the webview to load',
         async () => {
           await api.evalInWebviews(PROBE);
           return evaluate(
-            `return document.readyState === 'complete' && !!window.__stagedPerf && location.protocol.startsWith('http');`
+            `return document.readyState === 'complete' && !!window.__stagedPerf && location.protocol.startsWith('http') && !${REFUSED};`
           );
         },
         { timeout: 120_000, every: 1000 }

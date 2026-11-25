@@ -614,6 +614,19 @@
 
   // Note modal (opened by clicking a note in the timeline)
   let openNote = $state<OpenNoteState | null>(null);
+  // Live, not part of the snapshot `openNote` was opened with: the session can
+  // end, or be resumed, while the dialog is open, and its "Move" has to
+  // follow. A note opened before the timeline listed its row is still a
+  // pending item.
+  let openNoteSessionStatus = $derived.by(() => {
+    const sid = openNote?.sessionId;
+    if (!sid) return null;
+    const note = noteForSession(sid);
+    if (note) return note.sessionStatus;
+    const pending = getPendingSessionItems(branch.id).find((item) => item.sessionId === sid);
+    if (!pending) return null;
+    return pending.type.startsWith('queued-') ? 'queued' : 'running';
+  });
 
   // Write-note editor. `null` while closed; `{ note: null }` for a new note,
   // `{ note }` when editing an existing user-written one.
@@ -2431,6 +2444,7 @@
     title={openNote.title}
     content={openNote.content}
     sessionId={openNote.sessionId}
+    sessionStatus={openNoteSessionStatus}
     noteUpdatedAt={openNote.noteUpdatedAt}
     noteId={openNote.noteId}
     noteKind="branch"

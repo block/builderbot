@@ -31,6 +31,8 @@
 //!   a slow wait or hold reports which connection it was.
 //! - **All readers busy.** A read then waits for whichever reader is
 //!   released first ([`ReadPool::checkout`]), not for one picked in advance.
+//!   If that wait is slow, the report reads as a wait for any reader and
+//!   names the store methods that held the readers when it began.
 
 use std::ops::Deref;
 use std::path::Path;
@@ -40,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::timed_lock::{TimedGuard, TimedMutex};
+use super::timed_lock::{PoolWait, TimedGuard, TimedMutex};
 use super::StoreError;
 
 /// Read-only connections per store. Readers are the main thread's
@@ -123,6 +125,18 @@ pub(crate) struct PooledReader<'a> {
     pool: &'a ReadPool,
 }
 
+impl PooledReader<'_> {
+    /// The slow-lock report this checkout would log if released now, were
+    /// a wait or hold of `threshold` slow.
+    #[cfg(test)]
+    fn report_if_slower_than(&self, threshold: Duration) -> Option<String> {
+        self.conn
+            .as_ref()
+            .expect("the reader is held until drop")
+            .report_if_slower_than(threshold)
+    }
+}
+
 impl Deref for PooledReader<'_> {
     type Target = Connection;
 
@@ -199,16 +213,18 @@ impl ReadPool {
             return None;
         }
         let began = Instant::now();
-        if let Some(conn) = self.free_reader(began) {
+        if let Some(conn) = self.free_reader(began, None) {
             return Some(self.pooled(conn));
         }
-        // All busy. Every release takes `waiting` before it decides whether
-        // to signal, so one that happens after the look below finds this
+        // All busy: note who holds them, for the report if the wait is slow.
+        let wait = PoolWait::begin("any store reader", &self.readers);
+        // Every release takes `waiting` before it decides whether to
+        // signal, so one that happens after the look below finds this
         // checkout counted and wakes it.
         let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
         *waiting += 1;
         let conn = loop {
-            if let Some(conn) = self.free_reader(began) {
+            if let Some(conn) = self.free_reader(began, Some(&wait)) {
                 break conn;
             }
             waiting = self
@@ -228,14 +244,19 @@ impl ReadPool {
     }
 
     /// The first reader that is free right now, looking from the next in
-    /// turn. `began` is when the checkout started, for the lock's timing.
+    /// turn. `began` is when the checkout started, for the lock's timing,
+    /// and `wait` the wait it has been in since it found them all busy.
     #[track_caller]
-    fn free_reader(&self, began: Instant) -> Option<TimedGuard<'_, Connection>> {
+    fn free_reader(
+        &self,
+        began: Instant,
+        wait: Option<&PoolWait>,
+    ) -> Option<TimedGuard<'_, Connection>> {
         let count = self.readers.len();
         let start = self.next.fetch_add(1, Ordering::Relaxed) % count;
         for offset in 0..count {
             let reader = &self.readers[(start + offset) % count];
-            if let Some(conn) = reader.try_lock_waiting_since(began) {
+            if let Some(conn) = reader.try_lock_waiting_since(began, wait) {
                 return Some(conn);
             }
         }
@@ -572,6 +593,58 @@ mod tests {
                 "the read did not take the released reader (the {released}th held)"
             );
         }
+    }
+
+    /// A read that waited with every reader busy reports the wait as one
+    /// for any reader, held by the call site that had them all, and not as
+    /// a wait on the reader it happened to get. A read that found one free
+    /// reports no such thing.
+    #[test]
+    fn a_slow_wait_for_a_reader_reports_who_held_them_all() {
+        let store = Store::in_memory().unwrap();
+        let waited_for = Duration::from_millis(150);
+
+        let mut held = store.hold_readers();
+        let report = std::thread::scope(|scope| {
+            let read = scope.spawn(|| {
+                let reader = store.readers.checkout().expect("the pool has readers");
+                reader.report_if_slower_than(waited_for)
+            });
+            std::thread::sleep(waited_for * 2);
+            assert!(!read.is_finished(), "the read ran with every reader busy");
+            drop(held.remove(2));
+            read.join().unwrap()
+        })
+        .expect("a wait past the threshold is reported");
+        drop(held);
+
+        // `hold_readers` checks every reader out from one line of the store.
+        let (before_holders, after_holders) = report
+            .split_once(" for any store reader (all held, by ")
+            .unwrap_or_else(|| panic!("not a wait for any reader: {report}"));
+        assert!(
+            before_holders.starts_with("Slow store lock on store reader ")
+                && before_holders.contains(&format!(" at {}:", file!())),
+            "{report}"
+        );
+        let (holders, after) = after_holders
+            .split_once(", when the wait began), held ")
+            .unwrap_or_else(|| panic!("no holders: {report}"));
+        assert!(
+            holders.ends_with(|c: char| c.is_ascii_digit())
+                && holders.contains("store/mod.rs:")
+                && !holders.contains(", "),
+            "one holding call site, in the store: {report}"
+        );
+        assert!(after.ends_with('s'), "{report}");
+
+        // No wait: nothing about a pool, even with everything reported.
+        let reader = store.readers.checkout().expect("the pool has readers");
+        let report = reader
+            .report_if_slower_than(Duration::ZERO)
+            .expect("a zero threshold reports everything");
+        assert!(!report.contains("any store reader"), "{report}");
+        assert!(!report.contains("held by"), "{report}");
     }
 
     /// More waiting reads than readers: each release wakes one, and none

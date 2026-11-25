@@ -200,6 +200,76 @@ async fn nothing_is_served_on_a_kept_alive_connection_after_the_guard_drops() {
     }
 }
 
+/// A handler with nothing in it: enough for rmcp to answer `initialize`.
+struct EmptyHandler;
+
+impl rmcp::ServerHandler for EmptyHandler {}
+
+/// The refusal itself, with no server, connection or timing involved: the
+/// same router, the same request, before and after the token is cancelled.
+/// (The test above only catches a missing refusal in the rounds where the
+/// request beats the connection's close.)
+#[tokio::test]
+async fn the_router_refuses_every_request_once_the_token_is_cancelled() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let handlers_made = Arc::new(AtomicUsize::new(0));
+    let made = Arc::clone(&handlers_made);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let router = super::mcp_router(
+        move || {
+            made.fetch_add(1, Ordering::SeqCst);
+            EmptyHandler
+        },
+        shutdown.clone(),
+    );
+    let initialize = || {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("Host", "127.0.0.1")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(axum::body::Body::from(initialize_request().to_string()))
+            .unwrap()
+    };
+
+    let before = router.clone().oneshot(initialize()).await.unwrap();
+    assert_eq!(before.status(), axum::http::StatusCode::OK);
+    let made_before = handlers_made.load(Ordering::SeqCst);
+    assert!(made_before > 0, "a live server builds a handler");
+
+    shutdown.cancel();
+    let after = router.clone().oneshot(initialize()).await.unwrap();
+    assert_eq!(after.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        after.headers().get(axum::http::header::CONNECTION).unwrap(),
+        "close"
+    );
+    let body = axum::body::to_bytes(after.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        &body[..],
+        b"The session this MCP server belonged to has ended"
+    );
+    // Not only `/mcp`, and not only POST: nothing is routed at all.
+    let get = axum::http::Request::builder()
+        .uri("/elsewhere")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let elsewhere = router.clone().oneshot(get).await.unwrap();
+    assert_eq!(
+        elsewhere.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        handlers_made.load(Ordering::SeqCst),
+        made_before,
+        "a refused request reached rmcp's handler factory"
+    );
+}
+
 #[tokio::test]
 async fn run_blocking_returns_the_value_and_reports_a_panic() {
     assert_eq!(super::run_blocking(|| 7).await, Ok(7));

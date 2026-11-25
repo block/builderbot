@@ -16,10 +16,13 @@ use crate::session_runner::startup_restart::{StartupRestart, StartupRestarts};
 /// A local ACP agent in `sh`. Logs `SPAWN <pid>` to `$1` as it starts, and
 /// which requests it answered. On its first spawn in mode `hang-first-new`,
 /// and on every spawn in `hang-new`, it never answers `session/new`. In
-/// `load-not-found` it refuses every `session/load` with -32002. A prompt is
-/// answered with one text chunk. Request ids are the SDK's UUID strings.
+/// `load-not-found` it refuses every `session/load` with -32002. In
+/// `hang-first-effort` its `session/new` offers a model and an effort option
+/// ([`CONFIG_OPTIONS`]); it accepts every model selection, and never answers
+/// the effort selection on its first spawn. A prompt is answered with one
+/// text chunk. Request ids are the SDK's UUID strings.
 const FAKE_AGENT: &str = r#"
-log=$1; mode=$2
+log=$1; mode=$2; options=$3
 echo "SPAWN $$" >> "$log"
 spawn=$(grep -c '^SPAWN' "$log")
 reply() { printf '{"jsonrpc":"2.0","id":"%s","result":%s}\n' "$1" "$2"; }
@@ -34,7 +37,20 @@ while IFS= read -r line; do
         echo "HUNG $$" >> "$log"; continue
       fi
       echo "NEW $$" >> "$log"
-      reply "$id" "{\"sessionId\":\"sess-$$\"}" ;;
+      if [ "$mode" = hang-first-effort ]; then
+        reply "$id" "{\"sessionId\":\"sess-$$\",\"configOptions\":$options}"
+      else
+        reply "$id" "{\"sessionId\":\"sess-$$\"}"
+      fi ;;
+    *'"configId":"effort"'*)
+      if [ "$spawn" = 1 ]; then
+        echo "HUNG $$" >> "$log"; continue
+      fi
+      echo "EFFORT $$" >> "$log"
+      reply "$id" "{\"configOptions\":$options}" ;;
+    *'"method":"session/set_config_option"'*)
+      echo "MODEL $$" >> "$log"
+      reply "$id" "{\"configOptions\":$options}" ;;
     *'"method":"session/load"'*)
       echo "LOAD $$" >> "$log"
       fail "$id" '{"code":-32002,"message":"Resource not found"}' ;;
@@ -47,6 +63,29 @@ done
 "#;
 
 const PROMPT: &str = "do the thing";
+
+/// What the fake offers in `hang-first-effort`: a model list without the
+/// model [`config_selections`] asks for (only its renamed successor), and
+/// an effort.
+const CONFIG_OPTIONS: &str = r#"[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"opus[1m]","options":[{"value":"claude-fable-5-1[1m]","name":"Fable"},{"value":"opus[1m]","name":"Opus"}]},{"id":"effort","name":"Effort","category":"thought_level","type":"select","currentValue":"low","options":[{"value":"low","name":"Low"},{"value":"high","name":"High"}]}]"#;
+
+/// A model the fake no longer lists under that id, so setup substitutes its
+/// successor and announces it, then an effort.
+fn config_selections() -> Vec<acp_client::AcpSessionConfigOptionSelection> {
+    use agent_client_protocol::schema::v1::SessionConfigOptionCategory;
+    vec![
+        acp_client::AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        },
+        acp_client::AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::ThoughtLevel,
+            config_id: "effort".to_string(),
+            value_id: "high".to_string(),
+        },
+    ]
+}
 
 fn log_path(mode: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -68,6 +107,7 @@ fn fake_agent_driver(log: &std::path::Path, mode: &str) -> AcpDriver {
             "fake-agent".to_string(),
             log.display().to_string(),
             mode.to_string(),
+            CONFIG_OPTIONS.to_string(),
         ],
         label: "Fake".to_string(),
     })
@@ -103,12 +143,24 @@ impl Run {
 /// The turn loop of `start_session`, cut down to what a startup restart
 /// touches: the prompt row is stored once, before the loop; each pass makes
 /// one connection on a fresh writer, waits for the store's queue, and asks
-/// the runner's own decision whether to start over.
+/// the runner's own decision whether to start over. The writer's config
+/// fallback notices go through [`StartupRestarts`] exactly as the runner's
+/// do.
 fn run_turn_loop(
     store: &Arc<Store>,
     session_id: &str,
     mode: &str,
     stored_agent_session_id: Option<&str>,
+) -> Run {
+    run_turn_loop_with_config(store, session_id, mode, stored_agent_session_id, &[])
+}
+
+fn run_turn_loop_with_config(
+    store: &Arc<Store>,
+    session_id: &str,
+    mode: &str,
+    stored_agent_session_id: Option<&str>,
+    config_options: &[acp_client::AcpSessionConfigOptionSelection],
 ) -> Run {
     store
         .add_session_message_with_images(session_id, MessageRole::User, PROMPT, &[])
@@ -126,10 +178,11 @@ fn run_turn_loop(
         let mut decisions = Vec::new();
         loop {
             assert!(decisions.len() < 4, "the run keeps starting over");
-            let writer = Arc::new(MessageWriter::new(
-                session_id.to_string(),
-                Arc::clone(store),
-            ));
+            let shown_config_fallbacks = startup_restarts.shown_config_fallbacks();
+            let writer = Arc::new(
+                MessageWriter::new(session_id.to_string(), Arc::clone(store))
+                    .with_shown_config_fallbacks(Arc::clone(&shown_config_fallbacks)),
+            );
             let store_trait: Arc<dyn acp_client::Store> = store.clone();
             let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
             let cancel = CancellationToken::new();
@@ -144,7 +197,7 @@ fn run_turn_loop(
                         writer: &writer_trait,
                         cancel: &cancel,
                         agent_session_id: agent_session_id.as_deref(),
-                        config_options: &[],
+                        config_options,
                         prompt: PROMPT,
                         images: &[],
                     },
@@ -234,6 +287,110 @@ fn a_timed_out_setup_is_retried_once_on_a_fresh_process() {
         session.agent_id.as_deref(),
         Some(format!("sess-{}", spawned[1]).as_str())
     );
+}
+
+/// The config fallback notices in `session_id`'s transcript.
+fn fallback_notices(store: &Store, session_id: &str) -> Vec<String> {
+    store
+        .get_session_messages(session_id)
+        .expect("transcript")
+        .into_iter()
+        .filter(|message| {
+            message.acp.acp_event_kind.as_deref()
+                == Some(crate::agent::writer::CONFIG_OPTION_FALLBACK_EVENT)
+        })
+        .map(|message| message.content)
+        .collect()
+}
+
+/// The first attempt gets as far as substituting the model, and says so in
+/// the transcript, before its effort selection stalls. The retry substitutes
+/// the same model again and must not say it a second time: the notices the
+/// first connection showed reach the retry's writer through
+/// `StartupRestarts`.
+#[test]
+fn a_retry_does_not_repeat_the_first_attempts_fallback_notice() {
+    let store = Arc::new(Store::in_memory().expect("store"));
+    let session_id = new_session(&store);
+
+    let run = run_turn_loop_with_config(
+        &store,
+        &session_id,
+        "hang-first-effort",
+        None,
+        &config_selections(),
+    );
+
+    assert_eq!(run.result, Ok(AgentRunOutcome::Completed), "{}", run.log);
+    assert_eq!(
+        run.decisions,
+        vec![Some(StartupRestart::RetryTimedOutSetup)],
+        "{}",
+        run.log
+    );
+    let spawned = run.spawned();
+    assert_eq!(spawned.len(), 2, "one retry: {}", run.log);
+    // Both attempts had the substitute accepted, which is when the notice
+    // is announced; only the first one's effort selection stalled.
+    assert_eq!(run.lines("MODEL"), spawned, "{}", run.log);
+    assert_eq!(run.lines("HUNG"), vec![spawned[0]], "{}", run.log);
+    assert_eq!(run.lines("EFFORT"), vec![spawned[1]], "{}", run.log);
+    assert_eq!(run.lines("PROMPT"), vec![spawned[1]], "{}", run.log);
+    assert_eq!(
+        fallback_notices(&store, &session_id),
+        vec![
+            "Selected model claude-fable-5[1m] was not available, falling back to \
+             claude-fable-5-1[1m] (Fable)."
+        ],
+        "{}",
+        run.log
+    );
+    assert_eq!(rows(&store, &session_id, MessageRole::User), vec![PROMPT]);
+}
+
+/// A connection that was not started over shares nothing with the one
+/// before it: the set a restart carried is handed out once.
+#[test]
+fn only_the_connection_after_a_restart_inherits_shown_notices() {
+    let store = Store::in_memory().expect("store");
+    let session_id = new_session(&store);
+    let mut restarts = StartupRestarts::default();
+
+    // A turn that completed, or failed without a restart, carries nothing.
+    for (result, setup_failure) in [
+        (Ok(AgentRunOutcome::Completed), None),
+        (Err("the agent crashed".to_string()), None),
+    ] {
+        let shown = restarts.shown_config_fallbacks();
+        shown.lock().unwrap().insert("notice".to_string());
+        let restart = restarts.after_turn(
+            &session_id,
+            &result,
+            setup_failure,
+            false,
+            &mut None,
+            &store,
+        );
+        assert_eq!(restart, None);
+    }
+    assert!(restarts.shown_config_fallbacks().lock().unwrap().is_empty());
+
+    let first = restarts.shown_config_fallbacks();
+    first.lock().unwrap().insert("notice".to_string());
+    let restart = restarts.after_turn(
+        &session_id,
+        &Err("timed out".to_string()),
+        Some(acp_client::SetupFailure::TimedOut),
+        false,
+        &mut None,
+        &store,
+    );
+    assert_eq!(restart, Some(StartupRestart::RetryTimedOutSetup));
+    let retry = restarts.shown_config_fallbacks();
+    assert!(Arc::ptr_eq(&first, &retry));
+    assert!(retry.lock().unwrap().contains("notice"));
+    // The connection after the retry starts empty again.
+    assert!(restarts.shown_config_fallbacks().lock().unwrap().is_empty());
 }
 
 #[test]

@@ -19,6 +19,14 @@
 //! the drop, so the guard also marks the server gone as it drops, and a
 //! request that still reaches it on an open connection is refused (503)
 //! instead of being served: nothing starts a new MCP session after the drop.
+//!
+//! That the accepted connections are closed at all was read from axum 0.8.9
+//! (the locked version), not from its documentation: `axum::serve` gives
+//! each connection task a signal that fires when the serve future is
+//! dropped, and the task then asks hyper for a graceful shutdown. It is an
+//! implementation detail (in 0.7 the connection tasks were detached and
+//! lived on), and `Cargo.toml` asks only for `0.8`. The 503 refusal does not
+//! depend on it.
 
 use std::sync::Arc;
 
@@ -45,7 +53,8 @@ pub struct McpHttpServer {
     /// The accept loop. Aborting it closes the listener, and dropping its
     /// future tells the connections it already accepted (each on a task of
     /// its own) to shut down gracefully: hyper closes an idle one and lets
-    /// a request in flight finish first.
+    /// a request in flight finish first. The second half is how axum 0.8.9
+    /// behaves, not something it documents (see the module docs).
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
@@ -93,17 +102,7 @@ where
         .port();
 
     let shutdown = CancellationToken::new();
-    let service = StreamableHttpService::new(
-        move || Ok(factory()),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_cancellation_token(shutdown.clone()),
-    );
-    let gone = shutdown.clone();
-    let router = Router::new()
-        .route_service("/mcp", service)
-        .layer(axum::middleware::from_fn(
-            move |request: Request, next: Next| refuse_once_gone(gone.clone(), request, next),
-        ));
+    let router = mcp_router(factory, shutdown.clone());
 
     let task = tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::from_std(listener) {
@@ -126,6 +125,26 @@ where
     })
 }
 
+/// The server's routes: `factory`'s handler at `/mcp`, behind
+/// [`refuse_once_gone`]. Cancelling `shutdown` ends the MCP sessions rmcp
+/// holds and turns every later request away.
+fn mcp_router<S, F>(factory: F, shutdown: CancellationToken) -> Router
+where
+    S: ServerHandler + Send + 'static,
+    F: Fn() -> S + Send + Sync + 'static,
+{
+    let service = StreamableHttpService::new(
+        move || Ok(factory()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default().with_cancellation_token(shutdown.clone()),
+    );
+    Router::new()
+        .route_service("/mcp", service)
+        .layer(axum::middleware::from_fn(
+            move |request: Request, next: Next| refuse_once_gone(shutdown.clone(), request, next),
+        ))
+}
+
 /// Refuse a request that arrives after the server's guard was dropped.
 ///
 /// The drop closes the server's connections, but on the shared runtime and
@@ -133,8 +152,14 @@ where
 /// a keep-alive connection, and it reached rmcp and the handler factory of
 /// a server whose session has ended (rmcp then failed an `initialize` with
 /// "Session service terminated", because its token is cancelled too). The
-/// token is cancelled in the drop itself, so from the moment the drop
-/// returns no request gets that far.
+/// token is cancelled in the drop itself, so a request that arrives after
+/// the drop returns is refused here and gets no further.
+///
+/// The token is read once, as the request arrives. A request already past
+/// this check when the guard drops is not cut off by it: a tool call in
+/// flight is signalled through rmcp's request token, and an `initialize`
+/// that slipped through just before the cancel still gets rmcp's "Session
+/// service terminated". Neither starts an MCP session after the drop.
 async fn refuse_once_gone(gone: CancellationToken, request: Request, next: Next) -> Response {
     if !gone.is_cancelled() {
         return next.run(request).await;

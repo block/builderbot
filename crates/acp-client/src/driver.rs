@@ -9112,6 +9112,11 @@ where
 /// bridge answers a load of an unknown session with, or an error whose
 /// message says "session not found" or "session <that id> not found".
 ///
+/// The error's `data` is read the same way when it is a string. An agent
+/// that follows the SDK convention keeps the standard message ("Internal
+/// error") and puts what went wrong there: goose's reads "Failed to load
+/// session: Session not found: <id>". Structured `data` is not searched.
+///
 /// Only asked about a load (`loading_session` in
 /// [`send_session_setup_request`]): `session/new` asks for no session, so
 /// nothing it is refused with means one is missing. And only those two
@@ -9122,9 +9127,17 @@ fn is_session_not_found_answer(error: &agent_client_protocol::Error, session_id:
     if error.code == ErrorCode::ResourceNotFound {
         return true;
     }
-    let message = error.message.to_ascii_lowercase();
+    let detail = error.data.as_ref().and_then(|data| data.as_str());
+    says_session_not_found(&error.message, session_id)
+        || detail.is_some_and(|detail| says_session_not_found(detail, session_id))
+}
+
+/// Whether `text` says "session not found" or "session <session_id> not
+/// found", ignoring case and the punctuation around each word.
+fn says_session_not_found(text: &str, session_id: &str) -> bool {
+    let text = text.to_ascii_lowercase();
     let session_id = session_id.to_ascii_lowercase();
-    let words: Vec<&str> = message
+    let words: Vec<&str> = text
         .split_whitespace()
         .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
         .collect();
@@ -10244,6 +10257,37 @@ mod tests {
         assert!(!not_found(&internal(
             "session abc-123: working directory not found"
         )));
+    }
+
+    /// An agent that keeps the standard message and puts the detail in the
+    /// error's `data`, as the SDK's helpers do. Goose's `session/load`
+    /// failure has this shape. The match on `data` is as tight as the one
+    /// on the message.
+    #[test]
+    fn a_not_found_answer_is_recognised_in_string_data() {
+        use agent_client_protocol::Error;
+
+        let not_found = |error: &Error| super::is_session_not_found_answer(error, "abc-123");
+        let with_data = |data: serde_json::Value| Error::internal_error().data(data);
+
+        let goose = with_data("Failed to load session: Session not found: abc-123".into());
+        assert_eq!(goose.message, "Internal error");
+        assert!(not_found(&goose));
+        assert!(not_found(&with_data("Session abc-123 not found".into())));
+
+        // A session and something not found, but not the session.
+        assert!(!not_found(&with_data(
+            "Failed to load session: session file not found".into()
+        )));
+        assert!(!not_found(&with_data(
+            "Failed to load session abc-123: model not found".into()
+        )));
+        assert!(!not_found(&with_data("Session other-id not found".into())));
+        // Only a string is read: structured data is the agent's own shape.
+        assert!(!not_found(&with_data(serde_json::json!({
+            "details": "Session not found: abc-123"
+        }))));
+        assert!(!not_found(&with_data(serde_json::Value::Null)));
     }
 
     /// `session/new` asks for no session, so a refusal that reads like one

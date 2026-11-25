@@ -13,7 +13,9 @@
 //!
 //! The store has more than one connection (the write connection and a few
 //! readers, see [`super::connections`]), each behind its own [`TimedMutex`];
-//! each is named, and a report says which one it was.
+//! each is named, and a report says which one it was. A read that found
+//! every reader busy waited for any of them, not for the one it ended up
+//! with, and its report says so and names what held them all ([`PoolWait`]).
 //!
 //! In the load-test harness build the write connection's lock also records
 //! every wait and hold in the harness's metrics (see
@@ -29,6 +31,40 @@ use std::time::{Duration, Instant};
 
 /// A wait or hold at least this long is logged.
 const SLOW_LOCK: Duration = Duration::from_millis(500);
+
+/// A wait for whichever lock of a pool frees first, begun when all of them
+/// were found held.
+pub(crate) struct PoolWait {
+    /// What was waited for, for the report ("any store reader").
+    pub(crate) what: &'static str,
+    /// The call sites that held the pool's locks when the wait began, each
+    /// once (several locks are often held from one place).
+    pub(crate) holders: Vec<&'static Location<'static>>,
+}
+
+impl PoolWait {
+    /// A wait for `what`, any of `locks`, which are all held: who holds
+    /// them now. A lock released in the meantime has no holder to name.
+    pub(crate) fn begin<T>(what: &'static str, locks: &[TimedMutex<T>]) -> Self {
+        let mut holders: Vec<&'static Location<'static>> = Vec::new();
+        for holder in locks.iter().filter_map(TimedMutex::holder_location) {
+            if !holders.contains(&holder) {
+                holders.push(holder);
+            }
+        }
+        Self { what, holders }
+    }
+}
+
+/// What an acquisition waited for, and who held it when the wait began.
+enum WaitedFor {
+    /// The lock itself.
+    ThisLock {
+        holder_at_entry: Option<&'static Location<'static>>,
+    },
+    /// Any lock of a pool; the one acquired is whichever freed first.
+    AnyOf(PoolWait),
+}
 
 /// A [`Mutex`] whose acquisitions are timed and slow ones logged.
 pub(crate) struct TimedMutex<T> {
@@ -67,22 +103,37 @@ impl<T> TimedMutex<T> {
     #[cfg(test)]
     #[track_caller]
     pub(crate) fn try_lock(&self) -> Option<TimedGuard<'_, T>> {
-        self.try_lock_waiting_since(Instant::now())
+        self.try_lock_waiting_since(Instant::now(), None)
     }
 
     /// [`Self::try_lock`] for a caller that has been waiting for this lock
     /// or one like it since `began` (a pool handing out whichever of its
     /// locks frees first): the wait is timed from then, so a slow one is
-    /// still reported.
+    /// still reported. `pool_wait` is that wait when every lock of the pool
+    /// was held (`None` for a first look that may find one free); a slow
+    /// wait is then reported as one for any of them, with who held them.
     #[track_caller]
-    pub(crate) fn try_lock_waiting_since(&self, began: Instant) -> Option<TimedGuard<'_, T>> {
+    pub(crate) fn try_lock_waiting_since(
+        &self,
+        began: Instant,
+        pool_wait: Option<&PoolWait>,
+    ) -> Option<TimedGuard<'_, T>> {
         let caller = Location::caller();
         let guard = match self.inner.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
             Err(TryLockError::WouldBlock) => return None,
         };
-        Some(self.held(guard, caller, None, began))
+        let waited_for = match pool_wait {
+            Some(wait) => WaitedFor::AnyOf(PoolWait {
+                what: wait.what,
+                holders: wait.holders.clone(),
+            }),
+            None => WaitedFor::ThisLock {
+                holder_at_entry: None,
+            },
+        };
+        Some(self.held(guard, caller, waited_for, began))
     }
 
     /// [`Mutex::lock`], timed against the caller's location.
@@ -95,7 +146,12 @@ impl<T> TimedMutex<T> {
             Ok(guard) => (guard, false),
             Err(poison) => (poison.into_inner(), true),
         };
-        let guard = self.held(guard, caller, holder_at_entry, began);
+        let guard = self.held(
+            guard,
+            caller,
+            WaitedFor::ThisLock { holder_at_entry },
+            began,
+        );
         if poisoned {
             Err(PoisonError::new(guard))
         } else {
@@ -107,7 +163,7 @@ impl<T> TimedMutex<T> {
         &'a self,
         guard: MutexGuard<'a, T>,
         caller: &'static Location<'static>,
-        holder_at_entry: Option<&'static Location<'static>>,
+        waited_for: WaitedFor,
         began: Instant,
     ) -> TimedGuard<'a, T> {
         let acquired = Instant::now();
@@ -121,7 +177,7 @@ impl<T> TimedMutex<T> {
             guard: Some(guard),
             owner: self,
             caller,
-            holder_at_entry,
+            waited_for,
             waited: acquired.duration_since(began),
             acquired,
         }
@@ -133,6 +189,7 @@ impl<T> TimedMutex<T> {
         &self.name
     }
 
+    /// The `lock()` call site holding the lock right now, if it is held.
     fn holder_location(&self) -> Option<&'static Location<'static>> {
         let holder = self.holder.load(Ordering::Relaxed);
         // SAFETY: only ever null or a `&'static Location` stored by `lock`.
@@ -146,9 +203,25 @@ pub(crate) struct TimedGuard<'a, T> {
     guard: Option<MutexGuard<'a, T>>,
     owner: &'a TimedMutex<T>,
     caller: &'static Location<'static>,
-    holder_at_entry: Option<&'static Location<'static>>,
+    waited_for: WaitedFor,
     waited: Duration,
     acquired: Instant,
+}
+
+impl<T> TimedGuard<'_, T> {
+    /// The report for this acquisition if it is released now, were a wait
+    /// or hold of `threshold` slow.
+    #[cfg(test)]
+    pub(crate) fn report_if_slower_than(&self, threshold: Duration) -> Option<String> {
+        slow_lock_report(
+            &self.owner.name,
+            self.caller,
+            &self.waited_for,
+            self.waited,
+            self.acquired.elapsed(),
+            threshold,
+        )
+    }
 }
 
 impl<T> Deref for TimedGuard<'_, T> {
@@ -177,7 +250,7 @@ impl<T> Drop for TimedGuard<'_, T> {
         if let Some(report) = slow_lock_report(
             &self.owner.name,
             self.caller,
-            self.holder_at_entry,
+            &self.waited_for,
             self.waited,
             held,
             SLOW_LOCK,
@@ -194,10 +267,15 @@ impl<T> Drop for TimedGuard<'_, T> {
 
 /// The log line for an acquisition that waited or held at least `threshold`,
 /// or `None` for an ordinary one.
+///
+/// `name` is the lock that was acquired, which is what was held. A slow
+/// wait says what held the lock when it began; a slow wait on a pool was
+/// for any of its locks, so it says that and what held them all, and `name`
+/// is only the one that happened to free first.
 fn slow_lock_report(
     name: &str,
     caller: &Location<'_>,
-    holder_at_entry: Option<&Location<'_>>,
+    waited_for: &WaitedFor,
     waited: Duration,
     held: Duration,
     threshold: Duration,
@@ -205,12 +283,27 @@ fn slow_lock_report(
     if waited < threshold && held < threshold {
         return None;
     }
-    let holder = match holder_at_entry {
-        Some(holder) if waited >= threshold => format!(" (held by {holder} when the wait began)"),
-        _ => String::new(),
+    let wait = match waited_for {
+        _ if waited < threshold => String::new(),
+        WaitedFor::ThisLock {
+            holder_at_entry: Some(holder),
+        } => format!(" (held by {holder} when the wait began)"),
+        WaitedFor::ThisLock {
+            holder_at_entry: None,
+        } => String::new(),
+        WaitedFor::AnyOf(PoolWait { what, holders }) if holders.is_empty() => {
+            format!(" for {what}")
+        }
+        WaitedFor::AnyOf(PoolWait { what, holders }) => {
+            let holders: Vec<String> = holders.iter().map(ToString::to_string).collect();
+            format!(
+                " for {what} (all held, by {}, when the wait began)",
+                holders.join(", ")
+            )
+        }
     };
     Some(format!(
-        "Slow store lock on {name} at {caller}: waited {:.3}s{holder}, held {:.3}s",
+        "Slow store lock on {name} at {caller}: waited {:.3}s{wait}, held {:.3}s",
         waited.as_secs_f64(),
         held.as_secs_f64()
     ))
@@ -220,6 +313,10 @@ fn slow_lock_report(
 mod tests {
     use super::*;
 
+    fn this_lock(holder_at_entry: Option<&'static Location<'static>>) -> WaitedFor {
+        WaitedFor::ThisLock { holder_at_entry }
+    }
+
     #[test]
     fn ordinary_acquisitions_are_not_reported() {
         let here = Location::caller();
@@ -227,7 +324,7 @@ mod tests {
             slow_lock_report(
                 "the write connection",
                 here,
-                None,
+                &this_lock(None),
                 Duration::from_millis(1),
                 Duration::from_millis(2),
                 SLOW_LOCK
@@ -243,7 +340,7 @@ mod tests {
         let waited = slow_lock_report(
             "the write connection",
             caller,
-            Some(holder),
+            &this_lock(Some(holder)),
             Duration::from_millis(12_300),
             Duration::from_micros(100),
             SLOW_LOCK,
@@ -257,7 +354,7 @@ mod tests {
         let held = slow_lock_report(
             "store reader 2",
             caller,
-            Some(holder),
+            &this_lock(Some(holder)),
             Duration::ZERO,
             Duration::from_millis(1400),
             SLOW_LOCK,
@@ -267,6 +364,76 @@ mod tests {
             held,
             format!("Slow store lock on store reader 2 at {caller}: waited 0.000s, held 1.400s")
         );
+    }
+
+    /// A read that found every reader busy waited for any of them. The
+    /// report says that, names what held them, and still names the reader
+    /// it got, which is the one a slow hold would be on.
+    #[test]
+    fn a_slow_pool_wait_reads_as_a_wait_for_any_lock_and_names_the_holders() {
+        let caller = Location::caller();
+        let first = Location::caller();
+        let second = Location::caller();
+        let pooled = |holders: Vec<&'static Location<'static>>| {
+            WaitedFor::AnyOf(PoolWait {
+                what: "any store reader",
+                holders,
+            })
+        };
+        let report = |waited_for: &WaitedFor, waited_ms: u64, held_ms: u64| {
+            slow_lock_report(
+                "store reader 2",
+                caller,
+                waited_for,
+                Duration::from_millis(waited_ms),
+                Duration::from_millis(held_ms),
+                SLOW_LOCK,
+            )
+        };
+
+        assert_eq!(
+            report(&pooled(vec![first, second]), 12_300, 0).unwrap(),
+            format!(
+                "Slow store lock on store reader 2 at {caller}: waited 12.300s for any store \
+                 reader (all held, by {first}, {second}, when the wait began), held 0.000s"
+            )
+        );
+        // Every holder had let go by the time they were looked up.
+        assert_eq!(
+            report(&pooled(vec![]), 700, 0).unwrap(),
+            format!(
+                "Slow store lock on store reader 2 at {caller}: waited 0.700s for any store \
+                 reader, held 0.000s"
+            )
+        );
+        // A short wait and a slow hold: the hold is this reader's.
+        assert_eq!(
+            report(&pooled(vec![first]), 20, 1400).unwrap(),
+            format!("Slow store lock on store reader 2 at {caller}: waited 0.020s, held 1.400s")
+        );
+        assert_eq!(report(&pooled(vec![first]), 20, 20), None);
+    }
+
+    #[test]
+    fn a_pool_wait_names_each_holding_call_site_once() {
+        let locks = [
+            TimedMutex::new(1, "one"),
+            TimedMutex::new(2, "two"),
+            TimedMutex::new(3, "three"),
+        ];
+        let free = PoolWait::begin("any lock", &locks);
+        assert!(free.holders.is_empty());
+
+        let same_place: Vec<_> = locks[..2].iter().map(|lock| lock.lock().unwrap()).collect();
+        let elsewhere = locks[2].lock().unwrap();
+        let wait = PoolWait::begin("any lock", &locks);
+        assert_eq!(wait.what, "any lock");
+        assert_eq!(
+            wait.holders,
+            vec![same_place[0].caller, elsewhere.caller],
+            "two locks taken from one call site are one holder"
+        );
+        assert_ne!(same_place[0].caller, elsewhere.caller);
     }
 
     #[test]

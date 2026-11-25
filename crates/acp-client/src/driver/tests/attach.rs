@@ -738,14 +738,24 @@ async fn attach_setup_times_out_on_the_drivers_step_deadline() {
         })
         .await;
 
-    // The step's timeout ends the connection, and the teardown that
-    // follows closes the proxy's stdout, so the attach settles as it does
-    // for any connection that failed with its transport gone.
-    assert_eq!(outcome, Ok(AttachOutcome::TransportLost));
+    // It gave up on the driver's deadline, at the step that stalled.
     assert!(
         waited < Duration::from_secs(20),
         "the attach waited {waited:?} for a 300ms step deadline"
     );
+    // How a timed-out attach settles is not this test's subject, and today
+    // it depends on an ordering between two tasks: the teardown kills the
+    // proxy before the result is read, so once the stdout reader has seen
+    // that, the attach settles as a lost transport; otherwise as the
+    // timeout's own error. Either is the attach giving up.
+    match &outcome {
+        Ok(AttachOutcome::TransportLost) => {}
+        Err(error) => assert!(
+            error.starts_with("ACP protocol failed") && error.contains("Timed out attaching"),
+            "{error}"
+        ),
+        other => panic!("a timed-out attach settled as {other:?}"),
+    }
     let sent = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
     assert!(sent.contains(r#""method":"initialize""#), "{sent}");

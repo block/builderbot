@@ -12,8 +12,11 @@
 //!   sends the same prompt, and a config fallback notice the first attempt
 //!   wrote (its setup got as far as a substituted model) is not written
 //!   again when the retry applies the same selections
-//!   (`MessageWriter::with_shown_config_fallbacks`). The hidden rows setup
-//!   records (initialize, modes, config options) are written by each attempt.
+//!   (`MessageWriter::with_shown_config_fallbacks`): the notices one
+//!   connection showed are handed to the connection that starts it over
+//!   ([`StartupRestarts::shown_config_fallbacks`]), and to no other. The
+//!   hidden rows setup records (initialize, modes, config options) are
+//!   written by each attempt.
 //! - The agent has no session by the stored id
 //!   (`acp_client::SetupFailure::SessionNotFound`) and nothing the agent said is
 //!   recorded for the session (`acp_client::agent_output_recorded`). Earlier
@@ -34,6 +37,8 @@
 
 use acp_client::SetupFailure;
 
+use crate::agent::ShownConfigFallbacks;
+
 /// How to start a failed connection over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StartupRestart {
@@ -49,9 +54,28 @@ pub(super) enum StartupRestart {
 pub(super) struct StartupRestarts {
     timeout_retried: bool,
     started_fresh: bool,
+    /// The config fallback notices shown by the connection last handed a
+    /// set ([`Self::shown_config_fallbacks`]).
+    config_fallbacks: ShownConfigFallbacks,
+    /// Whether that connection was just started over, so the next one
+    /// carries its set on instead of starting an empty one.
+    carry_config_fallbacks: bool,
 }
 
 impl StartupRestarts {
+    /// The set of config fallback notices the next connection's writer
+    /// starts from (`MessageWriter::with_shown_config_fallbacks`), taken at
+    /// the top of each pass of the turn loop. It holds what the last
+    /// connection showed when [`Self::after_turn`] just started that one
+    /// over, and is empty for every other connection (a first one, a note
+    /// follow-up, a Pikchr correction), which announces a fallback as usual.
+    pub(super) fn shown_config_fallbacks(&mut self) -> ShownConfigFallbacks {
+        if !std::mem::take(&mut self.carry_config_fallbacks) {
+            self.config_fallbacks = ShownConfigFallbacks::default();
+        }
+        std::sync::Arc::clone(&self.config_fallbacks)
+    }
+
     /// Whether to start over after a connection failed, and how.
     /// `setup_failure` is what its settle said about setup. `resuming` is
     /// whether the connection was asked to load a stored agent session.
@@ -89,7 +113,9 @@ impl StartupRestarts {
     /// one, unless `ruled_out` (a Stop, a quit or a reattached turn). Logs
     /// the restart and, for [`StartupRestart::StartFresh`], clears
     /// `agent_session_id` so the next connection sends `session/new`. The
-    /// caller sends the same prompt again on a fresh connection.
+    /// caller sends the same prompt again on a fresh connection, whose
+    /// writer gets the failed connection's set from the next
+    /// [`Self::shown_config_fallbacks`].
     pub(super) fn after_turn(
         &mut self,
         session_id: &str,
@@ -123,6 +149,7 @@ impl StartupRestarts {
                 *agent_session_id = None;
             }
         }
+        self.carry_config_fallbacks = true;
         Some(restart)
     }
 }

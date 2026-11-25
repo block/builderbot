@@ -9,18 +9,25 @@
 // measured. A failure is recorded in the file (`failure`, and on the
 // scenario it happened in) and ends the run: what state the app is in
 // after one is not known, so the scenarios after it are listed as not run.
+//
+// A run starts no program from outside its own directory and the system's:
+// no agent of the user's above all. That is checked from the app's start,
+// before anything is seeded, after every step that makes the app start
+// something, through every measured window and at the end of every
+// scenario, and the run stops at the first one found (`checkPrograms`).
 
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { loadavg } from 'node:os';
 import { join } from 'node:path';
 
 import { listProcesses, tree } from '../lib/processes.mjs';
-import { isInside, resolveExisting } from '../lib/safety.mjs';
+import { expectedPlaces, isInside, resolveExisting } from '../lib/safety.mjs';
 import { createClient, launchApp } from './app.mjs';
 import { openBrowserFrontend, openDesktopFrontend } from './frontend.mjs';
 import { olderHooksWarning } from './hooks.mjs';
 import { agentLoad, backendResult, frontendResult, mountedRows } from './measure.mjs';
 import { expectedChunksPerSecond, overloadReason } from './overload.mjs';
+import { outsideProgramsFailure, watchPrograms } from './programs.mjs';
 import { startSampler } from './sampler.mjs';
 import { plan, SCENARIOS } from './scenarios.mjs';
 import { seed } from './seed.mjs';
@@ -68,20 +75,38 @@ const result = {
   safety: null,
 };
 
-function writeResult(dataDir = result.safety?.dataDir ?? null) {
-  result.host.loadAverageEnd = loadavg();
-  result.safety = {
-    runDir,
-    dataDir,
-    realStagedDir: config.realStaged,
-    ...(sampler?.safety() ?? {
+const programs = watchPrograms({
+  appLog: join(runDir, 'logs', 'app.log'),
+  expected: expectedPlaces({ runDir, allowed: config.browser ? [config.browser] : [] }),
+  stubbed: config.agentStubs,
+  stubLog: config.agentStubLog,
+  logProblem: config.spawnLogProblem,
+});
+
+const safety = () =>
+  programs.safety(
+    sampler?.safety() ?? {
       processSamples: 0,
       openFileSamples: 0,
       openUnderRealStaged: [],
       unexpectedExecutables: [],
-    }),
-  };
+    }
+  );
+
+function writeResult(dataDir = result.safety?.dataDir ?? null) {
+  result.host.loadAverageEnd = loadavg();
+  result.safety = { runDir, dataDir, realStagedDir: config.realStaged, ...safety() };
   writeFileSync(join(runDir, 'out', 'result.json'), JSON.stringify(result, null, 2));
+}
+
+/**
+ * Stop the run if it has started a program from outside its own directory
+ * and the system's. Looking costs a read of what the app has logged since
+ * the last look.
+ */
+function checkPrograms() {
+  const failure = outsideProgramsFailure(safety().unexpectedExecutables);
+  if (failure) throw new Failure(failure.message, failure.detail);
 }
 
 // If `run.mjs` dies without cleaning up, this process must not live on.
@@ -168,6 +193,14 @@ async function startApp() {
     'exit',
     (code, signal) => (appExited = `the app exited (${signal ?? code}); see logs/app.log`)
   );
+  // From the app's first second: what it starts while it comes up and while
+  // the projects are seeded lives too briefly to be left for later.
+  sampler = startSampler({
+    appPid: app.pid,
+    runDir,
+    realStaged: config.realStaged,
+    allowedExecutables: config.browser ? [config.browser] : [],
+  });
   const api = createClient({ port: config.port, token: config.token });
   const metrics = await until('the app to serve its harness port', () => api.metrics(), {
     timeout: 180_000,
@@ -281,6 +314,7 @@ async function measureWindow({ from, sessions, agentsBefore, expectedPerSecond }
     if (left <= 0) break;
     await sleep(Math.min(2000, left));
     if (appExited) throw new Error(appExited);
+    checkPrograms();
     // The agents' counters and the sampler are each up to a second behind.
     const seconds = (Date.now() - from) / 1000 - 1;
     if (seconds >= OVERLOAD_AFTER_S) check(seconds);
@@ -309,6 +343,7 @@ async function runScenario({ name, index, api, projects, profiles, streamSupport
     session.id = started.sessionId;
   }
   await waitForStreaming(api, sessions);
+  checkPrograms();
 
   const viewedSessions = sessions.filter((s) => s.project === 0);
   const viewed = viewedSessions[0];
@@ -465,7 +500,13 @@ async function main() {
   result.hooks = hooks;
   const older = olderHooksWarning(hooks);
   if (older) result.warnings.push(older);
+  if (config.spawnLogProblem) {
+    result.warnings.push(
+      `${config.spawnLogProblem}, so the agents the app starts were not read from it: a program from outside the run directory that lives under a second would not have been seen`
+    );
+  }
   writeResult(dataDir);
+  checkPrograms();
   // Commands this tree does not have answer "Unknown command".
   const streamSupported = await api.invoke('check_session_stream', {}).then(
     () => true,
@@ -481,7 +522,10 @@ async function main() {
     projects: params.projects,
     sessionsPerProject: params.sessionsPerProject,
     scenarios: params.scenarios,
+    // Creating a project is what makes the app start an agent by itself.
+    check: checkPrograms,
   });
+  checkPrograms();
 
   phase = 'opening the frontend';
   if (params.frontend === 'browser') {
@@ -501,13 +545,8 @@ async function main() {
   } else {
     frontend = await openDesktopFrontend({ api, localStorage: params.localStorage });
   }
-  sampler = startSampler({
-    appPid: app.pid,
-    browserPid: frontend.pid,
-    runDir,
-    realStaged: config.realStaged,
-    allowedExecutables: config.browser ? [config.browser] : [],
-  });
+  sampler.watchBrowser(frontend.pid);
+  checkPrograms();
 
   for (const [index, name] of params.scenarios.entries()) {
     phase = `scenario ${name}`;
@@ -531,6 +570,10 @@ async function main() {
       await sampler.sampleNow().catch(() => {});
       writeResult();
     }
+    // After the scenario's own result is kept: a program found now fails
+    // the run, not the scenario that was measured.
+    phase = `after scenario ${name}`;
+    checkPrograms();
   }
   result.complete = true;
   writeResult();

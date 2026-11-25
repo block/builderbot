@@ -2,12 +2,16 @@
 // process, of what it started (the fake agents, git) and of the browser; and
 // whether any of them, or the driver, has a file open under the real
 // `~/.staged` or runs a program from somewhere unexpected.
+//
+// It starts with the app, before anything is seeded, and the browser is
+// added when there is one. A process that starts and exits between two
+// samples is not seen; `lib/spawns.mjs` reads the app's log for those.
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { listProcesses, tree } from '../lib/processes.mjs';
-import { EXPECTED_EXECUTABLE_ROOTS } from '../lib/safety.mjs';
+import { expectedPlaces, outsideProgram } from '../lib/safety.mjs';
 
 const run = promisify(execFile);
 const LSOF_EVERY = 3;
@@ -40,21 +44,23 @@ export function cpuMeter() {
   };
 }
 
-export function startSampler({ appPid, browserPid, runDir, realStaged, allowedExecutables }) {
+export function startSampler({ appPid, runDir, realStaged, allowedExecutables }) {
   const samples = [];
   const openUnderRealStaged = new Map();
   const unexpectedExecutables = new Set();
-  const expected = [runDir + '/', ...EXPECTED_EXECUTABLE_ROOTS, ...allowedExecutables];
+  const expected = expectedPlaces({ runDir, allowed: allowedExecutables });
+  let browserPid = null;
   let lsofSamples = 0;
   let tick = 0;
   let busy = false;
 
   const inExpectedPlace = (path) => expected.some((root) => path.startsWith(root));
-  // `ps` shows a process that has exited as `(name)`: nothing left to check.
-  // A bare name was found through the run's PATH (the run's own `bin` and
-  // the system directories); `lsof` then says which file it really is.
-  const fromExpectedPlace = (args) =>
-    args.startsWith('(') || !args.split(' ')[0].includes('/') || inExpectedPlace(args);
+  // One answer per command line: the same few are seen every second.
+  const judged = new Map();
+  const outside = (args) => {
+    if (!judged.has(args)) judged.set(args, outsideProgram(args, expected));
+    return judged.get(args);
+  };
 
   const meters = { app: cpuMeter(), children: cpuMeter(), browser: cpuMeter() };
   const sum = (group, processes) => ({
@@ -78,7 +84,8 @@ export function startSampler({ appPid, browserPid, runDir, realStaged, allowedEx
       });
       const watched = [...app, ...browser, ...tree(all, process.pid)];
       for (const p of watched) {
-        if (!fromExpectedPlace(p.args)) unexpectedExecutables.add(p.args.slice(0, 160));
+        const program = outside(p.args);
+        if (program) unexpectedExecutables.add(program);
       }
       if (tick++ % LSOF_EVERY === 0) {
         const pids = [...new Set(watched.map((p) => p.pid))].join(',');
@@ -121,6 +128,10 @@ export function startSampler({ appPid, browserPid, runDir, realStaged, allowedEx
       );
     },
     sampleNow: sample,
+    /** The browser's process, once there is one: measured and checked from then on. */
+    watchBrowser(pid) {
+      browserPid = pid;
+    },
     safety: () => ({
       processSamples: samples.length,
       openFileSamples: lsofSamples,

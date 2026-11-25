@@ -36,7 +36,7 @@ warns when either of its files is incomplete.
 | ---- | ------------------------------------------------------------------- |
 | 0    | every scenario measured, every check passed                         |
 | 1    | the run failed; the result holds what was measured before           |
-| 2    | bad parameters, or the build failed (no result)                     |
+| 2    | bad parameters, a failed build, or agent lists not read (no result) |
 | 3    | measured, and a safety check or a shown-against-stored check failed |
 | 130  | interrupted; the result holds what was measured before              |
 
@@ -51,6 +51,8 @@ A run stops by itself, with a partial result, when:
   samples. A machine that far behind measures itself, not the app. `0` turns the rule off.
 - the app or the browser exits, or a DevTools or app request gets no answer (two minutes for a
   DevTools call or a command, thirty seconds for a harness route).
+- it has started a program from outside the run directory and the system directories (see
+  "Safety"). The failure names each one, and the run exits 1.
 
 ## What a run does
 
@@ -294,19 +296,72 @@ The app keeps everything in `$HOME/.staged` and has no override, so isolation is
   in the checkout, which may itself live under `~/.staged/workspaces`.
 - The environment is built from nothing: a `HOME` and `TMPDIR` in the run directory, `PATH` of the
   run's own `bin` plus `/usr/bin:/bin:/usr/sbin:/sbin`, and a stand-in `$SHELL` without login files
-  (the app captures a login shell's environment). No agent tool of the user's is on that `PATH`,
-  and `STAGED_ACP_TOOLS_DIR` holds only the fake agent.
+  (the app captures a login shell's environment). No agent tool of the user's is on that `PATH`.
+- No real agent is started (see "No real agent" below): every agent the app knows is a file in the
+  run's own tools directory, and a program started from anywhere else stops the run.
 - The app's harness port is on `127.0.0.1` and serves nothing, neither a command nor the event
   socket nor the frontend, to a caller without the run's token (see "The hooks in the app"). The
   token is made per run and kept in the run directory, which only its owner can read.
 - While it runs, every third second `lsof` lists the open files of the app, everything it started,
-  the browser and the driver. A file under the real `~/.staged`, or a program from outside the run
-  directory and the system directories, is recorded in the result's `safety` section and fails the
-  run (exit 3).
+  the browser and the driver. A file under the real `~/.staged` is recorded in the result's
+  `safety` section and fails the run (exit 3).
 - The driver runs in its own process group. On exit, failure or a signal, `run.mjs` ends the group
   and then every process whose command line or working directory is in the run directory, and
   records any survivor as a failure. If `run.mjs` itself is killed outright, the driver notices
   within a second and stops the app and the browser; only the run directory is then left behind.
+
+### No real agent
+
+The app starts agents by itself: creating a project runs action detection, which starts the first
+agent it finds. It finds an agent by name, first in its tools directory (`STAGED_ACP_TOOLS_DIR`,
+the run's `acp-tools`) and then through `crates/doctor/src/resolve.rs`: a real login shell
+(`/bin/zsh -l -c 'whence -p …'`, then bash), `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and
+the npm directories under `HOME`. A login shell drops the `PATH` it was given and builds one from
+`/etc/paths`, which can name the user's own directories, so the run's `PATH` does not decide what
+that finds. The harness keeps a run from starting what it finds, and says so if one does.
+
+What is stubbed. Every agent command the tree knows has a file in `acp-tools`, where the search
+ends before the resolver is asked:
+
+- The names are read from the source of the tree being run (`lib/agents.mjs`): the `command` of
+  each `KNOWN_AGENTS` entry in `crates/acp-client/src/types.rs`, which is what a session or action
+  detection can start (`goose`, `claude-agent-acp`, `codex-acp`, `pi-acp`, `amp-acp`), and the
+  `commands` and `main_command` of each `AI_AGENT_CHECKS` entry in `crates/doctor/src/agents.rs`,
+  which is what Doctor probes (adding `pi`, `amp`, `copilot`, `cursor-agent`). So an agent added to
+  the app is stubbed without the harness being changed, in a tree named with `--app-dir` too. A
+  tree whose lists cannot be read is refused before anything is built (exit 2).
+- `claude-agent-acp` is the fake agent. Every other name is a stub: a shell script that appends its
+  name and arguments to `logs/agent-stubs.log`, says on stderr that it is a stub, and exits 1, so
+  whatever asked for the agent (action detection, in a run) is told at once that it is not there.
+- The throwaway `HOME` holds login files (`.zprofile`, `.zlogin`, `.bash_profile`, `.profile`) that
+  set `PATH` back to the run's. They are read after the system's, so the resolver's login shell,
+  and the one `crates/blox-cli` asks for `sq`, search the run's `PATH` whatever name they are given.
+  This covers a name that is not stubbed, except where it is installed in one of the directories
+  the resolver tries by itself (`/opt/homebrew/bin`, `/usr/local/bin`).
+
+What is checked. A program counts as outside when it is not under the run directory, a system
+directory (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/usr/libexec`, `/System`,
+`/Library/Developer`, Xcode) or the browser the run was given; a file in the run directory that is
+a link to one outside counts as outside.
+
+- The app's log. The app logs each agent it starts through the login shell, which is how action
+  detection starts one, with the path it is about to run (`Spawning … exec line: exec '…'`). The
+  line is written before the start, so it is there however briefly the process lives. The driver
+  reads every path on those lines (`lib/spawns.mjs`).
+- The process sampler, which now starts with the app, before anything is seeded. Once a second it
+  lists the app, everything it started, the browser and the driver, and checks each command line:
+  the program, and the script it was given when the program is only an interpreter
+  (`node /opt/homebrew/bin/codex-acp` is run by the run's own Node). Every third second `lsof` adds
+  the file each process really runs.
+- Both are looked at when the app is up, after every project and worktree is seeded, when the page
+  opens, when a scenario's sessions are streaming, every two seconds of a measured window, at the
+  end of every scenario and when the run fails. The first program found stops the run: the result
+  is written with what was measured, `failure` and `safety.unexpectedExecutables` name the
+  program, and `run.mjs` prints it and exits 1.
+
+The result's `safety.agents` has the names stubbed, how many times each stub was started
+(`stubStarts`), and how many agent starts the app's log held and how many of those were outside the
+run directory (`startsLogged`, `startsLoggedOutside`); the summary's Safety section prints them.
 
 ## The hooks in the app
 
@@ -369,4 +424,11 @@ only `/perf/*` behind the token.
 - macOS only (`ps`, `lsof`, the activation policy), and one run at a time per `--port`. Two runs
   of one tree at once are not supported even on two ports: the tree's cache holds one binary per
   profile, and the second build replaces it.
-- The isolation is by environment and checked by observation; it is not a sandbox.
+- The isolation is by environment and checked by observation; it is not a sandbox. In particular
+  the check for programs from outside the run directory sees an agent the app starts through the
+  login shell (from the app's log) and any process alive at one of the sampler's once-a-second
+  looks. A program that lives under a second and is started some other way is not seen: an agent a
+  session starts directly is not logged (a run's sessions name the fake agent, and one that got
+  another agent would not be streaming), nor is anything that is not an agent. A release build
+  (`--profile release`) writes no log at all, so there the sampler is the only check; the result
+  carries a warning and the summary says the log was not read.

@@ -6,7 +6,7 @@
 // throwaway directory, on a minimal PATH. This module decides whether that
 // is really so, and the harness refuses to start when it is not.
 
-import { existsSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 
@@ -67,6 +67,29 @@ export function createRunDir() {
   return { runDir, home };
 }
 
+/** The PATH of everything a run starts: its own `bin` and the system directories. */
+export const runPath = (runDir) =>
+  [join(runDir, 'bin'), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+
+/**
+ * Login files for the throwaway HOME, by name.
+ *
+ * The app looks a program up by asking a real login shell
+ * (`/bin/zsh -l -c 'whence -p …'`, then `/bin/bash -l -c 'type -P …'`; see
+ * `crates/doctor/src/resolve.rs` and `crates/blox-cli`). A login shell
+ * throws away the PATH it was given and builds one from `/etc/paths`,
+ * which can name the user's own directories, so the lookup finds the
+ * user's tools whatever PATH the run has. The user's login files are read
+ * after the system's, from HOME, and HOME is the run's: these put the
+ * run's PATH back, so a lookup finds what the run itself would find.
+ */
+export function loginFiles(runDir) {
+  const text = `# Staged load-test harness: a login shell under this HOME searches the run's PATH only.\nPATH='${runPath(runDir)}'\nexport PATH\n`;
+  // zsh reads `.zprofile` and then `.zlogin`, after the system's `zprofile`
+  // and `zlogin`; bash reads `.bash_profile`, and as `sh`, `.profile`.
+  return { '.zprofile': text, '.zlogin': text, '.bash_profile': text, '.profile': text };
+}
+
 /**
  * The whole environment of everything the harness starts: nothing inherited,
  * so no credentials, no agent configuration and no PATH entry of the user's
@@ -77,7 +100,7 @@ export function scrubbedEnv({ runDir, home }) {
     HOME: home,
     CFFIXED_USER_HOME: home,
     TMPDIR: join(runDir, 'tmp'),
-    PATH: [join(runDir, 'bin'), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':'),
+    PATH: runPath(runDir),
     // The app captures a login shell's environment; this one is `/bin/sh`
     // without the login files, so the PATH above is what it reports.
     SHELL: join(runDir, 'bin', 'perf-shell'),
@@ -100,3 +123,79 @@ export const EXPECTED_EXECUTABLE_ROOTS = [
   '/Library/Developer/',
   '/Applications/Xcode',
 ];
+
+/** Where a run's programs may be: its own directory, the system's, and any named besides. */
+export const expectedPlaces = ({ runDir, allowed = [] }) => [
+  runDir + '/',
+  ...EXPECTED_EXECUTABLE_ROOTS,
+  ...allowed,
+];
+
+/** `path` with its symlinks followed when it is a file, else `null`. */
+export function realFile(path) {
+  try {
+    return statSync(path).isFile() ? realpathSync(path) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What to report when the file at `path` is not in one of the `expected`
+ * places, or `null` when it is. A path inside the run directory that is a
+ * link to a file outside it counts as outside, and both are named.
+ */
+export function outsidePlace(path, expected, real = realFile) {
+  const inside = (candidate) => expected.some((root) => candidate.startsWith(root));
+  if (!inside(path)) return path;
+  const resolved = real(path);
+  return resolved && !inside(resolved) ? `${resolved} (through ${path})` : null;
+}
+
+/** Whether `path` is a file someone may run. */
+export function isExecutableFile(path) {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The program outside the `expected` places that a process's command line
+ * (as `ps` prints it) runs, or `null`: the program itself, or the script
+ * it was given. A real agent is as often a script as a binary
+ * (`node /opt/homebrew/bin/codex-acp`), and one run by the run's own Node
+ * or by `/bin/sh` has a program that is where it should be.
+ */
+export function outsideProgram(
+  args,
+  expected,
+  { real = realFile, executable = isExecutableFile } = {}
+) {
+  // `ps` shows a process that has exited as `(name)`: nothing left to check.
+  if (args.startsWith('(')) return null;
+  const inside = (candidate) => expected.some((root) => candidate.startsWith(root));
+  const words = args.split(' ');
+  // A bare name was found through the run's PATH (the run's own `bin` and
+  // the system directories); `lsof` then says which file it really is.
+  if (words[0].includes('/')) {
+    // Against the whole line, so a program whose path has a space in it
+    // (an installed browser) is still recognized by its prefix.
+    if (!inside(args)) return args.slice(0, 160);
+    // In its place by name; a link there to a file elsewhere is not.
+    const resolved = real(words[0]);
+    if (resolved && !inside(resolved)) return `${resolved} (through ${words[0]})`;
+  }
+  // The first word that is not an option is where a script goes. It counts
+  // only when it is a file with an executable bit, as an installed script
+  // has: a directory, a data file or a path that does not exist is an
+  // argument.
+  const script = words.slice(1).find((word) => !word.startsWith('-'));
+  if (script?.startsWith('/') && executable(script)) {
+    const outside = outsidePlace(script, expected, real);
+    if (outside) return `${outside}, run by ${words[0]}`;
+  }
+  return null;
+}

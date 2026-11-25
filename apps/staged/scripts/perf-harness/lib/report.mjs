@@ -123,6 +123,23 @@ function checkLine(name, check, outcome) {
   return `- ${name}, chat: ${verdict}; ${outcome.shown} text stamps shown, ${outcome.stored} stored, newest ${show(outcome.newestShown)} against ${show(outcome.newestStored)}${problems.length ? `; ${problems.join('; ')}` : ''}`;
 }
 
+/**
+ * The agents of a run: which were stubbed, how often a stub was started,
+ * and what the app's log says it started. Nothing for a result that
+ * predates the stubs.
+ */
+function agentLines(agents) {
+  if (!agents) return [];
+  const starts = Object.entries(agents.stubStarts);
+  const total = starts.reduce((sum, [, times]) => sum + times, 0);
+  return [
+    `- agents stubbed in the run's tools directory: ${agents.stubbed.join(', ')}; stub starts: ${total}${total ? ` (${starts.map(([name, times]) => `${name} ${times}`).join(', ')})` : ''}`,
+    agents.startsLogged === null
+      ? `- agent starts in the app's log: not read (this build does not log them)`
+      : `- agent starts in the app's log: ${agents.startsLogged}, ${agents.startsLoggedOutside} of them outside the run directory`,
+  ];
+}
+
 export function summarize(result) {
   // A scenario that failed has no figures; it gets a line, not a column.
   const names = Object.keys(result.scenarios).filter((name) => !result.scenarios[name].failure);
@@ -185,6 +202,7 @@ export function summarize(result) {
           `- data directory: ${safety.dataDir ?? 'the app never reported one'} (inside the run directory ${safety.runDir})`,
           `- files open under the real ${safety.realStagedDir}: ${safety.openUnderRealStaged.length} in ${safety.openFileSamples} samples of the run's processes${safety.openUnderRealStaged.length ? `: ${safety.openUnderRealStaged.join('; ')}` : ''}`,
           `- programs from outside the run directory and the system: ${safety.unexpectedExecutables.length ? safety.unexpectedExecutables.join('; ') : 'none'}`,
+          ...agentLines(safety.agents),
           `- processes left after the run: ${safety.leftoverProcesses ? (safety.leftoverProcesses.length ? safety.leftoverProcesses.map((p) => `${p.pid} ${p.args}`).join('; ') : 'none') : 'not checked'}`,
         ]
       : ['- the run stopped before anything was checked']),

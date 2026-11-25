@@ -54,8 +54,19 @@ function seedRepository({ runDir, home, name, env }) {
  * Returns `{ viewed, background }`: a viewed project per scenario, in the
  * scenarios' order, and `projects - 1` background ones. Each is
  * `{ id, name, branches: [{ id, name }] }`, one branch per session.
+ * `check` is called after each project and each worktree, and throws to
+ * stop the seeding.
  */
-export async function seed({ api, runDir, home, env, projects, sessionsPerProject, scenarios }) {
+export async function seed({
+  api,
+  runDir,
+  home,
+  env,
+  projects,
+  sessionsPerProject,
+  scenarios,
+  check = () => {},
+}) {
   const wanted = [
     ...scenarios.map((scenario, i) => ({
       repo: `perf-view-${i}`,
@@ -85,6 +96,7 @@ export async function seed({ api, runDir, home, env, projects, sessionsPerProjec
       });
     }
     out.push({ id: project.id, name, viewed, branches: [] });
+    check();
   }
   // Worktrees last and together: each is a git checkout the app queues.
   for (const project of out) {
@@ -105,6 +117,7 @@ export async function seed({ api, runDir, home, env, projects, sessionsPerProjec
         { timeout: 180_000, every: 2000 }
       );
       project.branches.push({ id: branch.id, name: branch.branchName });
+      check();
     }
     log(`seeded ${project.name}: ${project.branches.length} branches`);
   }

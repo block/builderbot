@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { agentCommands } from './lib/agents.mjs';
 import { build, describeTree } from './lib/build.mjs';
 import { parseParams, usage } from './lib/params.mjs';
 import { endRun } from './lib/processes.mjs';
@@ -38,6 +39,7 @@ import {
   realStagedDir,
   scrubbedEnv,
 } from './lib/safety.mjs';
+import { spawnLogProblem } from './lib/spawns.mjs';
 import { stage } from './lib/stage.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -136,11 +138,14 @@ function finish(code, why) {
       say(`FAILED a shown-against-stored check: ${result.checks.failed.join(', ')}`);
       failed = true;
     }
-    if (
-      result.safety.openUnderRealStaged.length ||
-      result.safety.unexpectedExecutables.length ||
-      leftover.length
-    ) {
+    const outside = result.safety.unexpectedExecutables;
+    if (outside.length) {
+      say(
+        `FAILED: the run started ${outside.length === 1 ? 'a program' : `${outside.length} programs`} from outside the run directory and the system directories: ${outside.join('; ')}`
+      );
+      failed = true;
+    }
+    if (result.safety.openUnderRealStaged.length || leftover.length) {
       say('FAILED a safety check; see the Safety section above');
       failed = true;
     }
@@ -162,6 +167,14 @@ process.on('uncaughtException', (error) => finish(1, `failed: ${error.stack ?? e
 // Nothing is built or started unless everything will stay inside the run directory.
 const problem = isolationProblem({ runDir, home, executables: [process.execPath] });
 if (problem) finish(2, `refusing to start: ${problem}`);
+// Nor unless the agents the app knows can be read from its source: each is
+// stubbed in the run directory, and one that is not would be looked for on
+// the machine.
+try {
+  agentCommands(appDir);
+} catch (error) {
+  finish(2, `refusing to start: ${error.message}`);
+}
 const browser =
   params.frontend === 'browser' ? findBrowser(params.browser || process.env.BROWSER_PATH) : null;
 if (params.frontend === 'browser' && !browser) {
@@ -187,7 +200,12 @@ try {
 } catch (error) {
   finish(2, `the build failed: ${error.message}`);
 }
-const staged = stage({ runDir, built, profile: params.profile });
+let staged;
+try {
+  staged = stage({ runDir, home, appDir, built, profile: params.profile });
+} catch (error) {
+  finish(2, `refusing to start: ${error.message}`);
+}
 const configFile = join(runDir, 'config.json');
 writeFileSync(
   configFile,
@@ -200,6 +218,9 @@ writeFileSync(
     binary: staged.binary,
     dist: staged.dist,
     agentConfig: staged.agentConfig,
+    agentStubs: staged.agentStubs,
+    agentStubLog: staged.agentStubLog,
+    spawnLogProblem: spawnLogProblem({ appDir, profile: params.profile }),
     browser,
     realStaged: realStagedDir(),
     tree: describeTree(appDir),

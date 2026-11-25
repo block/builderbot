@@ -123,6 +123,7 @@
   import { isReconcileCancelNotice } from '../../shared/disconnectedSession';
   import {
     LIVE_DELIVERY_UNKNOWN,
+    LIVE_DELIVERY_RETRY_MS,
     liveDeliveryKnowledge,
     shouldAskLiveDelivery,
     type LiveDeliveryKnowledge,
@@ -442,11 +443,19 @@
    * now (owned by this process, agent connection up). Asked on each update
    * until the answer is settled: a yes, or a no that cannot change during this
    * run (another Staged instance owns the row). A retryable no — the
-   * connection comes up a few seconds into a run — is asked again. Forgotten
+   * connection comes up a few seconds into a run — is asked again, by the
+   * next update or by `liveDeliveryTimer`, whichever is first. Forgotten
    * whenever the status leaves `running` or the pane changes session.
    */
   let liveDelivery = $state<LiveDeliveryKnowledge>(LIVE_DELIVERY_UNKNOWN);
   let liveDeliveryInFlight = false;
+  /**
+   * The next ask after a retryable no (`scheduleLiveDeliveryRetry`). An
+   * update asks too, but on the stream one arrives only when something is
+   * written, and an agent that has just connected may write nothing for a
+   * while.
+   */
+  let liveDeliveryTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Counts hold reports received by event, so the mount-time snapshot can tell
    * whether a newer report landed while it was in flight.
@@ -1381,7 +1390,7 @@
       if (payload.status !== 'running') {
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
-        liveDelivery = LIVE_DELIVERY_UNKNOWN;
+        forgetLiveDelivery();
       }
       // On the stream there is nothing to fetch: the frame that agrees with
       // this status comes, and holds what was written before it.
@@ -1445,7 +1454,7 @@
     if (!isActive || !id) return;
 
     backgroundHold = null;
-    liveDelivery = LIVE_DELIVERY_UNKNOWN;
+    forgetLiveDelivery();
     stoppingTaskIds = new Set();
     taskStopNotices = new Map();
     const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
@@ -1972,25 +1981,72 @@
    */
   function refreshLiveDelivery(status: SessionStatus | undefined) {
     if (status !== 'running') {
-      liveDelivery = LIVE_DELIVERY_UNKNOWN;
+      forgetLiveDelivery();
       return;
     }
     if (!shouldAskLiveDelivery(status, liveDelivery) || liveDeliveryInFlight || !sessionId) {
       return;
     }
     const id = sessionId;
+    // This ask stands in for the one the timer would have made.
+    clearLiveDeliveryTimer();
     liveDeliveryInFlight = true;
+    let answered = false;
     getSessionLiveDelivery(id)
       .then((capability) => {
+        answered = true;
         if (closed || sessionId !== id || session?.status !== 'running') return;
         liveDelivery = liveDeliveryKnowledge(capability);
       })
       .catch(() => {
-        // Best-effort: the next update asks again.
+        // Best-effort: the next update asks again. Not the timer, which
+        // would keep asking about a session the store no longer has.
       })
       .finally(() => {
         liveDeliveryInFlight = false;
+        if (answered) scheduleLiveDeliveryRetry();
       });
+  }
+
+  /**
+   * Ask again shortly when the backend's answer left the question open: a
+   * retryable no, or an answer about a session the pane has since left.
+   * Frames are not enough for this. The backend says "not yet" until the
+   * runner has registered the turn's control handle, and the agent may then
+   * write nothing the stream sends for a while, so without a timer the
+   * composer would offer only queueing until the next row.
+   *
+   * This is one registry lookup, for an open pane, while its session runs
+   * and the answer is open. It reads nothing of the session and is not a
+   * poll of it.
+   */
+  function scheduleLiveDeliveryRetry() {
+    if (liveDeliveryTimer || !liveDeliveryOpen()) return;
+    liveDeliveryTimer = setTimeout(() => {
+      liveDeliveryTimer = null;
+      if (liveDeliveryOpen()) refreshLiveDelivery(session?.status);
+    }, LIVE_DELIVERY_RETRY_MS);
+  }
+
+  /** The pane follows a running session it has no settled answer for. */
+  function liveDeliveryOpen(): boolean {
+    return (
+      !closed &&
+      following &&
+      session?.id === sessionId &&
+      shouldAskLiveDelivery(session?.status, liveDelivery)
+    );
+  }
+
+  function clearLiveDeliveryTimer() {
+    if (liveDeliveryTimer) clearTimeout(liveDeliveryTimer);
+    liveDeliveryTimer = null;
+  }
+
+  /** Drop the answer and the retry: it was about a run that is over, or another session. */
+  function forgetLiveDelivery() {
+    liveDelivery = LIVE_DELIVERY_UNKNOWN;
+    clearLiveDeliveryTimer();
   }
 
   async function refreshQueuedMessages() {
@@ -2024,6 +2080,7 @@
     following = false;
     closeChat();
     clearFallbackTimer();
+    clearLiveDeliveryTimer();
     // A fetch still out is abandoned: its answer is dropped (`closed`), or
     // lands on the session the pane has moved to having read nothing of it.
     pollInFlight = false;
@@ -2169,7 +2226,7 @@
           // running again on a fresh connection.
           session = { ...session, status: 'running' };
           clearBackgroundHold();
-          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          forgetLiveDelivery();
           pollNow();
           scrollToBottom();
           return true;
@@ -2180,7 +2237,7 @@
           // fails (worktree gone, or the queue drain re-ran the session first
           // so the row is already running) has set `sendError`; fall through
           // to the draft restore below without overwriting it.
-          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          forgetLiveDelivery();
           if (await sendMessage(text, imageIds, true)) return true;
           break;
         case 'rejected_queued':
@@ -2188,8 +2245,9 @@
           break;
         case 'blocked':
           // The connection may have gone under the request: ask again before
-          // offering "Send" next time.
-          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          // offering "Send" next time. Now, since no frame need follow.
+          forgetLiveDelivery();
+          refreshLiveDelivery(session.status);
           sendError = `Not delivered: ${result.reason ?? result.delivery}`;
           break;
         case 'not_resumable':
@@ -2276,7 +2334,7 @@
       // re-render the old wait in place of "Thinking…". Likewise whatever was
       // known about live delivery was about the previous run.
       clearBackgroundHold();
-      liveDelivery = LIVE_DELIVERY_UNKNOWN;
+      forgetLiveDelivery();
       modelSpecificFollowupConfig = null;
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;

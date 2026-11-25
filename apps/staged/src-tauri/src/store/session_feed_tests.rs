@@ -436,7 +436,36 @@ fn update_message_content_for_a_missing_row_is_not_an_error() {
 }
 
 #[test]
-fn update_message_acp_metadata_marks_the_metadata_row() {
+fn add_tool_session_message_marks_the_row_and_ties_it_to_its_call() {
+    let (store, feed) = store_with_feed();
+    let session = running_session(&store, &feed);
+
+    let call = store
+        .add_tool_session_message(&session.id, MessageRole::ToolCall, "Read", "call-1")
+        .unwrap();
+    assert_marked(&feed, &session, rows(&[call]));
+    let result = store
+        .add_tool_session_message(&session.id, MessageRole::ToolResult, "done", "call-1")
+        .unwrap();
+    assert_marked(&feed, &session, rows(&[result]));
+
+    // Each is one statement, so no read can find either row untied.
+    let stored = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(stored.len(), 2);
+    for row in &stored {
+        assert_eq!(row.acp.acp_tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(row.acp.acp_event_kind, None);
+    }
+    assert_eq!(stored[0].role, MessageRole::ToolCall);
+    assert_eq!(stored[1].role, MessageRole::ToolResult);
+    assert_eq!(stored[1].content, "done");
+}
+
+/// A visible row inserted bare and then given its ACP metadata: a client
+/// that read it in between holds a copy nothing ties to a call, so the
+/// message row is marked again along with the metadata row.
+#[test]
+fn update_message_acp_metadata_marks_a_visible_row_it_ties_to_a_call() {
     let (store, feed) = store_with_feed();
     let session = running_session(&store, &feed);
     let id = store
@@ -455,10 +484,122 @@ fn update_message_acp_metadata_marks_the_metadata_row() {
         )
         .unwrap();
 
-    assert_marked(&feed, &session, metadata_rows(&[id]));
+    assert_marked(
+        &feed,
+        &session,
+        SessionDirty {
+            rows: BTreeSet::from([id]),
+            metadata_rows: BTreeSet::from([id]),
+            ..Default::default()
+        },
+    );
     let stored = &store.get_session_messages(&session.id).unwrap()[0];
     assert_eq!(stored.acp.acp_tool_status.as_deref(), Some("completed"));
     assert_eq!(stored.content, "{\"name\":\"Read\"}");
+}
+
+/// The same for a result row, whose update sets a tool call id and no event
+/// kind: the metadata read does not return such a row at all, so the message
+/// row's mark is the only way the id reaches a client.
+#[test]
+fn update_message_acp_metadata_marks_a_result_row_it_ties_to_a_call() {
+    let (store, feed) = store_with_feed();
+    let session = running_session(&store, &feed);
+    let id = store
+        .add_session_message(&session.id, MessageRole::ToolResult, "done")
+        .unwrap();
+    feed.drain();
+
+    store
+        .update_message_acp_metadata(
+            id,
+            &AcpMessageMetadata {
+                acp_tool_call_id: Some("call-1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let marked = feed.drain().remove(&session.id).unwrap();
+    assert_eq!(marked.rows, BTreeSet::from([id]));
+}
+
+/// A visible row that has its call id is not marked again: an update of it
+/// is a metadata change alone. An in-flight call is updated many times and
+/// its row can be large, so the message row is not sent for each.
+#[test]
+fn update_message_acp_metadata_marks_only_the_metadata_of_a_row_already_tied() {
+    let (store, feed) = store_with_feed();
+    let session = running_session(&store, &feed);
+    let id = store
+        .add_tool_session_message(&session.id, MessageRole::ToolCall, "Read", "call-1")
+        .unwrap();
+    feed.drain();
+
+    for (kind, status) in [
+        ("tool_call", "pending"),
+        ("tool_call_update", "in_progress"),
+        ("tool_call_update", "completed"),
+    ] {
+        store
+            .update_message_acp_metadata(
+                id,
+                &AcpMessageMetadata {
+                    acp_tool_call_id: Some("call-1".to_string()),
+                    acp_tool_status: Some(status.to_string()),
+                    ..metadata(kind)
+                },
+            )
+            .unwrap();
+        assert_marked(&feed, &session, metadata_rows(&[id]));
+    }
+}
+
+/// Nor is a visible row an update gives no call id: the copy a client holds
+/// is no further from its call than the row is.
+#[test]
+fn update_message_acp_metadata_marks_only_the_metadata_when_it_sets_no_call_id() {
+    let (store, feed) = store_with_feed();
+    let session = running_session(&store, &feed);
+    let id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read")
+        .unwrap();
+    feed.drain();
+
+    store
+        .update_message_acp_metadata(
+            id,
+            &AcpMessageMetadata {
+                acp_tool_status: Some("completed".to_string()),
+                ..metadata("tool_call_update")
+            },
+        )
+        .unwrap();
+
+    assert_marked(&feed, &session, metadata_rows(&[id]));
+}
+
+/// A hidden row has no copy among the visible rows to replace.
+#[test]
+fn update_message_acp_metadata_marks_only_the_metadata_of_a_hidden_row() {
+    let (store, feed) = store_with_feed();
+    let session = running_session(&store, &feed);
+    let id = store
+        .add_acp_metadata_message(&session.id, &metadata("tool_call"))
+        .unwrap();
+    feed.drain();
+
+    store
+        .update_message_acp_metadata(
+            id,
+            &AcpMessageMetadata {
+                acp_tool_call_id: Some("call-1".to_string()),
+                ..metadata("tool_call_update")
+            },
+        )
+        .unwrap();
+
+    assert_marked(&feed, &session, metadata_rows(&[id]));
 }
 
 #[test]

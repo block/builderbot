@@ -299,15 +299,22 @@ async fn a_session_held_as_a_row_and_as_a_chat_is_served_both_ways() {
     past_the_interval().await;
 
     // A tool call's metadata and the queue are the chat's alone.
+    let call = h
+        .store
+        .add_tool_session_message(&session.id, MessageRole::ToolCall, "Read notes.md", "tc-1")
+        .unwrap();
+    past_the_gather().await;
+    client.take();
+    past_the_interval().await;
     h.store
-        .update_message_acp_metadata(reply, &tool("in_progress", json!("partial")))
+        .update_message_acp_metadata(call, &tool("in_progress", json!("partial")))
         .unwrap();
     h.store
         .add_queued_session_message(&session.id, "next", &[], None)
         .unwrap();
     past_the_gather().await;
     let frame = only(client.take());
-    assert_eq!(full_ids(&frame), (vec![], vec![reply]));
+    assert_eq!(full_ids(&frame), (vec![], vec![call]));
     assert!(full(&frame).queued_messages.is_some());
 
     // Closing the chat leaves the row as it was: no snapshot, and deltas.
@@ -624,4 +631,130 @@ fn a_full_frame_goes_out_under_the_polls_names() {
         .collect();
     parts.sort_unstable();
     assert_eq!(parts, vec!["acpMetadataMessages", "messages"]);
+}
+
+/// A visible row written in two steps, the row and then its ACP metadata,
+/// with a read in between: the client holds a copy nothing ties to a tool
+/// call, and the metadata rows of a frame do not replace a visible row. So
+/// the row is sent again among the visible rows once it has its metadata.
+#[tokio::test(start_paused = true)]
+async fn a_row_sent_before_its_metadata_is_sent_again_with_it() {
+    let h = Harness::new();
+    let session = h.session();
+    h.say(&session, MessageRole::User, "the prompt");
+    let client = open_chat(&h, &session).await;
+
+    // A tool call, read before its metadata is written.
+    let call = h.say(&session, MessageRole::ToolCall, "Read notes.md");
+    past_the_gather().await;
+    let frame = only(client.take());
+    assert_eq!(full_ids(&frame), (vec![call], vec![]));
+    assert_eq!(full(&frame).messages[0].acp.acp_tool_call_id, None);
+    past_the_full_interval().await;
+
+    h.store
+        .update_message_acp_metadata(call, &tool("in_progress", json!("partial")))
+        .unwrap();
+    past_the_gather().await;
+    let frame = only(client.take());
+    assert_eq!(frame.kind, Delta);
+    assert_eq!(full_ids(&frame), (vec![call], vec![call]));
+    let visible = &full(&frame).messages[0];
+    assert_eq!(visible.acp.acp_tool_call_id.as_deref(), Some("tc-1"));
+    assert_eq!(visible.acp.acp_tool_status.as_deref(), Some("in_progress"));
+    past_the_full_interval().await;
+
+    // Tied, its later updates are metadata alone.
+    h.store
+        .update_message_acp_metadata(call, &tool("completed", json!("all of it")))
+        .unwrap();
+    past_the_gather().await;
+    assert_eq!(full_ids(&only(client.take())), (vec![], vec![call]));
+    past_the_full_interval().await;
+
+    // A result, whose update sets no event kind: the metadata read returns
+    // no such row, so the visible copy is the only one there is to send.
+    let result = h.say(&session, MessageRole::ToolResult, "the notes");
+    past_the_gather().await;
+    let frame = only(client.take());
+    assert_eq!(full_ids(&frame), (vec![result], vec![]));
+    assert_eq!(full(&frame).messages[0].acp.acp_tool_call_id, None);
+    past_the_full_interval().await;
+
+    h.store
+        .update_message_acp_metadata(
+            result,
+            &AcpMessageMetadata {
+                acp_tool_call_id: Some("tc-1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    past_the_gather().await;
+    let frame = only(client.take());
+    assert_eq!(full_ids(&frame), (vec![result], vec![]));
+    assert_eq!(
+        full(&frame).messages[0].acp.acp_tool_call_id.as_deref(),
+        Some("tc-1")
+    );
+}
+
+/// The agent writer's tool rows, with a frame read after each of its
+/// writes: the call and its result reach the client tied to the call in the
+/// first frame that holds them, whatever the reads fall between, so neither
+/// row has to be sent a second time.
+#[tokio::test(start_paused = true)]
+async fn the_writers_tool_rows_are_tied_to_their_call_in_every_frame() {
+    use acp_client::MessageWriter as _;
+
+    let h = Harness::new();
+    let session = h.session();
+    h.say(&session, MessageRole::User, "the prompt");
+    let client = open_chat(&h, &session).await;
+    let writer = crate::agent::MessageWriter::new(session.id.clone(), h.store.clone());
+    let metadata = |kind: &str, status: &str| acp_client::AcpToolCallMetadata {
+        event_kind: Some(kind.to_string()),
+        tool_call_id: Some("tc-1".to_string()),
+        tool_status: Some(status.to_string()),
+        ..Default::default()
+    };
+
+    // The row, before the writer is given the call's metadata.
+    writer.record_tool_call("tc-1", "Read notes.md", None).await;
+    past_the_gather().await;
+    let frame = only(client.take());
+    let (visible, hidden) = full_ids(&frame);
+    assert_eq!((visible.len(), hidden.len()), (1, 0));
+    let call = visible[0];
+    assert_eq!(
+        full(&frame).messages[0].acp.acp_tool_call_id.as_deref(),
+        Some("tc-1")
+    );
+    past_the_full_interval().await;
+
+    writer
+        .record_tool_call_metadata(metadata("tool_call", "pending"))
+        .await;
+    past_the_gather().await;
+    // The metadata arrives as a metadata row, under the id the visible row
+    // already has.
+    let frame = only(client.take());
+    assert_eq!(full_ids(&frame), (vec![], vec![call]));
+    let row = &full(&frame).acp_metadata_messages[0];
+    assert_eq!(row.acp.acp_tool_call_id.as_deref(), Some("tc-1"));
+    assert_eq!(row.acp.acp_tool_status.as_deref(), Some("pending"));
+    past_the_full_interval().await;
+
+    writer
+        .record_tool_call_metadata(metadata("tool_call_update", "completed"))
+        .await;
+    writer.record_tool_result("tc-1", "the notes").await;
+    past_the_gather().await;
+    let frame = only(client.take());
+    let (visible, hidden) = full_ids(&frame);
+    assert_eq!(hidden, vec![call]);
+    assert_eq!(visible.len(), 1);
+    let result = &full(&frame).messages[0];
+    assert_eq!(result.role, MessageRole::ToolResult);
+    assert_eq!(result.acp.acp_tool_call_id.as_deref(), Some("tc-1"));
 }

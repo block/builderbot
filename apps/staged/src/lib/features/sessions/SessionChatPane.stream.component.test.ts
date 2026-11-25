@@ -4,7 +4,9 @@ import type { SessionStreamHandlers } from '../../transport';
 import type {
   Session,
   SessionFull,
+  SessionLiveDelivery,
   SessionMessage,
+  SessionMessageDelivery,
   SessionPollRequest,
   SessionStatus,
   SessionStreamInterest,
@@ -44,6 +46,16 @@ const { sessionRow, transcript, eventListeners, pollSessionMock, link } = vi.hoi
   };
 });
 
+/** What the backend answers about delivering now, and to a send made now. */
+const { liveDeliveryMock, sendNowMock, prefs } = vi.hoisted(() => ({
+  liveDeliveryMock: vi.fn(async (_id: string): Promise<SessionLiveDelivery> => ({
+    supported: false,
+    retryable: false,
+  })),
+  sendNowMock: vi.fn(async (): Promise<SessionMessageDelivery> => ({ delivery: 'injected' })),
+  prefs: { composerSendMode: 'queue' },
+}));
+
 vi.mock('./ChatComposer.svelte', async () => {
   const { default: PromptInputStub } = await import('./testStubs/PromptInputStub.svelte');
   return { default: PromptInputStub, composerControlClass: '' };
@@ -61,7 +73,7 @@ vi.mock(
 vi.mock('../branches/dragDrop', () => ({ subscribeDragDrop: () => () => {} }));
 vi.mock('../agents/agent.svelte', () => ({ agentState: { providers: [] } }));
 vi.mock('../settings/preferences.svelte', () => ({
-  preferences: { composerSendMode: 'queue' },
+  preferences: prefs,
   setAcpConfigPref: vi.fn(),
 }));
 vi.mock('../../shared/draftCache', () => ({
@@ -87,7 +99,8 @@ vi.mock('../../commands', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../commands')>()),
   getSession: async () => sessionRow.current,
   pollSession: pollSessionMock,
-  getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
+  getSessionLiveDelivery: liveDeliveryMock,
+  sendSessionMessageNow: sendNowMock,
   getLatestSessionMessages: async () => ({ data: transcript.current }),
   getSessionMessages: async () => ({ data: [] }),
   getSessionAcpMetadataMessages: async () => [],
@@ -117,6 +130,7 @@ vi.mock('../../stores/sessionStream.svelte', async (importOriginal) => {
 
 import SessionChatPane from './SessionChatPane.svelte';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
+import { LIVE_DELIVERY_RETRY_MS } from './liveDelivery';
 import { FALLBACK_POLL_MS } from './messagePoll';
 import { STATUS_HOLD_MS } from './statusHold';
 import { TRANSCRIPT_PAGE_ROWS } from './transcriptWindow';
@@ -203,6 +217,10 @@ describe('SessionChatPane on the session stream', () => {
     document.body.innerHTML = '';
     eventListeners.clear();
     pollSessionMock.mockClear();
+    liveDeliveryMock.mockReset();
+    liveDeliveryMock.mockResolvedValue({ supported: false, retryable: false });
+    sendNowMock.mockReset();
+    prefs.composerSendMode = 'queue';
     link.interests.length = 0;
     link.seq = 0;
     link.generation = -1;
@@ -718,5 +736,206 @@ describe('SessionChatPane on the session stream', () => {
     expect(rowCount(target)).toBe(TRANSCRIPT_PAGE_ROWS);
     expect(target.textContent).toContain(`row ${many[many.length - 1].id}`);
     expect(target.textContent).not.toContain('Explain the cache');
+  });
+  describe('live delivery', () => {
+    const NOT_YET: SessionLiveDelivery = { supported: false, retryable: true, reason: 'not yet' };
+    const SUPPORTED: SessionLiveDelivery = { supported: true, retryable: false };
+    /**
+     * Whether the composer offers "Send now". With the queue mode remembered
+     * and no new-session actions, the control is split exactly then.
+     */
+    const offersSendNow = (target: Element) =>
+      target.querySelector('[data-testid="prompt-input"]')?.getAttribute('data-send-split') ===
+      'true';
+    const asks = () => liveDeliveryMock.mock.calls.length;
+    /** Let `ms` pass with no frame, and the asks made in it answer. */
+    async function wait(ms: number) {
+      await vi.advanceTimersByTimeAsync(ms);
+      await settle();
+    }
+
+    it('asks again after a retryable no with no frame, and then offers the live send', async () => {
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      await establish();
+      const { target } = await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      expect(asks()).toBe(1);
+      expect(offersSendNow(target)).toBe(false);
+
+      // The agent is still connecting, and writes nothing.
+      await wait(LIVE_DELIVERY_RETRY_MS - 1);
+      expect(asks()).toBe(1);
+      await wait(1);
+      expect(asks()).toBe(2);
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(3);
+      expect(offersSendNow(target)).toBe(false);
+
+      // Connected, and still nothing written: the next ask finds out.
+      liveDeliveryMock.mockResolvedValue(SUPPORTED);
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(4);
+      expect(offersSendNow(target)).toBe(true);
+
+      // A yes is final for the run.
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      await frame('delta', { messages: [row(3, 'assistant', 'It is two maps')] });
+      expect(asks()).toBe(4);
+      expect(pollSessionMock).not.toHaveBeenCalled();
+    });
+
+    it('does not ask again after a no that cannot change', async () => {
+      await establish();
+      const { target } = await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      expect(asks()).toBe(1);
+
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      await frame('delta', { messages: [row(3, 'assistant', 'It is two maps')] });
+      expect(asks()).toBe(1);
+      expect(offersSendNow(target)).toBe(false);
+    });
+
+    it('does not ask on a timer after a call that failed', async () => {
+      liveDeliveryMock.mockRejectedValue(new Error('Session not found'));
+      await establish();
+      await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      expect(asks()).toBe(1);
+
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(1);
+
+      // The next update asks, as it always did.
+      await frame('delta', { messages: [row(3, 'assistant', 'It is two maps')] });
+      expect(asks()).toBe(2);
+    });
+
+    it('lets a frame ask in place of the timer, not as well as it', async () => {
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      await establish();
+      await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      expect(asks()).toBe(1);
+
+      await wait(LIVE_DELIVERY_RETRY_MS - 100);
+      await frame('delta', { messages: [row(3, 'assistant', 'It is two maps')] });
+      expect(asks()).toBe(2);
+      // The retry is counted from the frame's ask.
+      await wait(100);
+      expect(asks()).toBe(2);
+      await wait(LIVE_DELIVERY_RETRY_MS - 100);
+      expect(asks()).toBe(3);
+    });
+
+    it('asks at once after a live send was blocked, with no frame to prompt it', async () => {
+      prefs.composerSendMode = 'send';
+      liveDeliveryMock.mockResolvedValue(SUPPORTED);
+      await establish();
+      const { target } = await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      expect(asks()).toBe(1);
+      expect(offersSendNow(target)).toBe(true);
+
+      // The connection went under the send, and is being made again.
+      sendNowMock.mockResolvedValue({ delivery: 'blocked', reason: 'connection closed' });
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      const input = target.querySelector<HTMLElement>('[data-testid="prompt-input"]')!;
+      input.textContent = 'Use the other map';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      flushSync();
+      target.querySelector<HTMLElement>('[data-testid="composer-send"]')!.click();
+      await settle();
+      expect(sendNowMock).toHaveBeenCalledTimes(1);
+      expect(target.textContent).toContain('Not delivered: connection closed');
+      expect(asks()).toBe(2);
+      expect(offersSendNow(target)).toBe(false);
+
+      liveDeliveryMock.mockResolvedValue(SUPPORTED);
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(3);
+      expect(offersSendNow(target)).toBe(true);
+    });
+
+    it('stops asking once the pane is parked', async () => {
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      await establish();
+      const { props, pane } = await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+
+      pane.park();
+      props.active = false;
+      await settle();
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+    });
+
+    it('stops asking once the pane is destroyed', async () => {
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      await establish();
+      await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+
+      unmount(panes.pop()!);
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+    });
+
+    it('stops asking once the pane shows another session', async () => {
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      await establish();
+      const { props } = await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+
+      // The other session has ended, so there is nothing to ask about it.
+      sessionRow.current = session('completed', { id: 'another-session' });
+      transcript.current = [];
+      props.sessionId = 'another-session';
+      await settle();
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+    });
+
+    it('stops asking when a status event ends the session', async () => {
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      await establish();
+      const { target } = await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+
+      emit('session-status-changed', { sessionId: SESSION_ID, status: 'completed' });
+      await settle();
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+      expect(offersSendNow(target)).toBe(false);
+    });
+
+    it('stops asking when a frame ends the session, and asks afresh for the next run', async () => {
+      liveDeliveryMock.mockResolvedValue(NOT_YET);
+      await establish();
+      const { target } = await mountPane();
+      await frame('snapshot', { session: session('running'), queuedMessages: [] });
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+
+      await frame('delta', { session: session('completed', { updatedAt: 2 }) });
+      await wait(20 * LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(2);
+
+      // The next run: asked on its first frame, and again until it is a yes.
+      await frame('delta', { session: session('running', { updatedAt: 3 }) });
+      expect(asks()).toBe(3);
+      liveDeliveryMock.mockResolvedValue(SUPPORTED);
+      await wait(LIVE_DELIVERY_RETRY_MS);
+      expect(asks()).toBe(4);
+      expect(offersSendNow(target)).toBe(true);
+    });
   });
 });

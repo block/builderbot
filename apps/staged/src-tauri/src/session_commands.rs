@@ -11193,12 +11193,12 @@ mod tests {
             let store = Arc::clone(&store);
             let session_id = session.id.clone();
             tokio::spawn(async move {
-                // Most of a 300 ms startup budget goes by before the connect.
-                tokio::time::sleep(Duration::from_millis(220)).await;
+                // Half of the 1.5 s startup budget goes by before the connect.
+                tokio::time::sleep(Duration::from_millis(750)).await;
                 registry.set_turn_control_handle(&session_id, handle);
-                // The row settles 250 ms later: past the startup budget,
+                // The row settles 1 s later: past the startup budget,
                 // inside the settle budget.
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 store
                     .update_session_status(
                         &session_id,
@@ -11211,7 +11211,25 @@ mod tests {
             })
         };
 
-        let route = continue_through_shared_body(&registry, &store, &session.id, "x").await;
+        // Budgets with room around the script's two moments. Each poll of
+        // the wait reads the session row, and the test store is a database
+        // file: with many tests running one read can take 100 ms, which the
+        // other tests' 300 ms budgets would leave no room for here.
+        let route = route_continue_session(
+            &store,
+            &registry,
+            &session.id,
+            "x",
+            &[],
+            ContinueWaits {
+                startup: Duration::from_millis(1500),
+                remote_startup: Duration::from_millis(1500),
+                settle: Duration::from_secs(10),
+            },
+            StoppedSessionPolicy::Resume,
+        )
+        .await
+        .unwrap();
 
         script.await.unwrap();
         match route {

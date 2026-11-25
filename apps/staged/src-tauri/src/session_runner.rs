@@ -2336,14 +2336,13 @@ pub fn start_session(
                 remote_outbox_collected_for_turn.set(false);
                 remote_outbox_read_error.replace(None);
                 let activity = Arc::new(ActivityClock::new());
-                // The config fallback notices the turn being started over
-                // has already shown; empty for any other connection.
-                let shown_config_fallbacks = startup_restarts.shown_config_fallbacks();
+                // Built by the restart state, so that a turn being started
+                // over does not repeat a config fallback notice.
                 let writer = Arc::new(
-                    MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
+                    startup_restarts
+                        .connection_writer(&config.session_id, &store)
                         .with_note_slot(Arc::clone(&note_slot))
-                        .with_activity_clock(Arc::clone(&activity))
-                        .with_shown_config_fallbacks(Arc::clone(&shown_config_fallbacks)),
+                        .with_activity_clock(Arc::clone(&activity)),
                 );
                 // The token the connection observes. A child of the session's
                 // so a Stop reaches it, but one this loop can also fire on its

@@ -113,8 +113,11 @@ fn fake_agent_driver(log: &std::path::Path, mode: &str) -> AcpDriver {
     })
     // Spawned directly, not through the user's login shell.
     .with_env_snapshot(vec![("PATH".to_string(), "/usr/bin:/bin".to_string())])
-    // A setup step's 90s, shortened so the first spawn times out quickly.
-    .with_setup_step_timeout(Duration::from_millis(500))
+    // A setup step's 90s, shortened so the first spawn times out quickly,
+    // but long enough for a step that does answer: a `sh` agent forking
+    // `sed` per request, and the store's write queue for the agent session
+    // id, with many other tests running.
+    .with_setup_step_timeout(Duration::from_secs(2))
 }
 
 struct Run {
@@ -178,11 +181,7 @@ fn run_turn_loop_with_config(
         let mut decisions = Vec::new();
         loop {
             assert!(decisions.len() < 4, "the run keeps starting over");
-            let shown_config_fallbacks = startup_restarts.shown_config_fallbacks();
-            let writer = Arc::new(
-                MessageWriter::new(session_id.to_string(), Arc::clone(store))
-                    .with_shown_config_fallbacks(Arc::clone(&shown_config_fallbacks)),
-            );
+            let writer = Arc::new(startup_restarts.connection_writer(session_id, store));
             let store_trait: Arc<dyn acp_client::Store> = store.clone();
             let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
             let cancel = CancellationToken::new();
@@ -361,7 +360,7 @@ fn only_the_connection_after_a_restart_inherits_shown_notices() {
         (Ok(AgentRunOutcome::Completed), None),
         (Err("the agent crashed".to_string()), None),
     ] {
-        let shown = restarts.shown_config_fallbacks();
+        let shown = restarts.take_shown_config_fallbacks();
         shown.lock().unwrap().insert("notice".to_string());
         let restart = restarts.after_turn(
             &session_id,
@@ -373,9 +372,13 @@ fn only_the_connection_after_a_restart_inherits_shown_notices() {
         );
         assert_eq!(restart, None);
     }
-    assert!(restarts.shown_config_fallbacks().lock().unwrap().is_empty());
+    assert!(restarts
+        .take_shown_config_fallbacks()
+        .lock()
+        .unwrap()
+        .is_empty());
 
-    let first = restarts.shown_config_fallbacks();
+    let first = restarts.take_shown_config_fallbacks();
     first.lock().unwrap().insert("notice".to_string());
     let restart = restarts.after_turn(
         &session_id,
@@ -386,11 +389,15 @@ fn only_the_connection_after_a_restart_inherits_shown_notices() {
         &store,
     );
     assert_eq!(restart, Some(StartupRestart::RetryTimedOutSetup));
-    let retry = restarts.shown_config_fallbacks();
+    let retry = restarts.take_shown_config_fallbacks();
     assert!(Arc::ptr_eq(&first, &retry));
     assert!(retry.lock().unwrap().contains("notice"));
     // The connection after the retry starts empty again.
-    assert!(restarts.shown_config_fallbacks().lock().unwrap().is_empty());
+    assert!(restarts
+        .take_shown_config_fallbacks()
+        .lock()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

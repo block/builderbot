@@ -14,7 +14,7 @@
 //!   again when the retry applies the same selections
 //!   (`MessageWriter::with_shown_config_fallbacks`): the notices one
 //!   connection showed are handed to the connection that starts it over
-//!   ([`StartupRestarts::shown_config_fallbacks`]), and to no other. The
+//!   ([`StartupRestarts::take_shown_config_fallbacks`]), and to no other. The
 //!   hidden rows setup records (initialize, modes, config options) are
 //!   written by each attempt.
 //! - The agent has no session by the stored id
@@ -37,7 +37,7 @@
 
 use acp_client::SetupFailure;
 
-use crate::agent::ShownConfigFallbacks;
+use crate::agent::{MessageWriter, ShownConfigFallbacks};
 
 /// How to start a failed connection over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +55,7 @@ pub(super) struct StartupRestarts {
     timeout_retried: bool,
     started_fresh: bool,
     /// The config fallback notices shown by the connection last handed a
-    /// set ([`Self::shown_config_fallbacks`]).
+    /// set ([`Self::take_shown_config_fallbacks`]).
     config_fallbacks: ShownConfigFallbacks,
     /// Whether that connection was just started over, so the next one
     /// carries its set on instead of starting an empty one.
@@ -63,13 +63,29 @@ pub(super) struct StartupRestarts {
 }
 
 impl StartupRestarts {
-    /// The set of config fallback notices the next connection's writer
-    /// starts from (`MessageWriter::with_shown_config_fallbacks`), taken at
-    /// the top of each pass of the turn loop. It holds what the last
-    /// connection showed when [`Self::after_turn`] just started that one
-    /// over, and is empty for every other connection (a first one, a note
-    /// follow-up, a Pikchr correction), which announces a fallback as usual.
-    pub(super) fn shown_config_fallbacks(&mut self) -> ShownConfigFallbacks {
+    /// The writer for the next connection of `session_id`, built at the top
+    /// of each pass of the turn loop. Its config fallback notices start from
+    /// [`Self::take_shown_config_fallbacks`], so a connection that starts
+    /// the last one over does not repeat a notice that one showed. The
+    /// caller adds what else its writer needs.
+    pub(super) fn connection_writer(
+        &mut self,
+        session_id: &str,
+        store: &std::sync::Arc<crate::store::Store>,
+    ) -> MessageWriter {
+        MessageWriter::new(session_id.to_string(), std::sync::Arc::clone(store))
+            .with_shown_config_fallbacks(self.take_shown_config_fallbacks())
+    }
+
+    /// Takes the set of config fallback notices the next connection's
+    /// writer starts from (`MessageWriter::with_shown_config_fallbacks`).
+    /// Call it once per connection: each call moves on to the next
+    /// connection, and a second call for the same one would hand out an
+    /// empty set. It holds what the last connection showed when
+    /// [`Self::after_turn`] just started that one over, and is empty for
+    /// every other connection (a first one, a note follow-up, a Pikchr
+    /// correction), which announces a fallback as usual.
+    pub(super) fn take_shown_config_fallbacks(&mut self) -> ShownConfigFallbacks {
         if !std::mem::take(&mut self.carry_config_fallbacks) {
             self.config_fallbacks = ShownConfigFallbacks::default();
         }
@@ -115,7 +131,7 @@ impl StartupRestarts {
     /// `agent_session_id` so the next connection sends `session/new`. The
     /// caller sends the same prompt again on a fresh connection, whose
     /// writer gets the failed connection's set from the next
-    /// [`Self::shown_config_fallbacks`].
+    /// [`Self::take_shown_config_fallbacks`].
     pub(super) fn after_turn(
         &mut self,
         session_id: &str,

@@ -620,7 +620,7 @@ mod tests {
 
         // `hold_readers` checks every reader out from one line of the store.
         let (before_holders, after_holders) = report
-            .split_once(" for any store reader (all held, by ")
+            .split_once(" for any store reader (held by ")
             .unwrap_or_else(|| panic!("not a wait for any reader: {report}"));
         assert!(
             before_holders.starts_with("Slow store lock on store reader ")
@@ -628,7 +628,7 @@ mod tests {
             "{report}"
         );
         let (holders, after) = after_holders
-            .split_once(", when the wait began), held ")
+            .split_once(" when the wait began), held ")
             .unwrap_or_else(|| panic!("no holders: {report}"));
         assert!(
             holders.ends_with(|c: char| c.is_ascii_digit())

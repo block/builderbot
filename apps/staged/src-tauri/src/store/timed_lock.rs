@@ -43,8 +43,11 @@ pub(crate) struct PoolWait {
 }
 
 impl PoolWait {
-    /// A wait for `what`, any of `locks`, which are all held: who holds
-    /// them now. A lock released in the meantime has no holder to name.
+    /// A wait for `what`, any of `locks`, begun after finding each one
+    /// held: who holds them now. A lock released in the meantime has no
+    /// holder to name, so this can be fewer call sites than held them. It
+    /// is a sample taken once: over a long wait the locks may change hands
+    /// many times, and a slow hold is reported on the lock itself.
     pub(crate) fn begin<T>(what: &'static str, locks: &[TimedMutex<T>]) -> Self {
         let mut holders: Vec<&'static Location<'static>> = Vec::new();
         for holder in locks.iter().filter_map(TimedMutex::holder_location) {
@@ -270,7 +273,8 @@ impl<T> Drop for TimedGuard<'_, T> {
 ///
 /// `name` is the lock that was acquired, which is what was held. A slow
 /// wait says what held the lock when it began; a slow wait on a pool was
-/// for any of its locks, so it says that and what held them all, and `name`
+/// for any of its locks, so it says that and which call sites were seen
+/// holding them (see [`PoolWait::begin`] for what that leaves out), and `name`
 /// is only the one that happened to free first.
 fn slow_lock_report(
     name: &str,
@@ -297,7 +301,7 @@ fn slow_lock_report(
         WaitedFor::AnyOf(PoolWait { what, holders }) => {
             let holders: Vec<String> = holders.iter().map(ToString::to_string).collect();
             format!(
-                " for {what} (all held, by {}, when the wait began)",
+                " for {what} (held by {} when the wait began)",
                 holders.join(", ")
             )
         }
@@ -395,7 +399,7 @@ mod tests {
             report(&pooled(vec![first, second]), 12_300, 0).unwrap(),
             format!(
                 "Slow store lock on store reader 2 at {caller}: waited 12.300s for any store \
-                 reader (all held, by {first}, {second}, when the wait began), held 0.000s"
+                 reader (held by {first}, {second} when the wait began), held 0.000s"
             )
         );
         // Every holder had let go by the time they were looked up.

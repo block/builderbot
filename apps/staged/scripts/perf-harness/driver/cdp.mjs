@@ -4,8 +4,74 @@
 import { spawn } from 'node:child_process';
 import { openSync } from 'node:fs';
 
+/** How long a DevTools call may take. The page-side waits in `ui.mjs` are shorter. */
+export const CALL_TIMEOUT_MS = 120_000;
+
+/**
+ * The calls and events of one DevTools socket, already open. A call that
+ * gets no answer in `timeout` ms is rejected, and so is every call in
+ * flight when the socket closes or fails and every call made after that:
+ * a lost browser fails the run with a message, where it used to leave the
+ * driver waiting for an answer that could not come.
+ */
+export function connection(socket, { timeout = CALL_TIMEOUT_MS } = {}) {
+  let nextId = 0;
+  let lost = null;
+  const pending = new Map();
+  const listeners = new Map();
+  const settle = (id) => {
+    const call = pending.get(id);
+    if (!call) return null;
+    pending.delete(id);
+    clearTimeout(call.timer);
+    return call;
+  };
+  const lose = (why) => {
+    if (lost) return;
+    lost = why;
+    for (const id of [...pending.keys()]) {
+      const call = settle(id);
+      call.reject(new Error(`${call.method}: ${why}`));
+    }
+  };
+  socket.addEventListener('close', (event) =>
+    lose(`the DevTools connection closed${event?.code ? ` (code ${event.code})` : ''}`)
+  );
+  socket.addEventListener('error', () => lose('the DevTools connection failed'));
+  socket.addEventListener('message', ({ data }) => {
+    const message = JSON.parse(data);
+    if (message.id !== undefined) {
+      const call = settle(message.id);
+      if (message.error) call?.reject(new Error(`${call.method}: ${message.error.message}`));
+      else call?.resolve(message.result);
+      return;
+    }
+    for (const handler of listeners.get(message.method) ?? [])
+      handler(message.params, message.sessionId);
+  });
+  return {
+    send: (method, params = {}, sessionId) =>
+      new Promise((resolve, reject) => {
+        if (lost) return reject(new Error(`${method}: ${lost}`));
+        const id = ++nextId;
+        const timer = setTimeout(() => {
+          if (settle(id))
+            reject(new Error(`${method}: no answer from the browser in ${timeout / 1000}s`));
+        }, timeout);
+        pending.set(id, { resolve, reject, method, timer });
+        try {
+          socket.send(JSON.stringify({ id, method, params, sessionId }));
+        } catch (error) {
+          settle(id);
+          reject(new Error(`${method}: ${error.message}`));
+        }
+      }),
+    on: (method, handler) => listeners.set(method, [...(listeners.get(method) ?? []), handler]),
+  };
+}
+
 /** Start headless Chromium on a profile of its own and connect to it. */
-export async function launchBrowser({ executable, profileDir, env, logFile }) {
+export async function launchBrowser({ executable, profileDir, env, logFile, width, height }) {
   const log = openSync(logFile, 'a');
   const child = spawn(
     executable,
@@ -19,7 +85,7 @@ export async function launchBrowser({ executable, profileDir, env, logFile }) {
       '--disable-component-update',
       '--disable-sync',
       '--disable-extensions',
-      '--window-size=1500,1000',
+      `--window-size=${width},${height}`,
       'about:blank',
     ],
     { env, stdio: ['ignore', log, 'pipe'] }
@@ -49,31 +115,11 @@ export async function launchBrowser({ executable, profileDir, env, logFile }) {
       once: true,
     });
   });
-  let nextId = 0;
-  const pending = new Map();
-  const listeners = new Map();
-  socket.addEventListener('message', ({ data }) => {
-    const message = JSON.parse(data);
-    if (message.id !== undefined) {
-      const call = pending.get(message.id);
-      pending.delete(message.id);
-      if (message.error) call?.reject(new Error(`${call.method}: ${message.error.message}`));
-      else call?.resolve(message.result);
-      return;
-    }
-    for (const handler of listeners.get(message.method) ?? [])
-      handler(message.params, message.sessionId);
-  });
-  const send = (method, params = {}, sessionId) =>
-    new Promise((resolve, reject) => {
-      const id = ++nextId;
-      pending.set(id, { resolve, reject, method });
-      socket.send(JSON.stringify({ id, method, params, sessionId }));
-    });
+  const { send, on } = connection(socket);
   return {
     pid: child.pid,
     send,
-    on: (method, handler) => listeners.set(method, [...(listeners.get(method) ?? []), handler]),
+    on,
     /** A new tab; returns a `send` bound to it. */
     async newPage() {
       const { targetId } = await send('Target.createTarget', { url: 'about:blank' });

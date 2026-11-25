@@ -1,5 +1,6 @@
 //! The harness's loopback server: the web API and frontend, and `/perf/*`.
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -52,6 +53,7 @@ pub(super) async fn serve(app: tauri::AppHandle, config: Config) {
         .route("/perf/result", post(push_result))
         .route("/perf/results", get(take_results))
         .route("/perf/metrics", get(read_metrics))
+        .route("/perf/outdated", post(read_outdated))
         .route("/perf/metrics/reset", post(reset_metrics))
         .layer(DefaultBodyLimit::max(RESULT_BODY_LIMIT))
         .route_layer(middleware::from_fn_with_state(
@@ -160,6 +162,11 @@ async fn take_results(State(shared): State<Arc<Shared>>) -> Json<Vec<String>> {
 
 async fn read_metrics() -> Json<serde_json::Value> {
     Json(metrics::snapshot())
+}
+
+/// For the stamp each row shows, whether the store holds a newer one.
+async fn read_outdated(Json(shown): Json<HashMap<String, u64>>) -> Json<serde_json::Value> {
+    Json(metrics::outdated(&shown))
 }
 
 async fn reset_metrics() -> StatusCode {

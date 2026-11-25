@@ -1,7 +1,7 @@
 //! The counters the harness reads over `/perf/metrics`. All in memory, and
 //! nothing is recorded until [`activate`] is called.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,9 +26,23 @@ struct Tables {
     driver_commands: BTreeMap<String, Command>,
     /// By `<level>.<kind>`.
     frames: BTreeMap<String, Frames>,
-    /// The newest stamp counted per fake agent.
+    /// The newest stamp counted per stamp kind and fake agent.
     stamps: HashMap<String, u64>,
+    /// Per fake agent, the last [`SHOWABLE_KEPT`] stamps its session's row
+    /// can show (text and tool calls), in the order they were stored.
+    showable: HashMap<String, VecDeque<Showable>>,
 }
+
+/// A stamp a row can show, and when its row was written.
+#[derive(Clone, Copy)]
+struct Showable {
+    seq: u64,
+    stored_ms: u64,
+}
+
+/// Seconds of output at any rate the harness is run at; a row further
+/// behind than this gets a floor, not a figure (see [`outdated`]).
+const SHOWABLE_KEPT: usize = 256;
 
 #[derive(Default)]
 struct Command {
@@ -99,11 +113,12 @@ pub(super) fn stream_frame(level: &str, kind: &str, bytes: u64) {
 }
 
 /// A message row's content was just written. The fake agent stamps its
-/// output with `pfm-<kind><agent>-<seq>-<epoch ms>`, kind `x` for text and
-/// `t` for a tool call; each stamp this write stores for the first time
-/// says how long ago the agent wrote that piece. Streamed text is flushed
-/// on a timer (`agent/writer.rs`), so for text the figure includes up to
-/// one flush interval by design.
+/// output with `pfm-<kind><agent>-<seq>-<epoch ms>`, kind `x` for text, `t`
+/// for a tool call and `o` for a tool call's output; each stamp this write
+/// stores for the first time says how long ago the agent wrote that piece.
+/// Streamed text is flushed on a timer (`agent/writer.rs`), so for text the
+/// figure includes up to one flush interval by design. Tool calls and their
+/// output are written at once and share a figure.
 pub(crate) fn message_stored(content: &str) {
     if !ACTIVE.load(Relaxed) {
         return;
@@ -118,21 +133,88 @@ pub(crate) fn message_stored(content: &str) {
         Some(last) => Some(std::mem::replace(last, seq.max(*last))),
         None => tables.stamps.insert(agent.to_string(), seq),
     });
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-    let histogram = if agent.starts_with('t') {
-        &TOOL_STAMP_TO_STORED
-    } else {
+    let now_ms = now_ms();
+    let histogram = if agent.starts_with('x') {
         &TEXT_STAMP_TO_STORED
+    } else {
+        &TOOL_STAMP_TO_STORED
     };
-    for (_, _, sent_ms) in std::iter::once(newest)
+    // Newest first, as read.
+    let fresh: Vec<u64> = std::iter::once(newest)
         .chain(stamps)
         .take_while(|(other, seq, _)| *other == agent && !last.is_some_and(|last| *seq <= last))
         .take(MAX_STAMPS_PER_WRITE)
-    {
-        histogram.record(now_ms.saturating_sub(sent_ms) * 1_000);
+        .map(|(_, seq, sent_ms)| {
+            histogram.record(now_ms.saturating_sub(sent_ms) * 1_000);
+            seq
+        })
+        .collect();
+    // Tool output (`o`) is never a row's subtitle.
+    if fresh.is_empty() || !agent.starts_with(['x', 't']) {
+        return;
     }
+    tables(|tables| {
+        let kept = tables.showable.entry(agent[1..].to_string()).or_default();
+        for &seq in fresh.iter().rev() {
+            if kept.len() == SHOWABLE_KEPT {
+                kept.pop_front();
+            }
+            kept.push_back(Showable {
+                seq,
+                stored_ms: now_ms,
+            });
+        }
+    });
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// For each fake agent in `shown` (`{ "<agent>": seq }`, the stamp its
+/// session's row shows, 0 for none): whether the store holds something
+/// newer that the row could show, and since when.
+///
+/// The answer per agent is `null` when nothing of it has been stored, and
+/// otherwise `{ newestSeq, newerSeq, newerStoredMs, floor }`: `newerSeq` is
+/// the first stamp stored after the one shown and `newerStoredMs` when its
+/// row was written (epoch ms), both `null` when the row shows the newest.
+/// `floor` says the stamps between were no longer kept, so the row has
+/// been behind for at least that long.
+///
+/// Read from memory, so the harness can ask on a timer during a measurement
+/// without taking the store's lock. Never reset: it describes the store,
+/// not a window.
+pub(super) fn outdated(shown: &HashMap<String, u64>) -> Value {
+    tables(|tables| {
+        shown
+            .iter()
+            .map(|(agent, &shown_seq)| {
+                let answer = tables.showable.get(agent).map(|kept| {
+                    let newest = kept.iter().map(|s| s.seq).max();
+                    // Text and tool rows are written by different paths, so
+                    // the order kept is not strictly the order of `seq`.
+                    let newer = kept
+                        .iter()
+                        .filter(|s| s.seq > shown_seq)
+                        .min_by_key(|s| s.seq);
+                    let oldest = kept.iter().map(|s| s.seq).min();
+                    json!({
+                        "newestSeq": newest,
+                        "newerSeq": newer.map(|s| s.seq),
+                        "newerStoredMs": newer.map(|s| s.stored_ms),
+                        "floor": newer.is_some()
+                            && kept.len() == SHOWABLE_KEPT
+                            && oldest.is_some_and(|oldest| oldest > shown_seq),
+                    })
+                });
+                (agent.clone(), answer.unwrap_or(Value::Null))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    })
 }
 
 const STAMP_PREFIX: &str = "pfm-";
@@ -167,6 +249,10 @@ pub(super) fn reset() {
     });
 }
 
+/// What these hooks can do, for a driver newer or older than they are:
+/// 2 added [`outdated`], the `o` stamp kind and the finer histograms.
+const HOOKS_VERSION: u32 = 2;
+
 pub(super) fn snapshot() -> Value {
     let commands = |table: &BTreeMap<String, Command>| -> Value {
         table
@@ -191,6 +277,7 @@ pub(super) fn snapshot() -> Value {
             .map(|(key, f)| (key.clone(), json!({ "frames": f.frames, "bytes": f.bytes })))
             .collect();
         json!({
+            "hooks": HOOKS_VERSION,
             "pid": std::process::id(),
             "dataDir": crate::paths::data_dir(),
             "commands": commands(&tables.commands),
@@ -210,7 +297,9 @@ pub(super) fn snapshot() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::stamps_newest_first;
+    use std::collections::HashMap;
+
+    use super::{activate, message_stored, outdated, stamps_newest_first, SHOWABLE_KEPT};
 
     #[test]
     fn stamps_are_read_newest_first() {
@@ -223,6 +312,47 @@ mod tests {
             stamps_newest_first(r#"{"title":"Run pfm-tab-12-1700000000001"}"#).next(),
             Some(("tab", 12, 1_700_000_000_001))
         );
+    }
+
+    fn shown(agent: &str, seq: u64) -> HashMap<String, u64> {
+        HashMap::from([(agent.to_string(), seq)])
+    }
+
+    #[test]
+    fn a_row_is_outdated_from_the_first_showable_stamp_stored_after_the_one_it_shows() {
+        activate();
+        message_stored("pfm-xout1-3-1700000000100 a pfm-xout1-4-1700000000200 b");
+        message_stored(r#"{"title":"Run pfm-tout1-5-1700000000300"}"#);
+        // Tool output is stored and never shown as a subtitle.
+        message_stored("output pfm-oout1-6-1700000000400");
+        // A row rewritten with nothing new adds nothing.
+        message_stored("pfm-xout1-3-1700000000100 a pfm-xout1-4-1700000000200 b");
+
+        let behind = outdated(&shown("out1", 3));
+        assert_eq!(behind["out1"]["newestSeq"], 5);
+        assert_eq!(behind["out1"]["newerSeq"], 4);
+        assert!(behind["out1"]["newerStoredMs"].as_u64().unwrap() > 1_700_000_000_200);
+        assert_eq!(behind["out1"]["floor"], false);
+
+        let current = outdated(&shown("out1", 5));
+        assert_eq!(current["out1"]["newestSeq"], 5);
+        assert!(current["out1"]["newerSeq"].is_null());
+        assert!(current["out1"]["newerStoredMs"].is_null());
+
+        assert!(outdated(&shown("nobody", 0))["nobody"].is_null());
+    }
+
+    #[test]
+    fn a_row_further_behind_than_what_is_kept_gets_a_floor() {
+        activate();
+        for seq in 1..=(SHOWABLE_KEPT as u64 + 10) {
+            message_stored(&format!("pfm-xout2-{seq}-1700000000000"));
+        }
+        let behind = outdated(&shown("out2", 2));
+        assert_eq!(behind["out2"]["newestSeq"], SHOWABLE_KEPT as u64 + 10);
+        assert_eq!(behind["out2"]["newerSeq"], 11);
+        assert_eq!(behind["out2"]["floor"], true);
+        assert_eq!(outdated(&shown("out2", 11))["out2"]["floor"], false);
     }
 
     #[test]

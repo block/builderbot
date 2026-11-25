@@ -114,13 +114,28 @@ function finish(code, why) {
   const resultFile = join(runDir, 'out', 'result.json');
   let failed = code !== 0;
   if (existsSync(resultFile)) {
+    // The driver writes this file as it goes, so a run that failed or was
+    // stopped still has every scenario it finished.
     const result = JSON.parse(readFileSync(resultFile, 'utf8'));
     result.safety.leftoverProcesses = leftover;
+    if (!result.complete && !result.failure)
+      result.failure = { phase: 'running', message: why ?? 'the driver stopped' };
     writeFileSync(`${base}.json`, JSON.stringify(result, null, 2));
     writeFileSync(`${base}.md`, summarize(result));
     console.log(summarize(result));
     say(`result: ${base}.json`);
     say(`summary: ${base}.md`);
+    if (result.failure) {
+      const measured = Object.values(result.scenarios).filter((s) => !s.failure).length;
+      say(
+        `FAILED; the result holds the ${measured} scenario${measured === 1 ? '' : 's'} measured before the failure`
+      );
+      failed = true;
+    }
+    if (result.checks && !result.checks.ok) {
+      say(`FAILED a shown-against-stored check: ${result.checks.failed.join(', ')}`);
+      failed = true;
+    }
     if (
       result.safety.openUnderRealStaged.length ||
       result.safety.unexpectedExecutables.length ||
@@ -157,12 +172,18 @@ if (params.frontend === 'browser' && !browser) {
 }
 
 say(`run directory: ${runDir}`);
-const built = build({
-  appDir,
-  profile: params.profile,
-  port: params.port,
-  skipBuild: params.skipBuild,
-});
+let built;
+try {
+  built = build({
+    appDir,
+    profile: params.profile,
+    port: params.port,
+    skipBuild: params.skipBuild,
+    targetDir: params.targetDir,
+  });
+} catch (error) {
+  finish(2, `the build failed: ${error.message}`);
+}
 const staged = stage({ runDir, built, profile: params.profile });
 const configFile = join(runDir, 'config.json');
 writeFileSync(

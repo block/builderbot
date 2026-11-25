@@ -10,11 +10,13 @@
 //! - serves, on `127.0.0.1` only, the web API and the built frontend (the
 //!   web server proper is stubbed, see `web_server::start`) plus the
 //!   `/perf/*` routes in [`server`]: evaluate a script in the desktop
-//!   webviews, hand a result back, read and reset the counters;
+//!   webviews, hand a result back, read and reset the counters, ask
+//!   whether the store holds something newer than a row shows;
 //! - records the counters in [`metrics`]: commands served over that port,
 //!   session stream frames, how long the store's connection lock was waited
-//!   for and held, and how long after a fake agent stamped a piece of output
-//!   its row was written.
+//!   for and held, how long after a fake agent stamped a piece of output
+//!   its row was written, and when the latest stamps a row can show were
+//!   stored.
 //!
 //! The touch points outside this module are one line each: the call in
 //! `lib.rs`'s setup, the lock's type in `store/mod.rs`, the two message

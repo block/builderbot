@@ -1,9 +1,13 @@
-//! A lock-free histogram of durations, two buckets to the octave.
+//! A lock-free histogram of durations, sixteen buckets to the octave.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
+/// Each octave is cut into `2^SUB_BITS` equal buckets, so a bucket is at
+/// most one sixteenth as wide as its lower bound.
+const SUB_BITS: u32 = 4;
+const SUB: usize = 1 << SUB_BITS;
 /// Covers 1 µs to over an hour; anything longer lands in the last bucket.
-const BUCKETS: usize = 64;
+const BUCKETS: usize = 30 * SUB;
 
 pub(super) struct Histogram {
     count: AtomicU64,
@@ -39,8 +43,9 @@ impl Histogram {
     }
 
     /// `buckets[i]` counts the values below `upper_us(i)` and at or above
-    /// the bound before it. The harness derives percentiles from them, so
-    /// one is exact to half an octave.
+    /// the bound before it. The harness derives percentiles from them as
+    /// the upper bound of the bucket, so one is never under the true value
+    /// and over it by less than 6.25 %.
     pub(super) fn snapshot(&self) -> serde_json::Value {
         let buckets: Vec<[u64; 2]> = self
             .buckets
@@ -58,39 +63,73 @@ impl Histogram {
     }
 }
 
-/// Bucket `2k` holds `[2^k, 1.5 * 2^k)` and `2k + 1` the rest of the octave.
-/// The first octave is the one value 1, which has no lower half.
+/// Values below `SUB` have a bucket each. From there, octave `2^k` is cut
+/// into `SUB` buckets of `2^(k - SUB_BITS)` each.
 fn bucket(us: u64) -> usize {
-    let us = us.max(1);
-    let octave = 63 - us.leading_zeros() as usize;
-    let upper_half = octave == 0 || us & (1 << (octave - 1)) != 0;
-    (octave * 2 + usize::from(upper_half)).min(BUCKETS - 1)
+    if us < SUB as u64 {
+        return us as usize;
+    }
+    let octave = 63 - us.leading_zeros();
+    let sub = (us >> (octave - SUB_BITS)) as usize & (SUB - 1);
+    ((octave - SUB_BITS + 1) as usize * SUB + sub).min(BUCKETS - 1)
 }
 
+/// The first value above bucket `index`.
 fn upper_us(index: usize) -> u64 {
-    let octave = (index / 2) as u32;
-    if index % 2 == 0 {
-        (1u64 << octave) + (1u64 << octave) / 2
-    } else {
-        1u64 << (octave + 1)
+    if index < SUB {
+        return index as u64 + 1;
     }
+    let octave = (index / SUB) as u32 + SUB_BITS - 1;
+    let sub = (index % SUB) as u64;
+    (1u64 << octave) + ((sub + 1) << (octave - SUB_BITS))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bucket, upper_us, Histogram};
+    use super::{bucket, upper_us, Histogram, BUCKETS};
 
     #[test]
     fn a_value_is_below_its_buckets_upper_bound_and_not_below_the_one_before() {
         for us in [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 999, 1_000, 1_500, 250_000, 3_000_000,
+            0,
+            1,
+            2,
+            3,
+            15,
+            16,
+            17,
+            31,
+            32,
+            33,
+            999,
+            1_000,
+            1_500,
+            196_000,
+            250_000,
+            3_000_000,
+            3_600_000_000,
         ] {
             let index = bucket(us);
-            assert!(us.max(1) < upper_us(index), "{us} in bucket {index}");
+            assert!(us < upper_us(index), "{us} in bucket {index}");
             if index > 0 {
-                assert!(us.max(1) >= upper_us(index - 1), "{us} in bucket {index}");
+                assert!(us >= upper_us(index - 1), "{us} in bucket {index}");
             }
         }
+    }
+
+    #[test]
+    fn a_bucket_is_at_most_a_sixteenth_wider_than_its_lower_bound() {
+        for index in 16..BUCKETS - 1 {
+            let (lower, upper) = (upper_us(index - 1), upper_us(index));
+            assert!(upper > lower, "bucket {index}");
+            assert!(
+                (upper - lower) * 16 <= lower,
+                "bucket {index}: {lower}..{upper}"
+            );
+        }
+        // An hour fits below the last bucket, which takes everything longer.
+        assert!(bucket(3_600_000_000) < BUCKETS - 1);
+        assert_eq!(bucket(u64::MAX), BUCKETS - 1);
     }
 
     #[test]

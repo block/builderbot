@@ -61,15 +61,38 @@ export function frontendResult({ collected, usage, seconds, streamSupported }) {
   // The first gap after a reset spans the reset itself.
   const gaps = probe.gaps.slice(1);
   const commands = network ? network.commands : probe.tauri ? probe.ipc : null;
+  // The event socket is not compressed unless the handshake said so; then a
+  // frame's size on the wire is its size, and otherwise it is not known.
+  const socketWire = (bytes) => (network.socketCompressed ? null : bytes);
+  const eventBytes = network ? total(network.events, 'bytes') : null;
+  const commandTotals = commands && {
+    count: total(commands, 'count'),
+    bytes: total(commands, 'bytes'),
+    // Tauri IPC has no transport encoding: what is decoded is what was sent.
+    wireBytes: network ? total(commands, 'wireBytes') : total(commands, 'bytes'),
+  };
   return {
     commands,
-    commandTotals: commands && { count: total(commands, 'count'), bytes: total(commands, 'bytes') },
+    commandTotals,
     events: network ? network.events : null,
     streamFrames: network && streamSupported ? network.stream : null,
     streamTotals:
       network && streamSupported
-        ? { frames: total(network.stream, 'frames'), bytes: total(network.stream, 'bytes') }
+        ? {
+            frames: total(network.stream, 'frames'),
+            bytes: total(network.stream, 'bytes'),
+            wireBytes: socketWire(total(network.stream, 'bytes')),
+          }
         : null,
+    // Everything the page was sent, counted alike whichever way it came:
+    // command responses plus every frame on the event socket (session
+    // stream frames among them), once as the page reads it and once as it
+    // crossed the transport. Browser only: the desktop's channels are not seen.
+    received: network && {
+      bytes: commandTotals.bytes + eventBytes,
+      wireBytes: network.socketCompressed ? null : commandTotals.wireBytes + eventBytes,
+      socketCompressed: network.socketCompressed,
+    },
     longTasks: probe.longTaskSupported
       ? {
           count: probe.longTasks.length,
@@ -99,8 +122,30 @@ export function frontendResult({ collected, usage, seconds, streamSupported }) {
   };
 }
 
-/** What the fake agents wrote during the window, from their counter files (written once a second). */
-export function agentLoad(before, after, seconds) {
+/**
+ * Which of the viewed project's rows were on the page, from `ui.rows` at
+ * both ends of the window. A row counts as mounted only if it was there at
+ * both: a card mounts its timeline near the visible part of the scroll area
+ * and drops it again when scrolled away.
+ */
+export function mountedRows(atStart, atEnd) {
+  const there = (rows) => new Set(rows.filter((row) => row.row).map((row) => row.tag));
+  const [start, end] = [there(atStart), there(atEnd)];
+  const both = atStart.map((row) => row.tag).filter((tag) => start.has(tag) && end.has(tag));
+  return {
+    mounted: both.length,
+    mountedAtStart: start.size,
+    mountedAtEnd: end.size,
+    notMounted: atStart.map((row) => row.tag).filter((tag) => !both.includes(tag)),
+  };
+}
+
+/**
+ * What the fake agents wrote during the window, from their counter files
+ * (written once a second). `rateShare` is that against `expectedPerSecond`,
+ * what they write when nothing holds them back.
+ */
+export function agentLoad(before, after, seconds, expectedPerSecond = null) {
   const sum = (field) =>
     Object.keys(after).reduce(
       (total, tag) => total + (after[tag][field] - (before[tag]?.[field] ?? 0)),
@@ -111,6 +156,8 @@ export function agentLoad(before, after, seconds) {
     sessions: Object.keys(after).length,
     chunks,
     chunksPerSecond: round(chunks / seconds),
+    expectedChunksPerSecond: expectedPerSecond === null ? null : round(expectedPerSecond),
+    rateShare: expectedPerSecond > 0 ? round(chunks / seconds / expectedPerSecond, 3) : null,
     toolCalls: sum('toolCalls'),
     plans: sum('plans'),
     bytes: sum('bytes'),

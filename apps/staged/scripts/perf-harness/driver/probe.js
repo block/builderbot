@@ -7,7 +7,9 @@
 (() => {
   if (window.__stagedPerf) return;
   // What the fake agent writes into every piece of output: kind (x text,
-  // t tool call), session tag, sequence number, epoch milliseconds.
+  // t tool call), session tag, sequence number, epoch milliseconds. The
+  // output of a tool call in flight is stamped `o` and is not read here: it
+  // shows in no subtitle, and in a chat it is not the latency of anything.
   const STAMP = /pfm-([xt])([a-z0-9]+)-(\d+)-(\d{13})/g;
   const SCAN_TAIL = 65536;
   const fresh = () => ({ subtitle: { x: [], t: [] }, chat: { x: [], t: [] } });

@@ -1,6 +1,7 @@
 // The scenarios: which sessions stream and what the page shows while a
-// window is measured. Every scenario views the first project; the other
-// projects' sessions are load the page does not look at.
+// window is measured. Every scenario views the first of the projects it is
+// given, which the driver seeds afresh for it; the other projects' sessions
+// are load the page does not look at.
 
 export const SCENARIOS = {
   subtitles: {

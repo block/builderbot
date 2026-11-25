@@ -21,8 +21,10 @@ export function distribution(values, places = 1) {
 /**
  * The same figures in milliseconds from one of the app's histograms:
  * `{ count, sumUs, maxUs, buckets: [[upperUs, n], ...] }`. A percentile is
- * the upper bound of the bucket it falls in, so it is exact to half an
- * octave and never under the true value; `max` and `mean` are exact.
+ * the upper bound of the bucket it falls in, so it is never under the true
+ * value and over it by less than 6.25 % (sixteen buckets to the octave; the
+ * first version of the app's hooks had two, so within 41 %). `max` and
+ * `mean` are exact.
  */
 export function histogramMs(histogram) {
   if (!histogram || histogram.count === 0) return null;
@@ -45,7 +47,12 @@ export function histogramMs(histogram) {
   };
 }
 
-/** CPU and memory of a set of processes over a window, from `{ t, cpuSeconds, rssKb }` samples. */
+/**
+ * CPU and memory of a set of processes over a window, from
+ * `{ t, cpuSeconds, rssKb }` samples taken once a second. `samples` says how
+ * many there were: far fewer than the window's seconds means the sampler
+ * itself was starved and the figures rest on little.
+ */
 export function processUsage(samples, seconds) {
   if (samples.length < 2) return null;
   const cpu = samples[samples.length - 1].cpuSeconds - samples[0].cpuSeconds;
@@ -56,6 +63,7 @@ export function processUsage(samples, seconds) {
     rssMaxMb: round(Math.max(...rss), 1),
     rssMeanMb: round(rss.reduce((a, b) => a + b, 0) / rss.length, 1),
     processesMax: Math.max(...samples.map((s) => s.processes)),
+    samples: samples.length,
   };
 }
 

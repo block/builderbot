@@ -3,8 +3,12 @@
 
 /** The figures worth reading first, as paths inside one scenario. */
 export const HEADLINES = [
+  ['host.loadAverage1mStart', 'machine load average at the start'],
   ['load.sessions', 'sessions streaming'],
   ['load.chunksPerSecond', 'agent chunks / s'],
+  ['load.rateShare', 'share of the rate asked for'],
+  ['load.viewedSessions', 'sessions running in the viewed project'],
+  ['load.rows.mounted', 'their rows mounted on the page'],
   ['backend.process.cpuPercent', 'app CPU %'],
   ['backend.process.cpuSeconds', 'app CPU s'],
   ['backend.process.rssMaxMb', 'app RSS max MB'],
@@ -12,7 +16,7 @@ export const HEADLINES = [
   ['backend.commandTotals.count', 'commands served'],
   ['backend.commandTotals.wireBytes', 'command bytes sent (wire)'],
   ['backend.streamTotals.frames', 'stream frames sent'],
-  ['backend.streamTotals.bytes', 'stream bytes sent (JSON)'],
+  ['backend.streamTotals.bytes', 'stream bytes sent (JSON, before the transport)'],
   ['backend.storeLock.waitMs.count', 'store lock takes'],
   ['backend.storeLock.waitMs.p95', 'store lock wait p95 ms'],
   ['backend.storeLock.waitMs.p99', 'store lock wait p99 ms'],
@@ -25,8 +29,12 @@ export const HEADLINES = [
   ['backend.agentWriteToStoredMs.tool.p95', 'agent tool call → stored p95 ms'],
   ['frontend.commandTotals.count', 'page calls'],
   ['frontend.commandTotals.bytes', 'page call bytes (decoded)'],
+  ['frontend.commandTotals.wireBytes', 'page call bytes (wire)'],
   ['frontend.streamTotals.frames', 'page stream frames'],
-  ['frontend.streamTotals.bytes', 'page stream bytes'],
+  ['frontend.streamTotals.bytes', 'page stream bytes (decoded)'],
+  ['frontend.streamTotals.wireBytes', 'page stream bytes (wire)'],
+  ['frontend.received.bytes', 'page bytes received, calls and socket (decoded)'],
+  ['frontend.received.wireBytes', 'page bytes received, calls and socket (wire)'],
   ['frontend.longTasks.count', 'long tasks'],
   ['frontend.longTasks.totalMs', 'long task ms'],
   ['frontend.frameGapsMs.p50', 'frame gap p50 ms'],
@@ -34,9 +42,15 @@ export const HEADLINES = [
   ['frontend.frameGapsMs.p99', 'frame gap p99 ms'],
   ['frontend.frameGapsMs.max', 'frame gap max ms'],
   ['frontend.timerLagMs.p95', 'timer lag p95 ms'],
-  ['frontend.agentWriteToDomMs.subtitle.text.p50', 'agent text → subtitle p50 ms'],
-  ['frontend.agentWriteToDomMs.subtitle.text.p95', 'agent text → subtitle p95 ms'],
+  ['frontend.subtitleStaleness.outdatedMs.mean', 'subtitle out of date, mean ms'],
+  ['frontend.subtitleStaleness.outdatedMs.p50', 'subtitle out of date p50 ms'],
+  ['frontend.subtitleStaleness.outdatedMs.p95', 'subtitle out of date p95 ms'],
+  ['frontend.subtitleStaleness.outdatedMs.max', 'subtitle out of date max ms'],
+  ['frontend.subtitleStaleness.outdatedMs.count', 'subtitle staleness samples'],
+  ['frontend.agentWriteToDomMs.subtitle.text.count', 'subtitle text updates shown'],
+  ['frontend.agentWriteToDomMs.subtitle.text.p50', 'agent text → subtitle p50 ms (of those shown)'],
   ['frontend.agentWriteToDomMs.subtitle.tool.p50', 'agent tool call → subtitle p50 ms'],
+  ['frontend.agentWriteToDomMs.subtitle.tool.p95', 'agent tool call → subtitle p95 ms'],
   ['frontend.agentWriteToDomMs.chat.text.p50', 'agent text → chat p50 ms'],
   ['frontend.agentWriteToDomMs.chat.text.p95', 'agent text → chat p95 ms'],
   ['frontend.agentWriteToDomMs.chat.text.count', 'chat text chunks seen'],
@@ -67,7 +81,8 @@ const table = (header, rows) => {
     `| ${row.map((cell, i) => (i === 0 ? String(cell).padEnd(widths[i]) : String(cell).padStart(widths[i]))).join(' | ')} |`;
   return [
     line(header),
-    `| ${widths.map((w, i) => (i === 0 ? '-'.repeat(w) : '-'.repeat(w - 1) + ':')).join(' | ')} |`,
+    // A column with nothing in it (two runs that do not differ) is still a column.
+    `| ${widths.map((w, i) => (i === 0 ? '-'.repeat(Math.max(1, w)) : '-'.repeat(Math.max(1, w - 1)) + ':')).join(' | ')} |`,
     ...rows.map(line),
   ].join('\n');
 };
@@ -84,31 +99,94 @@ export function numericLeaves(object, prefix = '') {
   return out;
 }
 
+/** One line for a check: what was compared and what did not match. */
+function checkLine(name, check, outcome) {
+  const verdict = outcome.ok ? 'ok' : 'FAILED';
+  if (check === 'subtitles') {
+    const problems = [
+      outcome.late.length &&
+        `${outcome.lateCount ?? outcome.late.length} rows never showed what the store held (${outcome.late[0]})`,
+      outcome.unknown.length &&
+        `${outcome.unknownCount ?? outcome.unknown.length} stamps shown that the store does not hold (${outcome.unknown[0]})`,
+      outcome.rows === 0 && 'no row to check',
+    ].filter(Boolean);
+    return `- ${name}, subtitles: ${verdict}; ${outcome.rows} row${outcome.rows === 1 ? '' : 's'} over ${outcome.rounds} rounds, each showing what the store held within ${show(outcome.caughtUpMsMax)} ms${problems.length ? `; ${problems.join('; ')}` : ''}`;
+  }
+  const problems = [
+    outcome.unknown.length &&
+      `${outcome.unknownCount ?? outcome.unknown.length} shown that the store does not hold (first seq ${outcome.unknown[0]})`,
+    outcome.missing.length &&
+      `${outcome.missingCount ?? outcome.missing.length} stored and not shown (first seq ${outcome.missing[0]})`,
+    outcome.shown === 0 && 'no text stamp in the chat',
+  ].filter(Boolean);
+  return `- ${name}, chat: ${verdict}; ${outcome.shown} text stamps shown, ${outcome.stored} stored, newest ${show(outcome.newestShown)} against ${show(outcome.newestStored)}${problems.length ? `; ${problems.join('; ')}` : ''}`;
+}
+
 export function summarize(result) {
-  const names = Object.keys(result.scenarios);
+  // A scenario that failed has no figures; it gets a line, not a column.
+  const names = Object.keys(result.scenarios).filter((name) => !result.scenarios[name].failure);
   const rows = HEADLINES.map(([path, label]) => [
     label,
     ...names.map((name) => show(at(result.scenarios[name], path))),
   ]).filter((row) => row.slice(1).some((cell) => cell !== 'absent'));
   const safety = result.safety;
+  const failed = Object.entries(result.scenarios).filter(([, scenario]) => scenario.failure);
+  const notRun = result.notRun ?? [];
+  const status = result.failure
+    ? [
+        `**FAILED while ${result.failure.phase}: ${result.failure.message}**`,
+        '',
+        names.length
+          ? `The figures below are from the ${names.length === 1 ? 'scenario' : `${names.length} scenarios`} measured before that (${names.join(', ')}).${notRun.length ? ` Not run: ${notRun.join(', ')}.` : ''}`
+          : `Nothing was measured.${notRun.length ? ` Not run: ${notRun.join(', ')}.` : ''}`,
+        '',
+      ]
+    : result.complete === false
+      ? ['**INCOMPLETE: the run was stopped before it finished.**', '']
+      : [];
+  const checks = names.flatMap((name) =>
+    Object.entries(result.scenarios[name].checks ?? {}).map(([check, outcome]) =>
+      checkLine(name, check, outcome)
+    )
+  );
+  const loadAverage = (values) => (values ? values.map((n) => n.toFixed(1)).join(' ') : 'unknown');
   return [
     `# Staged load test: ${result.label}`,
     '',
+    ...status,
     `- tree: ${result.tree.head?.slice(0, 12) ?? 'unknown'} (${result.tree.branch ?? '?'}${result.tree.dirty ? ', with uncommitted changes' : ''}), ${result.params.profile} build`,
-    `- frontend measured: ${result.frontend === 'browser' ? 'headless Chromium over the loopback web server' : 'the desktop webview over Tauri IPC'}`,
-    `- session stream: ${result.streamSupported ? 'present in this tree' : 'not in this tree (stream figures absent)'}`,
+    `- frontend measured: ${result.frontend === 'browser' ? `headless Chromium over the loopback web server, ${result.params.viewportHeight ?? 1000} px tall` : 'the desktop webview over Tauri IPC'}`,
+    `- session stream: ${result.streamSupported === null ? 'not asked' : result.streamSupported ? 'present in this tree' : 'not in this tree (stream figures absent)'}`,
     `- localStorage overrides: ${Object.keys(result.params.localStorage).length ? JSON.stringify(result.params.localStorage) : 'none'}`,
     `- load: ${result.params.projects} projects × ${result.params.sessionsPerProject} sessions, ${result.params.running || 'all'} running, ${result.params.rate} chunks/s background, ${result.params.chatRate} chunks/s chat, ${result.params.duration}s per scenario`,
-    `- machine load average: ${result.host.loadAverageStart.map((n) => n.toFixed(1)).join(' ')} at the start, ${result.host.loadAverageEnd.map((n) => n.toFixed(1)).join(' ')} at the end`,
+    `- machine load average: ${loadAverage(result.host.loadAverageStart)} at the start, ${loadAverage(result.host.loadAverageEnd)} at the end`,
     '',
-    table(['', ...names], rows),
-    '',
+    ...(names.length ? [table(['', ...names], rows), ''] : []),
+    ...(failed.length
+      ? [
+          '## Failed',
+          '',
+          ...failed.map(
+            ([name, scenario]) =>
+              `- ${name}, while ${scenario.failure.phase}: ${scenario.failure.message}`
+          ),
+          '',
+        ]
+      : []),
+    ...(checks.length ? ['## Shown against stored', '', ...checks, ''] : []),
+    ...(result.warnings?.length
+      ? ['## Read before trusting the figures', '', ...result.warnings.map((w) => `- ${w}`), '']
+      : []),
     '## Safety',
     '',
-    `- data directory: ${safety.dataDir} (inside the run directory ${safety.runDir})`,
-    `- files open under the real ${safety.realStagedDir}: ${safety.openUnderRealStaged.length} in ${safety.openFileSamples} samples of the run's processes${safety.openUnderRealStaged.length ? `: ${safety.openUnderRealStaged.join('; ')}` : ''}`,
-    `- programs from outside the run directory and the system: ${safety.unexpectedExecutables.length ? safety.unexpectedExecutables.join('; ') : 'none'}`,
-    `- processes left after the run: ${safety.leftoverProcesses.length ? safety.leftoverProcesses.map((p) => `${p.pid} ${p.args}`).join('; ') : 'none'}`,
+    ...(safety
+      ? [
+          `- data directory: ${safety.dataDir ?? 'the app never reported one'} (inside the run directory ${safety.runDir})`,
+          `- files open under the real ${safety.realStagedDir}: ${safety.openUnderRealStaged.length} in ${safety.openFileSamples} samples of the run's processes${safety.openUnderRealStaged.length ? `: ${safety.openUnderRealStaged.join('; ')}` : ''}`,
+          `- programs from outside the run directory and the system: ${safety.unexpectedExecutables.length ? safety.unexpectedExecutables.join('; ') : 'none'}`,
+          `- processes left after the run: ${safety.leftoverProcesses ? (safety.leftoverProcesses.length ? safety.leftoverProcesses.map((p) => `${p.pid} ${p.args}`).join('; ') : 'none') : 'not checked'}`,
+        ]
+      : ['- the run stopped before anything was checked']),
     '',
   ].join('\n');
 }
@@ -125,6 +203,16 @@ export function compare(a, b, { all = false } = {}) {
       JSON.stringify(a.params[key]) !== JSON.stringify(b.params[key])
   );
   if (a.frontend !== b.frontend) out.push('warning: the two runs measured different frontends');
+  for (const [side, result] of [
+    ['A', a],
+    ['B', b],
+  ]) {
+    if (result.failure) out.push(`warning: ${side} failed: ${result.failure.message}`);
+    if (result.checks && !result.checks.ok)
+      out.push(
+        `warning: ${side} showed something its store did not hold: ${result.checks.failed.join(', ')}`
+      );
+  }
   if (differing.length)
     out.push(
       `warning: the two runs differ in ${differing.join(', ')}; their figures are not like for like`
@@ -134,6 +222,14 @@ export function compare(a, b, { all = false } = {}) {
     out.push('', `## ${name}`, '');
     if (!left || !right) {
       out.push(`only in ${left ? 'A' : 'B'}`);
+      continue;
+    }
+    if (left.failure || right.failure) {
+      for (const [side, scenario] of [
+        ['A', left],
+        ['B', right],
+      ])
+        if (scenario.failure) out.push(`failed in ${side}: ${scenario.failure.message}`);
       continue;
     }
     const paths = all

@@ -19,6 +19,8 @@ import { sleep, until } from './util.mjs';
 
 const PROBE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'probe.js'), 'utf8');
 
+const VIEWPORT_WIDTH = 1500;
+
 /** Sets the run's localStorage overrides before any app code reads them. */
 const overridesScript = (overrides) =>
   `(() => { try { for (const [key, value] of Object.entries(${JSON.stringify(overrides)})) localStorage.setItem(key, value); } catch (_) {} })();`;
@@ -32,8 +34,10 @@ export async function openBrowserFrontend({
   env,
   logFile,
   localStorage,
+  viewportHeight,
 }) {
-  const browser = await launchBrowser({ executable, profileDir, env, logFile });
+  const [width, height] = [VIEWPORT_WIDTH, viewportHeight];
+  const browser = await launchBrowser({ executable, profileDir, env, logFile, width, height });
   const page = await browser.newPage();
   const network = networkRecorder(browser, page.sessionId);
   await page.send('Page.enable');
@@ -43,8 +47,8 @@ export async function openBrowserFrontend({
   // The build ships a service worker; a measured page must not be served by one.
   await page.send('Network.setBypassServiceWorker', { bypass: true });
   await page.send('Emulation.setDeviceMetricsOverride', {
-    width: 1500,
-    height: 1000,
+    width,
+    height,
     deviceScaleFactor: 1,
     mobile: false,
   });
@@ -108,6 +112,9 @@ export async function openBrowserFrontend({
 /** Calls, events and stream frames as the page receives them, from the DevTools network events. */
 function networkRecorder(browser, sessionId) {
   const requests = new Map();
+  // Whether any WebSocket of the page negotiated compression. Decided at the
+  // handshake, before the first window, so it is not part of the record.
+  let socketCompressed = false;
   let record;
   const reset = () => (record = { commands: {}, events: {}, stream: {} });
   reset();
@@ -138,6 +145,15 @@ function networkRecorder(browser, sessionId) {
     })
   );
   browser.on(
+    'Network.webSocketHandshakeResponseReceived',
+    mine(({ response }) => {
+      const extensions = Object.entries(response.headers ?? {}).find(
+        ([name]) => name.toLowerCase() === 'sec-websocket-extensions'
+      );
+      if (extensions && /permessage-deflate/i.test(extensions[1])) socketCompressed = true;
+    })
+  );
+  browser.on(
     'Network.webSocketFrameReceived',
     mine(({ response }) => {
       const text = response.payloadData;
@@ -160,7 +176,7 @@ function networkRecorder(browser, sessionId) {
     })
   );
   // A copy: the live record keeps counting after the window closes.
-  return { reset, take: () => structuredClone(record) };
+  return { reset, take: () => ({ ...structuredClone(record), socketCompressed }) };
 }
 
 export async function openDesktopFrontend({ api, localStorage }) {

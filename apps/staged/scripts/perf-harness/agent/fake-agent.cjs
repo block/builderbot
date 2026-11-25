@@ -12,8 +12,10 @@
 //
 // Every piece of output carries a stamp, `pfm-<kind><tag>-<seq>-<epoch ms>`,
 // taken as the piece is written to stdout: kind `x` for text, `t` for a tool
-// call. The app's harness build reads it when the row is stored and the page
-// probe reads it when it reaches the screen.
+// call and `o` for a tool call's output. A session's row shows its newest
+// `x` or `t` stamp as its subtitle and never an `o`. The app's harness build
+// reads a stamp when the row is stored and the page probe reads it when it
+// reaches the screen; one sequence runs through all three kinds.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -78,8 +80,10 @@ async function toolCall(sessionId, cwd, profile, turn, cancelled) {
   const large = profile.largeToolEvery > 0 && n % profile.largeToolEvery === 0;
   const bytes = large ? profile.largeToolBytes : profile.toolBytes;
   const toolCallId = `tool-${state.tag}-${n}`;
-  const stamp = () => `pfm-t${state.tag}-${++state.seq}-${Date.now()}`;
+  const stamp = (kind) => `pfm-${kind}${state.tag}-${++state.seq}-${Date.now()}`;
   const read = n % 2 === 0;
+  // One stamp for the call, wherever a view takes its label from.
+  const call = stamp('t');
   update(sessionId, {
     sessionUpdate: 'tool_call',
     toolCallId,
@@ -87,14 +91,14 @@ async function toolCall(sessionId, cwd, profile, turn, cancelled) {
     kind: read ? 'read' : 'execute',
     status: 'in_progress',
     rawInput: read
-      ? { file_path: `${cwd}/src/${stamp()}.ts` }
-      : { command: `run ${stamp()}`, description: `Run ${stamp()}` },
+      ? { file_path: `${cwd}/src/${call}.ts` }
+      : { command: `run ${call}`, description: `Run ${call}` },
   });
   // In flight: the output so far is on the row, as a real agent's is, and
-  // grows until the call settles.
-  const steps = Math.max(1, Math.round(profile.toolMs / 500));
+  // grows every `toolStepMs` until the call settles.
+  const steps = Math.max(1, Math.round(profile.toolMs / (profile.toolStepMs || 500)));
   for (let step = 1; step <= steps && profile.toolMs > 0 && !cancelled(); step++) {
-    const text = body(Math.ceil((bytes * step) / steps), toolCallId) + `\n${stamp()}`;
+    const text = body(Math.ceil((bytes * step) / steps), toolCallId) + `\n${stamp('o')}`;
     state.bytes += text.length;
     update(sessionId, {
       sessionUpdate: 'tool_call_update',
@@ -104,7 +108,7 @@ async function toolCall(sessionId, cwd, profile, turn, cancelled) {
     });
     await sleep(profile.toolMs / steps);
   }
-  const text = body(bytes, toolCallId) + `\n${stamp()}`;
+  const text = body(bytes, toolCallId) + `\n${stamp('o')}`;
   state.bytes += text.length;
   update(sessionId, {
     sessionUpdate: 'tool_call_update',

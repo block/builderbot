@@ -350,6 +350,10 @@ struct RunningSession {
     /// way out of every hold, so this returns to "not holding" without needing
     /// its own reset.
     background_hold: std::sync::Mutex<acp_client::BackgroundHoldStatus>,
+    /// This entry's hold on the process activity that keeps macOS from
+    /// throttling Staged while any session runs (see [`crate::process_activity`]).
+    /// Released when the entry is dropped, on whatever path removes it.
+    _activity: crate::process_activity::SessionActivity,
 }
 
 impl RunningSession {
@@ -513,6 +517,9 @@ impl SessionRegistry {
     /// otherwise honour.
     fn register(&self, session_id: &str) -> (CancellationToken, RegistrationEpoch) {
         let token = CancellationToken::new();
+        // Taken before the registry lock: the first holder begins the
+        // activity, which is a call into Foundation.
+        let activity = crate::process_activity::hold_for_session();
         let mut inner = self.inner.lock().unwrap();
         let epoch = RegistrationEpoch(inner.next_epoch);
         inner.next_epoch += 1;
@@ -527,6 +534,7 @@ impl SessionRegistry {
             detach_reason: std::sync::Mutex::new(None),
             reattach_detach: std::sync::Mutex::new(None),
             background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
+            _activity: activity,
         });
         let pending = inner.pending_cancellations.remove(session_id);
         let carried = pending.or_else(|| {
@@ -561,7 +569,11 @@ impl SessionRegistry {
             .get(session_id)
             .is_some_and(|running| running.epoch == epoch)
         {
-            inner.running.remove(session_id);
+            let removed = inner.running.remove(session_id);
+            // Dropped after the lock: the last entry out ends the process
+            // activity, which is a call into Foundation.
+            drop(inner);
+            drop(removed);
         }
     }
 
@@ -587,10 +599,14 @@ impl SessionRegistry {
         {
             return None;
         }
-        inner
-            .running
-            .remove(session_id)
-            .and_then(|running| running.accepted_cancellation())
+        let removed = inner.running.remove(session_id);
+        let accepted = removed
+            .as_ref()
+            .and_then(|running| running.accepted_cancellation());
+        // Dropped after the lock, as in `deregister`.
+        drop(inner);
+        drop(removed);
+        accepted
     }
 
     /// Mark the entry `epoch` registered as having decided its terminal
@@ -630,7 +646,13 @@ impl SessionRegistry {
     fn deregister_reporting_cancellation(&self, session_id: &str) -> Option<CompletionReason> {
         let mut inner = self.inner.lock().unwrap();
         let removed = inner.running.remove(session_id);
-        removed.and_then(|running| running.accepted_cancellation())
+        let accepted = removed
+            .as_ref()
+            .and_then(|running| running.accepted_cancellation());
+        // Dropped after the lock, as in `deregister`.
+        drop(inner);
+        drop(removed);
+        accepted
     }
 
     /// Mark `session_id` as owned by a task that will write its terminal

@@ -43,6 +43,7 @@ pub(crate) mod pipeline_dependency;
 pub mod pr_detection;
 pub mod pr_poll_scheduler;
 mod preference_events;
+pub(crate) mod process_activity;
 pub mod project_activity;
 pub mod project_commands;
 pub mod project_mcp;

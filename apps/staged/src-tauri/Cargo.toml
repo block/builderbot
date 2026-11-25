@@ -119,6 +119,16 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFCGTypes",
     "CFData",
 ] }
+# Process activity while sessions run (process_activity.rs): keeps App Nap and
+# background throttling off Staged's session threads. Both crates are already
+# in the lock via tauri; the features are the minimum for NSProcessInfo's
+# beginActivityWithOptions:reason: / endActivity:.
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSProcessInfo",
+    "NSString",
+] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

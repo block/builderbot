@@ -42,21 +42,17 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use acp_client::{McpServer, McpServerHttp};
-use axum::Router;
 use base64::Engine as _;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::service::RequestContext;
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-};
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
 
 use crate::agent::AcpDriver;
+use crate::mcp_http_server::{run_blocking, serve_mcp, McpHttpServer};
 use crate::mcp_progress::send_progress_keepalives;
 use crate::pikchr_subsession::{CancelReason, GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
 use crate::session_runner::{ExternalSessionRegistration, SessionRegistry};
@@ -866,7 +862,12 @@ rendered PNG preview you may open as an optional final check."
         let user_cancel = registration.token().clone();
 
         let inner_session_id = session.id.clone();
-        persist_pikchr_child_session(&self.store, &session)
+        // The row write waits on the store lock; do it on the blocking pool
+        // rather than on the shared-runtime worker serving this call.
+        let persist_store = Arc::clone(&self.store);
+        run_blocking(move || persist_pikchr_child_session(&persist_store, &session))
+            .await
+            .and_then(|persisted| persisted)
             .map_err(|e| ErrorData::internal_error(e, None))?;
         announce_pikchr_child_session(&self.store, &self.parent_session_id, &inner_session_id);
         let store = Arc::clone(&self.store);
@@ -930,16 +931,17 @@ rendered PNG preview you may open as an optional final check."
             let result = local.block_on(&rt, async move {
                 // The last-render slot the specialist's `render_pikchr` tool
                 // writes and the host loop takes from on acceptance. The
-                // preview server's handle drops with this worker's runtime.
+                // preview server stops when its guard drops with this future.
                 let slot = Arc::new(LastRenderSlot::new());
-                let (preview_port, _preview_server) =
-                    match start_pikchr_preview_mcp_server(scale, Arc::clone(&slot)).await {
-                        Ok(started) => started,
-                        Err(e) => {
-                            mark_pikchr_child_session_error(&worker_store, &worker_session_id, &e);
-                            return Err(e);
-                        }
-                    };
+                let preview_server = match start_pikchr_preview_mcp_server(scale, Arc::clone(&slot))
+                {
+                    Ok(server) => server,
+                    Err(e) => {
+                        mark_pikchr_child_session_error(&worker_store, &worker_session_id, &e);
+                        return Err(e);
+                    }
+                };
+                let preview_port = preview_server.port();
                 let preview_mcp_server = || {
                     vec![McpServer::Http(McpServerHttp::new(
                         "pikchr-preview",
@@ -1113,13 +1115,20 @@ accepted a render, so the diagram run was cancelled.",
                 unreachable!("the progress keep-alive loop never completes")
             }
         };
-        let outcome = received
-            .map_err(|e| {
+        let outcome = match received {
+            Ok(outcome) => outcome.map_err(|e| ErrorData::internal_error(e, None))?,
+            Err(e) => {
                 let message = format!("generate_pikchr worker dropped: {e}");
-                mark_pikchr_child_session_error(&store, &inner_session_id, &message);
-                ErrorData::internal_error(message, None)
-            })?
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+                let error_store = Arc::clone(&store);
+                let error_session_id = inner_session_id.clone();
+                let error_message = message.clone();
+                let _ = run_blocking(move || {
+                    mark_pikchr_child_session_error(&error_store, &error_session_id, &error_message)
+                })
+                .await;
+                return Err(ErrorData::internal_error(message, None));
+            }
+        };
 
         let preview_image_path = if let Some(png) = &outcome.png {
             // A temp-file failure here is the parent's bookkeeping problem, not
@@ -1269,10 +1278,14 @@ fn reserve_child_session(
 /// failed tool card. A write failure here is non-fatal — the button is simply
 /// missing until (and unless) the call completes successfully.
 ///
-/// Queued behind the parent's own transcript writes (see
-/// `store::write_queue`) rather than written in place: this runs on the
-/// parent's session thread, and the row belongs after the `generate_pikchr`
-/// tool call the parent's writer has queued.
+/// Queued on the store's write queue (see `store::write_queue`) rather than
+/// written in place, behind whatever the parent's writer has queued so far.
+/// The handler runs on the shared runtime, not on the parent's session
+/// thread, so if that thread is behind on reading its agent the
+/// `generate_pikchr` tool call row can land after this one. The transcript
+/// pairs an announcement that raced ahead of its tool call with the earliest
+/// unclaimed Pikchr tool (`assignAnnouncedPikchrSessions`), and the
+/// successful result carries the id authoritatively.
 fn announce_pikchr_child_session(store: &Store, parent_session_id: &str, child_session_id: &str) {
     let metadata = AcpMessageMetadata {
         acp_event_kind: Some(PIKCHR_SESSION_STARTED_EVENT.to_string()),
@@ -1348,8 +1361,8 @@ impl ServerHandler for PikchrToolsHandler {
 
 /// Start a local MCP HTTP server exposing the `generate_pikchr` tool.
 ///
-/// Returns the bound port and a `JoinHandle`. The server runs until the handle
-/// (and its parent `LocalSet`) is dropped. `provider_id` is the parent
+/// The server runs on the shared runtime (see [`crate::mcp_http_server`])
+/// until the returned guard is dropped. `provider_id` is the parent
 /// session's agent, used by `generate_pikchr` to run its sub-session (an empty
 /// string is tolerated — the server still starts and `generate_pikchr` then
 /// fails per-call rather than failing session startup). `parent_session_id` is
@@ -1357,46 +1370,22 @@ impl ServerHandler for PikchrToolsHandler {
 /// announced into its transcript as they start. `app_handle` loads the
 /// bundled Pikchr grammar text for the sub-agent. `registry` holds each
 /// child diagram session while it runs so a user Stop reaches its worker.
-pub async fn start_pikchr_mcp_server(
+pub fn start_pikchr_mcp_server(
     provider_id: String,
     parent_session_id: String,
     app_handle: tauri::AppHandle,
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
-) -> Result<(u16, JoinHandle<()>), String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("Failed to bind pikchr MCP listener: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to get local address: {e}"))?
-        .port();
-
-    let service = StreamableHttpService::new(
-        move || {
-            Ok(PikchrToolsHandler::new(
-                provider_id.clone(),
-                parent_session_id.clone(),
-                app_handle.clone(),
-                Arc::clone(&store),
-                Arc::clone(&registry),
-            ))
-        },
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    );
-
-    let router = Router::new().route_service("/mcp", service);
-
-    log::debug!("[pikchr_mcp] HTTP server bound on port {port}");
-
-    let handle = tokio::task::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
-            log::error!("[pikchr_mcp] HTTP server error: {e}");
-        }
-    });
-
-    Ok((port, handle))
+) -> Result<McpHttpServer, String> {
+    serve_mcp("pikchr_mcp", move || {
+        PikchrToolsHandler::new(
+            provider_id.clone(),
+            parent_session_id.clone(),
+            app_handle.clone(),
+            Arc::clone(&store),
+            Arc::clone(&registry),
+        )
+    })
 }
 
 // =============================================================================
@@ -1446,7 +1435,13 @@ successful render."
         &self,
         Parameters(p): Parameters<RenderPikchrParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let preview = run_preview(&p.pikchr, self.scale);
+        // Rendering and rasterizing is CPU work that can take a while for a
+        // large diagram; keep it off the shared runtime's workers.
+        let scale = self.scale;
+        let source = p.pikchr.clone();
+        let preview = run_blocking(move || run_preview(&source, scale))
+            .await
+            .map_err(|e| ErrorData::internal_error(e, None))?;
         if preview.is_error {
             // The slot keeps the previous successful render, so acceptance
             // after a failed attempt is informed: say what it would accept.
@@ -1490,40 +1485,18 @@ impl ServerHandler for PikchrPreviewHandler {
 /// Start a local MCP HTTP server exposing the `render_pikchr` tool for one
 /// `generate_pikchr` call's sub-session.
 ///
-/// Returns the bound port and a `JoinHandle`. The server lives as long as the
-/// worker thread's runtime that spawned it; the caller keeps the handle for
-/// the duration of the call and both drop with the worker. All connections
-/// share `scale` and `slot`, so the host loop reads the same last-render slot
-/// the tool writes.
-async fn start_pikchr_preview_mcp_server(
+/// Served on the shared runtime like the session servers, so the specialist's
+/// MCP handshake does not wait on its worker thread either. The worker keeps
+/// the guard for the duration of the call and the server stops when it drops.
+/// All connections share `scale` and `slot`, so the host loop reads the same
+/// last-render slot the tool writes.
+fn start_pikchr_preview_mcp_server(
     scale: f32,
     slot: Arc<LastRenderSlot>,
-) -> Result<(u16, JoinHandle<()>), String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("Failed to bind pikchr preview MCP listener: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to get local address: {e}"))?
-        .port();
-
-    let service = StreamableHttpService::new(
-        move || Ok(PikchrPreviewHandler::new(scale, Arc::clone(&slot))),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    );
-
-    let router = Router::new().route_service("/mcp", service);
-
-    log::debug!("[pikchr_mcp] preview HTTP server bound on port {port}");
-
-    let handle = tokio::task::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
-            log::error!("[pikchr_mcp] preview HTTP server error: {e}");
-        }
-    });
-
-    Ok((port, handle))
+) -> Result<McpHttpServer, String> {
+    serve_mcp("pikchr_mcp preview", move || {
+        PikchrPreviewHandler::new(scale, Arc::clone(&slot))
+    })
 }
 
 #[cfg(test)]

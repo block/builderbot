@@ -25,6 +25,7 @@ pub mod image_commands;
 pub mod launch_resume;
 pub mod managed_acp_tools;
 pub mod managed_node;
+pub mod mcp_http_server;
 mod mcp_progress;
 pub mod migrations;
 pub mod note_commands;

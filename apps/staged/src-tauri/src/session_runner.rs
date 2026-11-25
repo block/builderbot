@@ -2034,6 +2034,12 @@ pub fn start_session(
             // NewSessionRequest. This is a *required* server: project sessions
             // are restricted to MCP-capable providers, so a missing transport
             // is a hard error.
+            //
+            // These servers are served on the shared runtime, not on this
+            // session thread (see `mcp_http_server`), so the agent's MCP
+            // handshake during `session/new` is answered while this thread
+            // waits on the agent. Each guard stops its server when it drops
+            // with this scope, at the end of the run.
             let _mcp_handle = if let Some(ref proj_id) = config.mcp_project_id {
                 match crate::project_mcp::start_project_mcp_server(
                     proj_id.clone(),
@@ -2047,19 +2053,18 @@ pub fn start_session(
                     config.parent_project_note_id.clone(),
                     config.session_id.clone(),
                     cancel_token.clone(),
-                )
-                .await
-                {
-                    Ok((port, handle)) => {
+                ) {
+                    Ok(server) => {
                         log::info!(
-                            "Session {}: MCP server started on port {port}",
-                            config.session_id
+                            "Session {}: MCP server started on port {}",
+                            config.session_id,
+                            server.port()
                         );
                         required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
                             "builderbot",
-                            format!("http://127.0.0.1:{port}/mcp"),
+                            server.url(),
                         )));
-                        Some(handle)
+                        Some(server)
                     }
                     Err(e) => {
                         log::error!("Failed to start MCP server: {e}");
@@ -2092,19 +2097,18 @@ pub fn start_session(
                     app_handle.clone(),
                     Arc::clone(&store),
                     Arc::clone(&registry),
-                )
-                .await
-                {
-                    Ok((port, handle)) => {
+                ) {
+                    Ok(server) => {
                         log::info!(
-                            "Session {}: pikchr MCP server started on port {port}",
-                            config.session_id
+                            "Session {}: pikchr MCP server started on port {}",
+                            config.session_id,
+                            server.port()
                         );
                         required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
                             "pikchr",
-                            format!("http://127.0.0.1:{port}/mcp"),
+                            server.url(),
                         )));
-                        Some(handle)
+                        Some(server)
                     }
                     Err(e) => {
                         log::warn!(
@@ -2136,20 +2140,19 @@ pub fn start_session(
                     config.session_id.clone(),
                     Arc::clone(&note_slot),
                     draft_path.clone(),
-                )
-                .await
-                {
-                    Ok((port, handle)) => {
+                ) {
+                    Ok(server) => {
                         log::info!(
-                            "Session {}: note MCP server started on port {port}",
-                            config.session_id
+                            "Session {}: note MCP server started on port {}",
+                            config.session_id,
+                            server.port()
                         );
                         required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
                             NOTE_MCP_SERVER_NAME,
-                            format!("http://127.0.0.1:{port}/mcp"),
+                            server.url(),
                         )));
                         local_note_tool_attached.set(true);
-                        Some(handle)
+                        Some(server)
                     }
                     Err(e) => {
                         log::warn!(

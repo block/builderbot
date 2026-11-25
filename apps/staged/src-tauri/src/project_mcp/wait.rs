@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -13,15 +14,22 @@ pub(super) fn duration(seconds: u64, has_progress_token: bool) -> Duration {
     })
 }
 
-pub(super) async fn wait_for_completion(
+/// Poll `read_payload` until the session is terminal, the wait runs out, or
+/// either token is cancelled. The reader is async so a store read can run on
+/// the blocking pool rather than on the runtime worker serving the request.
+pub(super) async fn wait_for_completion<F, Fut>(
     wait: Duration,
     request_ct: &CancellationToken,
     parent_ct: &CancellationToken,
-    mut read_payload: impl FnMut() -> Result<Value, String>,
-) -> String {
+    mut read_payload: F,
+) -> String
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
     let started = tokio::time::Instant::now();
     loop {
-        match read_payload() {
+        match read_payload().await {
             Ok(payload) => {
                 let state = payload
                     .get("state")
@@ -44,7 +52,7 @@ pub(super) async fn wait_for_completion(
             _ = parent_ct.cancelled() => break,
         }
     }
-    match read_payload() {
+    match read_payload().await {
         Ok(payload) => payload.to_string(),
         Err(e) => e,
     }
@@ -68,7 +76,7 @@ mod tests {
                 duration(seconds, token),
                 &CancellationToken::new(),
                 &CancellationToken::new(),
-                || Ok(json!({"state": "running"})),
+                || std::future::ready(Ok(json!({"state": "running"}))),
             )
             .await;
             assert_eq!(result, r#"{"state":"running"}"#);
@@ -90,7 +98,7 @@ mod tests {
                 duration(u64::MAX, true),
                 &CancellationToken::new(),
                 &CancellationToken::new(),
-                || payload.clone(),
+                || std::future::ready(payload.clone()),
             )
             .await;
             assert_eq!(result, expected);
@@ -111,7 +119,7 @@ mod tests {
                 } else {
                     request.cancel();
                 }
-                Ok(json!({"state":"running", "reads": reads}))
+                std::future::ready(Ok(json!({"state":"running", "reads": reads})))
             })
             .await;
             assert_eq!(

@@ -124,6 +124,15 @@ export const EXPECTED_EXECUTABLE_ROOTS = [
   '/Applications/Xcode',
 ];
 
+/**
+ * Whether `path` is in a system directory. Such a path is taken as it was
+ * started: those directories are root-owned, and a distribution may link a
+ * tool there to its real file elsewhere (Ubuntu's `/bin/cat` is uutils'
+ * `/usr/lib/cargo/bin/coreutils/cat`). Links are followed only from the
+ * other expected places, which is where one could lead to a real agent.
+ */
+const isSystemPath = (path) => EXPECTED_EXECUTABLE_ROOTS.some((root) => path.startsWith(root));
+
 /** Where a run's programs may be: its own directory, the system's, and any named besides. */
 export const expectedPlaces = ({ runDir, allowed = [] }) => [
   runDir + '/',
@@ -143,11 +152,13 @@ export function realFile(path) {
 /**
  * What to report when the file at `path` is not in one of the `expected`
  * places, or `null` when it is. A path inside the run directory that is a
- * link to a file outside it counts as outside, and both are named.
+ * link to a file outside it counts as outside, and both are named. A path in
+ * a system directory is accepted as it is, wherever its links lead.
  */
 export function outsidePlace(path, expected, real = realFile) {
   const inside = (candidate) => expected.some((root) => candidate.startsWith(root));
   if (!inside(path)) return path;
+  if (isSystemPath(path)) return null;
   const resolved = real(path);
   return resolved && !inside(resolved) ? `${resolved} (through ${path})` : null;
 }
@@ -184,8 +195,9 @@ export function outsideProgram(
     // Against the whole line, so a program whose path has a space in it
     // (an installed browser) is still recognized by its prefix.
     if (!inside(args)) return args.slice(0, 160);
-    // In its place by name; a link there to a file elsewhere is not.
-    const resolved = real(words[0]);
+    // In its place by name; a link there to a file elsewhere is not, unless
+    // the place is a system directory.
+    const resolved = isSystemPath(words[0]) ? null : real(words[0]);
     if (resolved && !inside(resolved)) return `${resolved} (through ${words[0]})`;
   }
   // The first word that is not an option is where a script goes. It counts

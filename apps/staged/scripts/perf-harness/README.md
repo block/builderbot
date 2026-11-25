@@ -342,7 +342,9 @@ ends before the resolver is asked:
 What is checked. A program counts as outside when it is not under the run directory, a system
 directory (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/usr/libexec`, `/System`,
 `/Library/Developer`, Xcode) or the browser the run was given; a file in the run directory that is
-a link to one outside counts as outside.
+a link to one outside counts as outside. A path in a system directory is taken as it was started
+and its links are not followed: those directories are root-owned, and some systems link their
+tools there to files elsewhere (Ubuntu's uutils `/bin/cat` is `/usr/lib/cargo/bin/coreutils/cat`).
 
 - The app's log. The app logs each agent it starts through the login shell, which is how action
   detection starts one, with the path it is about to run (`Spawning … exec line: exec '…'`). The

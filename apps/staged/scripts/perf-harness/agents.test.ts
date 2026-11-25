@@ -522,6 +522,40 @@ describe('a process’s program', () => {
     ).toBeNull();
   });
 
+  it('is fine in a system directory that links elsewhere, as Ubuntu’s uutils tools do', () => {
+    const fs = files({
+      '/bin/cat': '/usr/lib/cargo/bin/coreutils/cat',
+      '/usr/bin/env': '/usr/lib/cargo/bin/coreutils/env',
+      '/run/bin/node': '/run/bin/node',
+    });
+    expect(outsideProgram('/bin/cat /etc/paths', expected, fs)).toBeNull();
+    expect(outsideProgram('/usr/bin/env node --version', expected, fs)).toBeNull();
+    // Given as a script, to the run's Node or to the shell.
+    expect(outsideProgram('/run/bin/node /usr/bin/env', expected, fs)).toBeNull();
+    expect(outsideProgram('/bin/sh /bin/cat', expected, fs)).toBeNull();
+    expect(outsidePlace('/bin/cat', expected, fs.real)).toBeNull();
+    expect(outsidePlace('/usr/bin/env', expected, fs.real)).toBeNull();
+  });
+
+  it('is named when a link in the run directory leads to a real agent', () => {
+    const fs = files({
+      '/run/acp-tools/goose': '/Users/someone/.local/bin/goose',
+      '/run/acp-tools/codex-acp': '/opt/homebrew/lib/node_modules/codex-acp/dist/index.js',
+    });
+    expect(outsideProgram('/run/acp-tools/goose acp', expected, fs)).toBe(
+      '/Users/someone/.local/bin/goose (through /run/acp-tools/goose)'
+    );
+    expect(outsideProgram('/bin/sh /run/acp-tools/goose acp', expected, fs)).toBe(
+      '/Users/someone/.local/bin/goose (through /run/acp-tools/goose), run by /bin/sh'
+    );
+    expect(outsideProgram('/run/acp-tools/codex-acp', expected, fs)).toBe(
+      '/opt/homebrew/lib/node_modules/codex-acp/dist/index.js (through /run/acp-tools/codex-acp)'
+    );
+    expect(outsideProgram('/bin/sh /run/acp-tools/codex-acp', expected, fs)).toBe(
+      '/opt/homebrew/lib/node_modules/codex-acp/dist/index.js (through /run/acp-tools/codex-acp), run by /bin/sh'
+    );
+  });
+
   it('is not a file a system tool was only given', () => {
     const fs = files({}, ['/etc/paths', '/Users/someone/notes.txt']);
     expect(outsideProgram('/bin/cat /etc/paths', expected, fs)).toBeNull();

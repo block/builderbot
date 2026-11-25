@@ -76,7 +76,6 @@ vi.mock('../../commands', async (importOriginal) => ({
   pollSession: pollSessionMock,
   getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
   getLatestSessionMessages: async () => ({ data: transcript.current }),
-  getSessionMessages: async () => ({ data: [] }),
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],

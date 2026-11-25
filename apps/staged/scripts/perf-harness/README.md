@@ -64,9 +64,14 @@ A run stops by itself, with a partial result, when:
    directory is shared by every tree it builds, so a lock in it (`perf-harness-build.lock`) is held
    from before `cargo build` until the binary has been copied to the tree's cache: a build of
    another tree at the same time waits, and each run stages the binary it built. A lock left by a
-   build that was killed is taken over. The binary has its port compiled in, and the cache keeps
-   one binary per profile with a marker per port; replacing the binary removes every marker of that
-   profile, so `--skip-build` works only for the port the cached binary was built for.
+   build that was killed is taken over. The wait is at most `--build-wait` seconds (3600; 0 fails
+   at once): after that the run exits 2 with the holder's process id, its command line and when it
+   took the lock. That is what ends a wait on a lock nobody will release, which is what a killed
+   build's lock becomes once its process id has been given to another process; the message says
+   which directory to remove. An interrupt ends the wait like any other part of a run. The binary
+   has its port compiled in, and the cache keeps one binary per profile with a marker per port;
+   replacing the binary removes every marker of that profile, so `--skip-build` works only for the
+   port the cached binary was built for.
 2. Copies the binary, the frontend, a Node and the harness itself into a throwaway run directory,
    and starts the driver there under a throwaway `HOME` and a minimal `PATH`.
 3. The driver starts the app, seeds projects (local git repositories, one branch per session) through
@@ -151,10 +156,10 @@ does not. The page selectors are all in `driver/ui.mjs` if a tree's markup diffe
 
 `compare` warns that two runs are not like for like when their parameters differ, and names the
 ones that do. Parameters that only say how a run was named, built or served are left out of that:
-`--label`, `--out`, `--keep`, `--skip-build`, `--app-dir`, `--target-dir` and `--port`. So the
-before/after recipe at the top compares without a warning, and a warning means the load, the
-window, the frontend or the profile really differed. `--local-storage` is shown on each side
-instead.
+`--label`, `--out`, `--keep`, `--skip-build`, `--app-dir`, `--target-dir`, `--build-wait` and
+`--port`. So the before/after recipe at the top compares without a warning, and a warning means the
+load, the window, the frontend or the profile really differed. `--local-storage` is shown on each
+side instead.
 
 ### Which frontend
 
@@ -328,7 +333,8 @@ it sends.
   run and deleted with it. For the desktop webview there is no such door, so the driver sets it
   with a script through `/perf/eval` (which needs the header) as a session cookie. Until then the
   webview's own request for the frontend is refused, which in a browser run leaves the browser as
-  the app's only client.
+  the app's only client. With either frontend, a page that is still refused once the cookie is set
+  fails the run at once with "the app refused the page".
 - `/perf/*` takes the header only, never the cookie.
 
 The metrics snapshot carries `hooks`, the version of these hooks (3). A tree measured through

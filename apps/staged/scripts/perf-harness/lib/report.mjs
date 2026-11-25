@@ -206,6 +206,7 @@ const NOT_THE_LOAD = [
   'skipBuild',
   'appDir',
   'targetDir',
+  'buildWait',
   'port',
 ];
 

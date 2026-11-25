@@ -174,12 +174,15 @@ if (params.frontend === 'browser' && !browser) {
 say(`run directory: ${runDir}`);
 let built;
 try {
-  built = build({
+  // Awaited for the wait on another run's build, during which the signal
+  // handlers above run.
+  built = await build({
     appDir,
     profile: params.profile,
     port: params.port,
     skipBuild: params.skipBuild,
     targetDir: params.targetDir,
+    buildWait: params.buildWait,
   });
 } catch (error) {
   finish(2, `the build failed: ${error.message}`);

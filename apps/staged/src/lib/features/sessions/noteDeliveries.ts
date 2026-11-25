@@ -117,7 +117,8 @@ export function listNoteDeliveries(
 /**
  * `previous` when `next` says the same thing, so a rebuild that changed no
  * delivery hands the pane the object it already has. The transcript rebuilds
- * twice a second while a session streams, and every tool group reads this.
+ * with every stream frame, several times a second while a session streams,
+ * and every tool group reads this.
  */
 export function stabilizeNoteDeliveries(
   previous: NoteDeliveries | null,

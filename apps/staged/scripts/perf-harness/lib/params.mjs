@@ -60,6 +60,10 @@ export const PARAMS = {
     '',
     'cargo target directory for the build (default: one of the harness’s own, never the tree’s)',
   ],
+  'build-wait': [
+    3600,
+    'seconds to wait for another run’s build that holds the target directory’s lock (0 = fail at once)',
+  ],
   browser: [
     '',
     'Chromium executable (default: $BROWSER_PATH, then a Playwright cache or Chrome install)',

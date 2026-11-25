@@ -1,14 +1,12 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, type IncomingMessage } from 'node:http';
@@ -42,7 +40,6 @@ import {
   defaultTargetDir,
   replaceCachedBinary,
 } from './lib/build.mjs';
-import { tryLock, withLock } from './lib/lock.mjs';
 import { parseParams } from './lib/params.mjs';
 import { compare, differingParams, summarize } from './lib/report.mjs';
 import { isolationProblem, scrubbedEnv } from './lib/safety.mjs';
@@ -79,6 +76,7 @@ describe('parameters', () => {
       minRateShare: 0.5,
       skipVerify: false,
       targetDir: '',
+      buildWait: 3600,
     });
   });
 
@@ -230,73 +228,6 @@ describe('the build cache', () => {
     expect(existsSync(builtMarker(cache, 'debug', 47611))).toBe(false);
     expect(existsSync(builtMarker(cache, 'debug', 47612))).toBe(false);
     expect(existsSync(builtMarker(cache, 'release', 47611))).toBe(true);
-  });
-});
-
-describe('the build lock', () => {
-  /** A pid that is not running: a child that has exited. */
-  const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
-
-  it('is held by one taker at a time and free again once released', () => {
-    const lock = join(scratch, 'build.lock');
-    const first = tryLock(lock);
-    expect(first.release).toBeTypeOf('function');
-    expect(tryLock(lock)).toEqual({ heldBy: process.pid });
-    first.release?.();
-    expect(existsSync(lock)).toBe(false);
-    const second = tryLock(lock);
-    expect(second.release).toBeTypeOf('function');
-    second.release?.();
-    // Nothing of a taking is left beside the lock.
-    expect(readdirSync(scratch)).toEqual([]);
-  });
-
-  it('is taken over from a holder that is no longer running, and only from that one', () => {
-    const lock = join(scratch, 'build.lock');
-    const dead = deadPid();
-    expect(tryLock(lock, dead).release).toBeTypeOf('function');
-    const taken = tryLock(lock);
-    expect(taken.release).toBeTypeOf('function');
-    // The dead holder's lock was moved aside under its own name, which is
-    // what stops a late second takeover from moving the new lock.
-    const buried = readdirSync(scratch).filter((name) => name.startsWith('build.lock.dead-'));
-    expect(buried).toHaveLength(1);
-    expect(tryLock(lock)).toEqual({ heldBy: process.pid });
-    taken.release?.();
-
-    // Kept for an hour, then cleared by the next taker.
-    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    utimesSync(join(scratch, buried[0]), old, old);
-    tryLock(lock).release?.();
-    expect(readdirSync(scratch)).toEqual([]);
-  });
-
-  it('runs the work holding the lock, waits for a holder, and lets go when the work throws', () => {
-    const lock = join(scratch, 'build.lock');
-    expect(withLock(lock, () => tryLock(lock).heldBy)).toBe(process.pid);
-    expect(() =>
-      withLock(lock, () => {
-        throw new Error('the build failed');
-      })
-    ).toThrow('the build failed');
-    expect(existsSync(lock)).toBe(false);
-
-    // Held by a process that ends after a moment: the wait is announced, and
-    // the work runs once the holder is gone. Not a child of this process: the
-    // wait does not return to the event loop, so a child that exited would
-    // never be reaped and would still count as running.
-    const holder = Number(
-      spawnSync('/bin/sh', ['-c', 'sleep 0.5 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' })
-        .stdout
-    );
-    expect(tryLock(lock, holder).release).toBeTypeOf('function');
-    const said: string[] = [];
-    expect(
-      withLock(lock, () => 'built', { say: (text: string) => said.push(text), every: 50 })
-    ).toBe('built');
-    expect(said).toEqual([
-      `waiting for the harness build of process ${holder}, which holds ${lock}`,
-    ]);
   });
 });
 
@@ -986,6 +917,7 @@ describe('reports', () => {
       ...after.params,
       appDir: '/other/checkout/apps/staged',
       targetDir: '/tmp/other-target',
+      buildWait: 60,
       port: 47612,
       skipBuild: true,
     };

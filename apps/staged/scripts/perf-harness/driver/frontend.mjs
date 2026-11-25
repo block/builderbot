@@ -35,6 +35,26 @@ const asyncBody = (body) => `(async () => { ${body} })()`;
  */
 const REFUSED = `(document.body ? document.body.textContent : '').startsWith('perf-harness:')`;
 
+/**
+ * Set on the window of a document that is about to be loaded again, so the
+ * document that replaces it (a new window, without the mark) can be told
+ * from it. The desktop webview's first document is always a refusal: it is
+ * what the token's cookie is set from.
+ */
+const LEAVING = '__stagedPerfLeaving';
+
+/**
+ * Where the desktop webview's load stands: `'ready'` once the app's page is
+ * loaded with the probe in it, `'refused'` when the document loaded is the
+ * app's refusal, and `null` while there is nothing to say yet (the old
+ * document is still there, or the new one is still loading).
+ */
+export const desktopLoadState = `
+  const loaded = document.readyState === 'complete' && location.protocol.startsWith('http') && !window.${LEAVING};
+  if (!loaded) return null;
+  if (${REFUSED}) return 'refused';
+  return window.__stagedPerf ? 'ready' : null;`;
+
 export async function openBrowserFrontend({
   api,
   executable,
@@ -227,19 +247,21 @@ export async function openDesktopFrontend({ api, localStorage }) {
       // the page is loaded again so the app boots with them; the probe goes
       // in as soon as the document exists.
       await api.evalInWebviews(
-        `${tokenCookieScript(api)} ${overridesScript(localStorage)} location.reload();`
+        `${tokenCookieScript(api)} ${overridesScript(localStorage)} window.${LEAVING} = true; location.reload();`
       );
       await sleep(1500);
-      await until(
+      const state = await until(
         'the webview to load',
         async () => {
           await api.evalInWebviews(PROBE);
-          return evaluate(
-            `return document.readyState === 'complete' && !!window.__stagedPerf && location.protocol.startsWith('http') && !${REFUSED};`
-          );
+          return evaluate(desktopLoadState);
         },
         { timeout: 120_000, every: 1000 }
       );
+      // Refused again, with the cookie set: waiting longer changes nothing,
+      // so say what happened, as the browser frontend does.
+      if (state === 'refused')
+        throw new Error('the app refused the page: the webview did not send the run’s token');
       // The window is never put on screen, so the page starts out hidden.
       await evaluate(`
         Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });

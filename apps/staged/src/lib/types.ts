@@ -1018,7 +1018,7 @@ export interface SessionPollRequest {
   metadataRefetchIds: number[];
 }
 
-/** One poll tick, read from a single backend snapshot. */
+/** What one `poll_session` call returns, read from a single backend snapshot. */
 export interface SessionPoll {
   session: Session | null;
   queuedMessages: QueuedSessionMessage[];

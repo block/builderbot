@@ -5,8 +5,11 @@
 // branch id and mount their timeline rows only when near the visible part
 // of the scroll area.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { desktopLoadState, openDesktopFrontend } from './driver/frontend.mjs';
 import * as ui from './driver/ui.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
@@ -120,5 +123,121 @@ describe('opening a project with more sessions than fit', () => {
     document.body.append(name);
     await run(ui.openProject('Perf viewed 1', { branchId: 'b-0', tag: 's1p0b0' }));
     expect(document.querySelectorAll('.branch-card')).toHaveLength(1);
+  });
+});
+
+describe('loading the desktop webview', () => {
+  const REFUSAL = 'perf-harness: this port takes the run’s token';
+  const PROBE = readFileSync(join(import.meta.dirname, 'driver', 'probe.js'), 'utf8');
+  type Page = Window & {
+    __stagedPerf?: unknown;
+    __stagedPerfLeaving?: boolean;
+    __reload?: () => void;
+  };
+  const page = window as Page;
+
+  /**
+   * The app's side of the harness routes, with this jsdom window as the
+   * webview. A reload replaces the document `loadsAfter` scripts later,
+   * with `next`: until then the old one is still what a script finds.
+   */
+  function webview({ next, loadsAfter = 0 }: { next: string; loadsAfter?: number }) {
+    const results: string[] = [];
+    let countdown: number | null = null;
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      results.push(init.body);
+      return { ok: true };
+    });
+    page.__reload = () => {
+      countdown = loadsAfter;
+    };
+    const navigate = () => {
+      // A new document has a new window: nothing set on the old one is there.
+      delete page.__stagedPerf;
+      delete page.__stagedPerfLeaving;
+      document.body.textContent = next;
+    };
+    return {
+      token: 'the-run-token',
+      evalInWebviews: async (script: string) => {
+        if (countdown !== null && countdown-- <= 0) {
+          countdown = null;
+          navigate();
+        }
+        // The probe needs a real page; the load only asks that it is there.
+        if (script === PROBE) page.__stagedPerf ??= {};
+        else (0, eval)(script.replace('location.reload();', 'window.__reload();'));
+        return ['main'];
+      },
+      takeResults: async () => results.splice(0),
+    };
+  }
+
+  /** Run the driver's timers until `promise` settles; resolves to its outcome. */
+  async function outcome(promise: Promise<unknown>) {
+    let settled: { value?: unknown; error?: Error } | undefined;
+    promise.then(
+      (value) => (settled = { value }),
+      (error) => (settled = { error })
+    );
+    while (!settled) await vi.advanceTimersByTimeAsync(250);
+    return settled;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // The webview's first document: it was loaded without the token.
+    document.body.textContent = REFUSAL;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    for (const name of ['__stagedPerf', '__stagedPerfLeaving', '__reload'] as const)
+      delete page[name];
+    for (const name of ['hidden', 'visibilityState'])
+      delete (document as unknown as Record<string, unknown>)[name];
+    localStorage.clear();
+  });
+
+  it('says the app refused the page when the reload is refused too, and does not wait it out', async () => {
+    const api = webview({ next: REFUSAL });
+    const frontend = await openDesktopFrontend({ api, localStorage: {} });
+    const started = Date.now();
+    const { error } = await outcome(frontend.reload());
+    expect(error?.message).toBe(
+      'the app refused the page: the webview did not send the run’s token'
+    );
+    // Seconds, not the two minutes a page that never loads is given.
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('does not take the refusal it reloads from for the answer to the reload', async () => {
+    // The first document, a refusal, is still there for a few scripts.
+    const api = webview({ next: 'Staged', loadsAfter: 6 });
+    const frontend = await openDesktopFrontend({ api, localStorage: { 'some:switch': 'on' } });
+    const { error } = await outcome(frontend.reload());
+    expect(error).toBeUndefined();
+    expect(document.body.textContent).toBe('Staged');
+    expect(document.cookie).toContain('the-run-token');
+    expect(localStorage.getItem('some:switch')).toBe('on');
+    // The page is shown as visible, which is the reload's last step.
+    expect(document.hidden).toBe(false);
+  });
+
+  it('reads where the load stands from the document', async () => {
+    const state = () => run(desktopLoadState);
+    // The refusal the reload is made from, marked as on its way out.
+    page.__stagedPerfLeaving = true;
+    page.__stagedPerf = {};
+    expect(await state()).toBeNull();
+    // A document of its own that is a refusal.
+    delete page.__stagedPerfLeaving;
+    expect(await state()).toBe('refused');
+    // The app's page, before and after the probe is in.
+    document.body.textContent = 'Staged';
+    delete page.__stagedPerf;
+    expect(await state()).toBeNull();
+    page.__stagedPerf = {};
+    expect(await state()).toBe('ready');
   });
 });

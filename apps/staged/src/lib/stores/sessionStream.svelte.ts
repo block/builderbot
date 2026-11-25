@@ -14,6 +14,12 @@
  * - **A claim lingers.** What a consumer stops showing stays declared for
  *   `LINGER_MS`, state included, so a row that scrolls out and back, or a
  *   view that is covered and uncovered, finds its subtitle where it left it.
+ * - **A session is held for as long as the backend has it.** When the last
+ *   claim on a session runs out, what is held for it stays, and stays fed,
+ *   until the interest that leaves the session out is sent. The backend
+ *   sends a snapshot only for a session it sees join, so a session that is
+ *   claimed again before that call carries on with the deltas, on the state
+ *   they belong to.
  * - **State per session, a hint per root set.** A session's status and title
  *   are one value each. Its subtitle depends on the display roots, and two
  *   components can show one session against different roots, so a hint is
@@ -239,6 +245,12 @@ type View = {
 };
 
 type Entry = {
+  /**
+   * A claim, held or lingering, asks for the session. An entry nobody asks
+   * for is left out of the interest and dropped by the call that tells the
+   * backend so (`#dropUnheld`).
+   */
+  held: boolean;
   /** The highest level a claim asks for. */
   level: RowLevel;
   /** The level the backend was last told. */
@@ -420,6 +432,8 @@ export class SessionStreamOwner {
         this.#open = false;
         this.#acceptedGeneration = null;
         this.#clearSendTimer();
+        // The backend's interest went with the stream.
+        this.#dropUnheld();
         this.#lost();
       },
     });
@@ -449,6 +463,7 @@ export class SessionStreamOwner {
     this.#sentKey = null;
     this.#acceptedGeneration = null;
     this.#lastSeq = 0;
+    this.#dropUnheld();
     for (const [sessionId, entry] of this.#entries) {
       entry.declared = null;
       this.#forget(sessionId, entry);
@@ -666,17 +681,22 @@ export class SessionStreamOwner {
     for (const consumer of this.#consumers) consumer.claims.forEach(want);
     for (const { claim } of this.#lingering.values()) want(claim);
 
-    for (const [sessionId, entry] of this.#entries) {
-      if (wanted.has(sessionId)) continue;
-      this.#entries.delete(sessionId);
-      this.#statuses.delete(sessionId);
-      this.#titles.delete(sessionId);
-      for (const rootsKey of entry.views.keys()) this.#hints.delete(hintKey(sessionId, rootsKey));
-    }
+    // A session nobody asks for any more is not dropped here. The backend
+    // still has it until an interest without it is sent, and that is after
+    // the gather timer, or after the call that is out. Dropped now and
+    // claimed again inside that window, it would come back empty while the
+    // interest read as unchanged: no call, so no snapshot, and deltas with
+    // nothing to be applied to. Left as it is, it goes on taking its frames,
+    // and a claim that returns in time finds it current.
+    for (const [sessionId, entry] of this.#entries) entry.held = wanted.has(sessionId);
+    // With no stream open the backend has nothing of this owner's, and the
+    // next interest starts over with snapshots.
+    if (!this.#link || !this.#open) this.#dropUnheld();
     for (const [sessionId, { level, views }] of wanted) {
       let entry = this.#entries.get(sessionId);
       if (!entry) {
         entry = {
+          held: true,
           level,
           declared: null,
           loaded: false,
@@ -705,6 +725,21 @@ export class SessionStreamOwner {
       }
     }
     this.#requestSend();
+  }
+
+  /**
+   * Drop the sessions nobody asks for, with what is held for them. Only
+   * where the backend is not sending them: from the call that declares an
+   * interest without them, or with no stream open.
+   */
+  #dropUnheld(): void {
+    for (const [sessionId, entry] of this.#entries) {
+      if (entry.held) continue;
+      this.#entries.delete(sessionId);
+      this.#statuses.delete(sessionId);
+      this.#titles.delete(sessionId);
+      for (const rootsKey of entry.views.keys()) this.#hints.delete(hintKey(sessionId, rootsKey));
+    }
   }
 
   /** Drop what the frames brought for a session that is still held. */
@@ -835,7 +870,9 @@ export class SessionStreamOwner {
    */
   #interest(): SessionStreamInterest {
     const sessions: SessionStreamSessionInterest[] = [
-      ...[...this.#entries].map(([sessionId, entry]) => ({ sessionId, level: entry.level })),
+      ...[...this.#entries]
+        .filter(([, entry]) => entry.held)
+        .map(([sessionId, entry]) => ({ sessionId, level: entry.level })),
       ...[...this.#chats.keys()].map((sessionId) => ({ sessionId, level: 'full' as const })),
     ].sort((a, b) => order(a.sessionId, b.sessionId) || order(a.level, b.level));
     return {
@@ -887,6 +924,10 @@ export class SessionStreamOwner {
     if (!link || !this.#open || this.#sending) return;
     const interest = this.#interest();
     const key = JSON.stringify(interest);
+    // The one place a session is dropped while the stream is open. Either
+    // this call tells the backend it has gone, or the backend already holds
+    // this very interest, which does not name it.
+    this.#dropUnheld();
     if (key === this.#sentKey && !this.#snapshotWanted()) return;
 
     // The cursors are read now, as late as can be: a frame applied after

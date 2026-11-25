@@ -14,8 +14,8 @@ const MAX_HINT_LENGTH = 72;
 
 /**
  * How many of a session's newest visible rows are kept to derive its hint
- * from. The poller trims its transcript to this, and the session stream's
- * owner sends it as the summary window and trims to it.
+ * from. The session stream's owner sends it to the backend as the summary
+ * window and trims the rows it holds to it.
  */
 export const HINT_ROW_WINDOW = 40;
 

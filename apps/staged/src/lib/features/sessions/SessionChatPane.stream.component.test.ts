@@ -102,7 +102,6 @@ vi.mock('../../commands', async (importOriginal) => ({
   getSessionLiveDelivery: liveDeliveryMock,
   sendSessionMessageNow: sendNowMock,
   getLatestSessionMessages: async () => ({ data: transcript.current }),
-  getSessionMessages: async () => ({ data: [] }),
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],
@@ -476,6 +475,142 @@ describe('SessionChatPane on the session stream', () => {
     expect(await quietFor(FALLBACK_POLL_MS)).toBe(false);
 
     expect(await quietFor(FALLBACK_POLL_MS * 5)).toBe(true);
+  });
+
+  // The pane is pooled: `sessionPanePool` points one instance at session
+  // after session and parks it in between. A fallback fetch that is out when
+  // that happens answers a pane that no longer holds what it was read for.
+  describe('a fallback fetch the pane has moved on from', () => {
+    const OTHER = 'another-session';
+    type PollAnswer = Awaited<ReturnType<typeof pollSessionMock>>;
+
+    /** Keep the next `poll_session` fetch out until the returned function answers it. */
+    function holdNextPoll() {
+      let answer: (value: PollAnswer) => void = () => {};
+      pollSessionMock.mockImplementationOnce(
+        () => new Promise((resolve) => (answer = resolve)) as ReturnType<typeof pollSessionMock>
+      );
+      return (value: PollAnswer) => answer(value);
+    }
+
+    function otherRow(id: number, role: SessionMessage['role'], content: string): SessionMessage {
+      return { ...row(id, role, content), sessionId: OTHER };
+    }
+
+    it('drops an answer that lands after the pane was pointed at another session', async () => {
+      const { props } = await mountPane();
+      const answerFirst = holdNextPoll();
+      await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
+      expect(pollSessionMock).toHaveBeenCalledTimes(1);
+      expect(pollSessionMock.mock.calls[0][0]).toBe(SESSION_ID);
+
+      // The pane is given another session, one that has ended.
+      sessionRow.current = session('completed', { id: OTHER });
+      transcript.current = [
+        otherRow(1, 'user', 'Rename the module'),
+        otherRow(2, 'assistant', 'Renamed'),
+      ];
+      props.sessionId = OTHER;
+      await settle();
+      expect(text()).toContain('Renamed');
+      expect(thinking()).toBe(false);
+
+      // The first session's answer lands now, with its row and its tail.
+      answerFirst({
+        session: session('running', { updatedAt: 2 }),
+        queuedMessages: [],
+        messages: [
+          row(2, 'assistant', 'The cache is two maps'),
+          row(3, 'assistant', 'Both are LRU'),
+        ],
+        acpMetadataMessages: [],
+      });
+      await settle();
+      expect(text()).not.toContain('The cache is two maps');
+      expect(text()).not.toContain('Both are LRU');
+      expect(text()).toContain('Renamed');
+      expect(rowCount()).toBe(2);
+      expect(thinking()).toBe(false);
+
+      // The tick for the session it shows carries on.
+      const calls = pollSessionMock.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
+      await settle();
+      expect(pollSessionMock).toHaveBeenCalledTimes(calls + 1);
+      expect(pollSessionMock.mock.calls[calls][0]).toBe(OTHER);
+    });
+
+    it('keeps to one fetch at a time when the answer lands during the next session’s fetch', async () => {
+      const { props } = await mountPane();
+      const answerFirst = holdNextPoll();
+      await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
+
+      sessionRow.current = session('running', { id: OTHER });
+      transcript.current = [otherRow(1, 'user', 'Rename the module')];
+      props.sessionId = OTHER;
+      await settle();
+
+      // The new session's first tick goes out and stays out.
+      const answerSecond = holdNextPoll();
+      await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
+      expect(pollSessionMock).toHaveBeenCalledTimes(2);
+      expect(pollSessionMock.mock.calls[1][0]).toBe(OTHER);
+
+      // The abandoned fetch ends. It must not end the one that is out with
+      // it: the next tick would then fetch from the same cursor again.
+      answerFirst({
+        session: session('running'),
+        queuedMessages: [],
+        messages: [],
+        acpMetadataMessages: [],
+      });
+      await settle();
+      expect(await quietFor(3 * FALLBACK_POLL_MS)).toBe(true);
+
+      answerSecond({
+        session: session('running', { id: OTHER }),
+        queuedMessages: [],
+        messages: [otherRow(1, 'user', 'Rename the module'), otherRow(2, 'assistant', 'Renamed')],
+        acpMetadataMessages: [],
+      });
+      await settle();
+      expect(text()).toContain('Renamed');
+      expect(await quietFor(FALLBACK_POLL_MS)).toBe(false);
+    });
+
+    it('drops an answer that lands after the pane was parked and shown again on its session', async () => {
+      const { props, pane } = await mountPane();
+      const answerFirst = holdNextPoll();
+      await vi.advanceTimersByTimeAsync(FALLBACK_POLL_MS);
+      expect(pollSessionMock).toHaveBeenCalledTimes(1);
+
+      // The turn ends while the pane is parked.
+      pane.park();
+      props.active = false;
+      flushSync();
+      sessionRow.current = session('completed', { updatedAt: 2 });
+      transcript.current = [transcript.current[0], row(2, 'assistant', 'The cache is two maps.')];
+      pane.unpark();
+      props.active = true;
+      flushSync();
+      await settle();
+      // The reopen's own delta.
+      expect(pollSessionMock).toHaveBeenCalledTimes(2);
+      expect(text()).toContain('The cache is two maps.');
+      expect(thinking()).toBe(false);
+
+      // The fetch from before the park read the row and the tail as they
+      // were then. Applied now, it would put both back.
+      answerFirst({
+        session: session('running'),
+        queuedMessages: [],
+        messages: [row(2, 'assistant', 'The cache')],
+        acpMetadataMessages: [],
+      });
+      await settle();
+      expect(text()).toContain('The cache is two maps.');
+      expect(thinking()).toBe(false);
+    });
   });
 
   it('waits out a lost stream with what it shows, and is read again when it returns', async () => {

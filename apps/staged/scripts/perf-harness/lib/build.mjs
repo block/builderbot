@@ -33,7 +33,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { withLock } from './lock.mjs';
+import { LOCK_WAIT_EXPIRED, withLock } from './lock.mjs';
 import { resolveExisting } from './safety.mjs';
 
 /** The identifier keeps the webview's own data apart from a real install's, on top of the throwaway HOME. */
@@ -106,7 +106,14 @@ function run(what, file, args, options) {
  * Build (or, with `skipBuild`, find) the app binary and the frontend.
  * Returns `{ binary, binaryDir, dist }`.
  */
-export function build({ appDir, profile, port, skipBuild, targetDir: requested }) {
+export async function build({
+  appDir,
+  profile,
+  port,
+  skipBuild,
+  targetDir: requested,
+  buildWait = 3600,
+}) {
   const cache = buildCacheDir(appDir);
   const dist = join(cache, 'dist');
   const tauri = join(appDir, 'src-tauri');
@@ -143,9 +150,11 @@ export function build({ appDir, profile, port, skipBuild, targetDir: requested }
     );
   }
   // Held until the binary is out of the shared directory. A build that
-  // fails leaves the cache, and so the markers, as they were.
+  // fails leaves the cache, and so the markers, as they were. The wait for
+  // another run's build is the one part of this function that is not
+  // synchronous: an interrupt ends it, and `buildWait` seconds bound it.
   mkdirSync(targetDir, { recursive: true });
-  withLock(
+  await withLock(
     join(targetDir, 'perf-harness-build.lock'),
     () => {
       run('staging the stagedctl sidecar', 'bash', ['scripts/prepare-stagedctl-sidecar.sh'], {
@@ -160,8 +169,12 @@ export function build({ appDir, profile, port, skipBuild, targetDir: requested }
       );
       replaceCachedBinary({ from: join(targetDir, profile), cache, profile });
     },
-    { say: (text) => console.error(`[perf-harness] ${text}`) }
-  );
+    { say: (text) => console.error(`[perf-harness] ${text}`), timeout: buildWait * 1000 }
+  ).catch((error) => {
+    if (error.code === LOCK_WAIT_EXPIRED)
+      error.message += ' --build-wait sets how many seconds a run waits.';
+    throw error;
+  });
   run(
     'vite build',
     process.execPath,

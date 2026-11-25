@@ -1589,16 +1589,11 @@ export function listChildSessions(parentSessionId: string): Promise<ChildSession
 
 const SESSION_MESSAGES_CACHE_TTL = 5 * 60_000;
 
-/** The whole visible transcript. */
-export function getSessionMessages(sessionId: string): Promise<SwrResult<SessionMessage[]>> {
-  return cachedCommand('get_session_messages', { sessionId }, { ttl: SESSION_MESSAGES_CACHE_TTL });
-}
-
 /**
  * The newest `limit` visible rows, oldest first — what the session pane opens
- * with. Cached under its own key (the args include `limit`), so a window is
- * never served in place of the full transcript or vice versa. `bypassCache`
- * reads from the server and refreshes the entry.
+ * with. Cached under a key that includes `limit`, so a window of one size
+ * is never served for another. `bypassCache` reads from the server and
+ * refreshes the entry.
  */
 export function getLatestSessionMessages(
   sessionId: string,

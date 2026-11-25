@@ -22,14 +22,20 @@
   - Tool calls show name + args preview; expand to see output
   - Fixed-size modal with proper scrolling
 
-  For running sessions, polls the DB incrementally:
-  - Re-fetches the last known message (it may have grown from streaming)
-  - Fetches any new messages after it
-  - Stops polling when status leaves "running"
+  Updates: once a session is loaded, the pane takes what is written to it
+  from the window's session stream (`sessionStream.svelte.ts`), whatever the
+  session's status:
+  - A snapshot read from the pane's cursor (its last row, which may have
+    grown, and what follows it), then deltas of the rows, queue and session
+    row as they are written; nothing is fetched on a timer
+  - While the stream is unavailable, `poll_session` is read once a second
+    from the same cursor, until the stream is back
+  - A parked pane takes nothing; reopened, it fetches one delta and then
+    gives the stream its cursor
 
   Props:
     sessionId — the session to display
-    active    — whether the pane should load/poll
+    active    — whether the pane should load the session and take its updates
 -->
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from 'svelte';
@@ -373,7 +379,8 @@
   /**
    * The loaded suffix of the visible transcript: the newest page on open,
    * extended backwards by `loadOlderMessages` as the user scrolls up and
-   * forwards by the poll. See `transcriptWindow.ts`.
+   * forwards by the session's updates (`applySessionUpdate`). See
+   * `transcriptWindow.ts`.
    */
   let messages = $state<SessionMessage[]>([]);
   /** Whether visible rows older than `messages[0]` exist on the server. */
@@ -409,9 +416,17 @@
   let fallbackTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   /**
-   * The follow-up queue is read by the load, by each poll and by a refresh
-   * after every status event and queue write, and the backend answers those
-   * concurrently. The read sent last stays: an earlier refresh answering after
+   * Which stretch of following the pane is in. `stopFollowing` ends one each
+   * time the pane is parked, closed or pointed at a session, so a fetch can
+   * tell that the pane it answers is no longer the one that asked: it may
+   * show another session by then, or the same one after a new load.
+   */
+  let followEpoch = 0;
+  /**
+   * The follow-up queue is read by the load, by each fetch or stream frame
+   * that carries it and by a refresh after every status event and queue
+   * write, and the backend answers those concurrently. The read sent last
+   * stays: an earlier refresh answering after
    * the one sent behind a delete would put the deleted message back.
    */
   const queuedReadOrder = new LatestWins<'queue'>();
@@ -763,7 +778,7 @@
       : null
   );
 
-  // Remember a disconnect seen here, from the load, a status event or a poll.
+  // Remember a disconnect seen here, from the load, a status event or an update.
   $effect(() => {
     if (session?.status !== 'disconnected') return;
     const sessionId = session.id;
@@ -1394,7 +1409,7 @@
       }
       // On the stream there is nothing to fetch: the frame that agrees with
       // this status comes, and holds what was written before it.
-      pollNow();
+      fallbackPollNow();
     });
     unlistenStatus = unlisten;
 
@@ -1552,7 +1567,7 @@
       if ((await revalidateSession()) === 'settled' || closed) return;
       // The delta could not stand in for a load (the session is gone, or the
       // request failed): fall through to the full load, which shows the same
-      // error state a fresh open would and never starts polling a dead session.
+      // error state a fresh open would and never follows a dead session.
     }
     // Clear prior session state when loading a *different* session so a
     // bail-out or in-flight load can never paint the previously-viewed
@@ -1593,9 +1608,9 @@
       if (!s) {
         // On a reopen of a deleted session the stale `session` (kept above so
         // the transcript stays put) still carries its last status, possibly
-        // `running`; the load effect would read that and start polling a
-        // session nothing will ever update. Drop it so this ends in the same
-        // state a fresh open of a deleted session does.
+        // `running`; the load effect would read that and follow a session
+        // nothing will ever update. Drop it so this ends in the same state a
+        // fresh open of a deleted session does.
         session = null;
         error = 'Session not found';
         return;
@@ -1675,11 +1690,14 @@
     // shown; a hold must not be judged against it until the delta lands.
     statusLoadedForSessionId = null;
     const id = sessionId;
+    const epoch = followEpoch;
     const rowsBeforeDelta = messages.length;
     const resumeIntros = intro.suspend();
     try {
       const outcome = await poll();
-      if (closed || sessionId !== id) return 'settled';
+      // Also when the pane was parked and reopened on this session while the
+      // delta was out: that fetch was dropped, and the newer open has its own.
+      if (closed || sessionId !== id || followEpoch !== epoch) return 'settled';
       // The restore `unpark` deferred has normally run by now (the delta is a
       // round trip, the frame is next in line), but a hidden window never
       // fires frames: apply it before anything below measures the box.
@@ -1758,15 +1776,23 @@
     // return the rows past it, and the merges would duplicate them.
     if (!session || closed || pollInFlight || chat) return 'skipped';
     pollInFlight = true;
+    // The pane is pooled, so the one that asks is not always the one the
+    // answer finds: see `followEpoch`.
+    const id = sessionId;
+    const epoch = followEpoch;
     try {
       const statusVersionBeforeFetch = statusEventVersion;
       // An empty transcript polls from 0, which returns every visible row, so
       // there is nothing older to page in: `hasOlderMessages` stays false.
       const request = sessionPollRequest(messages, acpMetadataMessages);
       const queuedTicket = queuedReadOrder.issue();
-      const result = await pollSession(sessionId, request);
-      // `chat`: a fetch abandoned by `stopFollowing` can answer after the
-      // pane has gone on to the stream.
+      const result = await pollSession(id, request);
+      // Abandoned by `stopFollowing` while it was out. The pane shows another
+      // session now, or this one from a newer load, and this answer's session
+      // row and rows belong to neither. `closed` alone does not say so: it is
+      // false again as soon as the pane is reopened or retargeted.
+      if (followEpoch !== epoch || sessionId !== id) return 'skipped';
+      // `chat`: the pane has gone on to the stream.
       if (closed || chat) return 'skipped';
       const s = result.session;
       const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
@@ -1787,12 +1813,16 @@
       }
       return s ? 'applied' : 'missing';
     } catch {
-      // Polling errors are expected during shutdown — silently ignore
+      // Fetch errors are expected during shutdown — silently ignore
       return 'failed';
     } finally {
-      pollInFlight = false;
-      // The stream may have been established while this fetch was out.
-      syncUpdateSource();
+      // An abandoned fetch has nothing to end: `stopFollowing` cleared the
+      // flag, and a fetch for what the pane shows now may hold it.
+      if (followEpoch === epoch) {
+        pollInFlight = false;
+        // The stream may have been established while this fetch was out.
+        syncUpdateSource();
+      }
     }
   }
 
@@ -2067,11 +2097,12 @@
   }
 
   /**
-   * Read the session now where the fallback poll is what feeds the pane,
-   * without waiting for its next tick: after a status event or a send. On
-   * the stream this does nothing, as the frames bring what was written.
+   * Where the fallback poll is what feeds the pane, read the session now and
+   * not at its next tick: after a status event or a send. Anywhere else this
+   * does nothing: the stream's frames bring what was written, and a pane
+   * waiting for the stream to be re-established waits for those.
    */
-  function pollNow() {
+  function fallbackPollNow() {
     if (fallbackTimer) void poll();
   }
 
@@ -2081,8 +2112,9 @@
     closeChat();
     clearFallbackTimer();
     clearLiveDeliveryTimer();
-    // A fetch still out is abandoned: its answer is dropped (`closed`), or
-    // lands on the session the pane has moved to having read nothing of it.
+    // A fetch still out is abandoned: ending the epoch drops its answer,
+    // whatever the pane shows by then, and frees the flag for the next one.
+    followEpoch += 1;
     pollInFlight = false;
   }
 
@@ -2114,8 +2146,8 @@
   /**
    * A composer action is starting: drop the previous action's failure line,
    * and a stale load error with it — the action's outcome is what the pane
-   * should show now, and the poll a successful one starts refreshes the
-   * transcript anyway.
+   * should show now, and the updates that follow a successful one refresh
+   * the transcript anyway.
    */
   function beginComposerAction() {
     sendError = null;
@@ -2190,7 +2222,7 @@
    * Deliver a message to the running session now — the composer's "Send"
    * mode. The backend steers it into the turn in flight, or interrupts the
    * turn and re-prompts when the agent cannot steer. It never resumes: a
-   * session that stopped between the last poll and the click comes back
+   * session that stopped between the last update and the click comes back
    * `not_running`, and the message goes through `sendMessage` instead — the
    * idle path, which applies this pane's branch override and follow-up
    * config (the note chat pane's branch would otherwise be lost). Anything
@@ -2217,7 +2249,7 @@
         case 'started_new_turn':
           // The user row is persisted by the delivery itself; the stream (or
           // the fallback poll) brings it.
-          pollNow();
+          fallbackPollNow();
           scrollToBottom();
           return true;
         case 'resumed':
@@ -2227,11 +2259,11 @@
           session = { ...session, status: 'running' };
           clearBackgroundHold();
           forgetLiveDelivery();
-          pollNow();
+          fallbackPollNow();
           scrollToBottom();
           return true;
         case 'not_running':
-          // Stopped since the last poll: resume it the way the idle composer
+          // Stopped since the last update: resume it the way the idle composer
           // does, with the branch override and follow-up config. `sending` is
           // already held here, so the lock is passed through. A resume that
           // fails (worktree gone, or the queue drain re-ran the session first
@@ -2317,13 +2349,14 @@
       if (session?.id !== targetSessionId) return true;
       if (outcome.outcome === 'queuedForTransfer') {
         // Held by the backend until the project's transfer completes; the
-        // session is still idle, so nothing starts polling. The queue shows
+        // session is still idle, so there is no turn to show. The queue shows
         // the message, labelled as waiting for the transfer.
         await refreshQueuedMessages();
         return true;
       }
-      // Backend sets status to running and emits an event.
-      // Force an immediate poll to pick up the new user message + status.
+      // The backend sets the status to running and emits an event. Show it
+      // now; the stream brings the new user message and the row (the
+      // fallback is read at once, below).
       session = {
         ...session,
         status: 'running',
@@ -2339,7 +2372,7 @@
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;
       observedDisconnect = null;
-      pollNow();
+      fallbackPollNow();
       scrollToBottom();
       return true;
     } catch (e) {
@@ -2574,7 +2607,7 @@
       if (session) session = { ...session, status: 'running' };
       // The queued message starts a new turn — see sendMessage.
       clearBackgroundHold();
-      pollNow();
+      fallbackPollNow();
       scrollToBottom();
     } catch (e) {
       sendError = `Failed to send queued message: ${e instanceof Error ? e.message : String(e)}`;
@@ -2750,7 +2783,7 @@
    * `park` usually runs after the dialog's DOM is gone and cannot measure. Only
    * meaningful while `userScrolledUp`: a pane following the bottom restores to
    * the bottom, so the rect reads are skipped there (that is the live case,
-   * where appends scroll the box twice a second).
+   * where appends scroll the box several times a second).
    */
   let scrollAnchor: ScrollAnchor | null = null;
   /** `scrollTop` when `scrollAnchor` was last captured. */
@@ -3394,8 +3427,9 @@
    * is the position to save: the box was never scrolled and the bookkeeping
    * never caught up. Search highlights are DOM state the next open must not
    * inherit, and the viewers portal to `#portal-root`, where nothing of a
-   * parked pane may remain. `close` stops polling; the `active`-gated effects
-   * (and PipelineSteps') drop the listeners once the pool clears `active`.
+   * parked pane may remain. `close` stops the session's updates; the
+   * `active`-gated effects (and PipelineSteps') drop the listeners once the
+   * pool clears `active`.
    */
   export function park() {
     const unapplied = deferredRestore.take();

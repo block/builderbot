@@ -526,6 +526,131 @@ describe('SessionStreamOwner', () => {
       expect(h.owner.hint('child', ['/repo'])).toBeUndefined();
       expect(h.owner.status('child')).toBe('running');
     });
+
+    // The backend sends a snapshot only for a session it sees join. Between
+    // a claim running out and the interest without it being sent, the
+    // backend still has the session and sends its deltas, so what is held
+    // has to stay until that call: a claim that returns first changes
+    // nothing in the interest, and so gets no snapshot to start again from.
+    it('carries on with the deltas when a session is claimed again before the interest without it is sent', async () => {
+      await h.open();
+      const first = await show(['s1']);
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Reading the cache')]));
+      const calls = h.interests.length;
+
+      // The claim runs out. The interest without the session is gathering.
+      first.release();
+      await vi.advanceTimersByTimeAsync(LINGER_MS);
+      expect(h.interests).toHaveLength(calls);
+      // The backend has not been told, and still sends.
+      await h.frame('delta', 's1', summary([assistant(3, 'Writing the note')]));
+
+      const second = h.owner.consume();
+      second.sync({ summary: ['s1'], title: [], displayRoots: ['/repo'] });
+      expect(second.read('s1')).toEqual({
+        status: 'running',
+        title: undefined,
+        hint: 'Writing the note',
+      });
+
+      // The interest is what the backend has, so nothing is sent...
+      await h.settle();
+      expect(h.interests).toHaveLength(calls);
+      // ...and the deltas that follow are all the session gets.
+      await h.frame('delta', 's1', summary([assistant(4, 'Running the tests')]));
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(true);
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Running the tests');
+      expect(second.read('s1')?.hint).toBe('Running the tests');
+    });
+
+    it('carries on with the deltas when a session is claimed again while an interest call is out', async () => {
+      await h.open();
+      const first = await show(['s1']);
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Reading the cache')]));
+
+      // A call naming both sessions is out when the claim on `s1` runs out.
+      first.release();
+      await vi.advanceTimersByTimeAsync(LINGER_MS - 2 * INTEREST_DELAY_MS);
+      let answer = () => {};
+      h.state.gate = new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+      const other = h.owner.consume();
+      other.sync({ summary: ['s2'], title: [], displayRoots: ['/repo'] });
+      await h.settle();
+      const calls = h.interests.length;
+      expect(levels(h.last())).toEqual({ s1: 'summary', s2: 'summary' });
+
+      // The claim runs out with the call still unanswered.
+      await vi.advanceTimersByTimeAsync(INTEREST_DELAY_MS);
+      await h.frame('delta', 's1', summary([assistant(3, 'Writing the note')]));
+      const second = h.owner.consume();
+      second.sync({ summary: ['s1'], title: [], displayRoots: ['/repo'] });
+      expect(second.read('s1')?.hint).toBe('Writing the note');
+
+      // The call returns. What it declared is what is wanted again.
+      h.state.gate = null;
+      answer();
+      await h.settle();
+      await h.settle();
+      expect(h.interests).toHaveLength(calls);
+
+      await h.frame('delta', 's1', summary([assistant(4, 'Running the tests')]));
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(true);
+      expect(h.owner.hint('s1', ['/repo'])).toBe('Running the tests');
+    });
+
+    it('keeps a session nobody asks for until the call that drops it, then drops it', async () => {
+      await h.open();
+      const consumer = await show(['s1']);
+      await h.frame(
+        'snapshot',
+        's1',
+        summary([OPENING_PROMPT, assistant(2, 'Reading the cache')], { acpTitle: 'Cache note' })
+      );
+      const calls = h.interests.length;
+
+      consumer.release();
+      await vi.advanceTimersByTimeAsync(LINGER_MS);
+      expect(h.interests).toHaveLength(calls);
+      expect(h.owner.status('s1')).toBe('running');
+
+      await h.settle();
+      expect(h.interests).toHaveLength(calls + 1);
+      expect(h.last().sessions).toEqual([]);
+      expect(h.owner.status('s1')).toBeUndefined();
+      expect(h.owner.title('s1')).toBeUndefined();
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(false);
+
+      // Claimed after that, it is new to the backend: declared, and empty
+      // until its snapshot.
+      const again = await show(['s1']);
+      expect(h.interests).toHaveLength(calls + 2);
+      expect(levels(h.last())).toEqual({ s1: 'summary' });
+      expect(again.read('s1')).toBeUndefined();
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(5, 'Done')]));
+      expect(again.read('s1')?.hint).toBe('Done');
+    });
+
+    it('drops a session nobody asks for at once while no stream is open', async () => {
+      await h.open();
+      const consumer = await show(['s1']);
+      await h.frame('snapshot', 's1', summary([OPENING_PROMPT, assistant(2, 'Reading the cache')]));
+      consumer.release();
+      h.close();
+      // Inside the grace period, so nothing has been given up on yet.
+      await vi.advanceTimersByTimeAsync(ESTABLISH_GRACE_MS - 1);
+      expect(h.owner.status('s1')).toBe('running');
+      h.owner.stop();
+      const calls = h.interests.length;
+
+      await vi.advanceTimersByTimeAsync(LINGER_MS);
+      expect(h.interests).toHaveLength(calls);
+      const again = h.owner.consume();
+      again.sync({ summary: ['s1'], title: [], displayRoots: ['/repo'] });
+      expect(again.read('s1')).toBeUndefined();
+      expect(h.owner.hintDerived('s1', ['/repo'])).toBe(false);
+    });
   });
 
   describe('frames', () => {

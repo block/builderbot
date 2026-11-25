@@ -108,7 +108,7 @@ impl Store {
     }
 
     pub fn get_note(&self, id: &str) -> Result<Option<Note>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE id = ?1",
@@ -124,7 +124,7 @@ impl Store {
     /// rule — they are shown under their parent project note instead. Agent branch
     /// history wants every note, so it uses [`Store::list_all_notes_for_branch`].
     pub fn list_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE branch_id = ?1 AND parent_project_note_id IS NULL
@@ -138,7 +138,7 @@ impl Store {
     /// path: agents need to read the child notes their parent project note references,
     /// even though the UI timeline hides them (see [`Store::list_notes_for_branch`]).
     pub fn list_all_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE branch_id = ?1
@@ -153,7 +153,7 @@ impl Store {
     /// they are excluded from `list_notes_for_branch` for UI visibility, but still
     /// appear in agent branch history via `list_all_notes_for_branch`.
     pub fn list_child_notes(&self, parent_project_note_id: &str) -> Result<Vec<Note>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE parent_project_note_id = ?1
@@ -165,7 +165,7 @@ impl Store {
 
     /// Find a note linked to a given session (regardless of content).
     pub fn get_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE session_id = ?1",
@@ -178,7 +178,7 @@ impl Store {
 
     /// Find an empty note (content = '') linked to a given session.
     pub fn get_empty_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE session_id = ?1 AND content = ''",

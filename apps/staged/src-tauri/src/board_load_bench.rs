@@ -644,8 +644,8 @@ fn board_load_bench() {
                 })
                 .1,
             );
-            // The app runs these on Tauri's blocking pool, many at once, all
-            // behind the store's one connection mutex.
+            // The app runs these on Tauri's blocking pool, many at once,
+            // sharing the store's few read-only connections.
             threaded.push(
                 time_ms(|| {
                     let handles: Vec<_> = (0..8)

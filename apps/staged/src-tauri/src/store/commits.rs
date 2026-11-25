@@ -28,7 +28,7 @@ impl Store {
     }
 
     pub fn get_commit(&self, id: &str) -> Result<Option<Commit>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, branch_id, sha, session_id, created_at, updated_at
              FROM commits WHERE id = ?1",
@@ -45,7 +45,7 @@ impl Store {
         branch_id: &str,
         sha: &str,
     ) -> Result<Option<Commit>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, branch_id, sha, session_id, created_at, updated_at
              FROM commits WHERE branch_id = ?1 AND sha = ?2",
@@ -62,7 +62,7 @@ impl Store {
         &self,
         project_id: &str,
     ) -> Result<std::collections::HashMap<String, u64>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT c.branch_id, COUNT(*)
              FROM commits c
@@ -82,7 +82,7 @@ impl Store {
     }
 
     pub fn list_commits_for_branch(&self, branch_id: &str) -> Result<Vec<Commit>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, sha, session_id, created_at, updated_at
              FROM commits WHERE branch_id = ?1 ORDER BY created_at ASC",
@@ -243,7 +243,7 @@ impl Store {
 
     /// Find any commit linked to a given session (regardless of SHA status).
     pub fn get_commit_by_session(&self, session_id: &str) -> Result<Option<Commit>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, branch_id, sha, session_id, created_at, updated_at
              FROM commits WHERE session_id = ?1",

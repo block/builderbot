@@ -221,7 +221,7 @@ impl Store {
         index: usize,
     ) -> Result<Option<ToolImage>, StoreError> {
         let raw: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.read_conn();
             let sql = format!(
                 "SELECT {}, acp_tool_status FROM session_messages WHERE id = ?1",
                 field.column()

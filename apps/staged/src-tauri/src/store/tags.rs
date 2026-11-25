@@ -497,8 +497,7 @@ impl Store {
     /// the order the write paths renumber from, so a read and a write agree
     /// even on rows that broke the dense-position rule.
     pub fn get_tag_state(&self) -> Result<TagState, StoreError> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = self.read_conn();
         let groups = {
             let mut stmt = tx.prepare(&format!(
                 "SELECT {GROUP_COLUMNS} FROM tag_groups ORDER BY position, created_at, id"
@@ -525,7 +524,6 @@ impl Store {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        tx.commit()?;
         Ok(TagState {
             groups,
             tags,

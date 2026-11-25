@@ -63,7 +63,7 @@ impl Store {
         project_id: &str,
         limit: usize,
     ) -> Result<Vec<SuggestedRepo>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
 
         // Build affinity keys from the project's current repos.
         let current_keys: Vec<String> = {
@@ -142,7 +142,7 @@ impl Store {
     /// Return the most-added repos across all projects, ranked by distinct
     /// project count. Used as a fallback when the current project has no repos.
     fn get_popular_repos(&self, limit: usize) -> Result<Vec<SuggestedRepo>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT github_repo, subpath, COUNT(DISTINCT project_id) as score
              FROM project_repos

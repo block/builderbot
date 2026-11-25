@@ -30,7 +30,7 @@ fn row_to_badge(row: &rusqlite::Row) -> rusqlite::Result<RepoBadge> {
 impl Store {
     /// Fetch all repo badges.
     pub fn list_repo_badges(&self) -> Result<Vec<RepoBadge>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {BADGE_COLUMNS} FROM repo_badges ORDER BY created_at ASC"
         ))?;
@@ -45,7 +45,7 @@ impl Store {
         subpath: &str,
     ) -> Result<Option<RepoBadge>, StoreError> {
         use rusqlite::OptionalExtension;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT {BADGE_COLUMNS} FROM repo_badges
@@ -113,7 +113,7 @@ impl Store {
         short_name: &str,
     ) -> Result<Option<RepoBadge>, StoreError> {
         use rusqlite::OptionalExtension;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!("SELECT {BADGE_COLUMNS} FROM repo_badges WHERE short_name = ?1"),
             params![short_name],
@@ -138,7 +138,7 @@ impl Store {
 
     /// Return all existing hue values (sorted ascending).
     pub fn list_badge_hues(&self) -> Result<Vec<f64>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare("SELECT hue FROM repo_badges ORDER BY hue ASC")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -215,7 +215,7 @@ impl Store {
     /// List all repo badges ordered: pinned first by `pin_sort_order`, then unpinned
     /// sorted by project count descending (number of projects using that repo+subpath).
     pub fn list_repos_for_home(&self) -> Result<Vec<RepoBadge>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT rb.github_repo, rb.subpath, rb.short_name, rb.hue, rb.created_at,
                     rb.pinned, rb.pin_sort_order, rb.default_branch
@@ -236,7 +236,7 @@ impl Store {
     ///
     /// Returns `(github_repo, default_branch, is_pinned, has_projects)` tuples.
     pub fn list_repos_for_sync(&self) -> Result<Vec<RepoSyncRow>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT rb.github_repo,
                     MAX(rb.default_branch) AS default_branch,

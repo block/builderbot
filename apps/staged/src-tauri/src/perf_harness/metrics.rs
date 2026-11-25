@@ -95,13 +95,13 @@ fn tables<R>(f: impl FnOnce(&mut Tables) -> R) -> R {
     f(guard.get_or_insert_with(Tables::default))
 }
 
-pub(super) fn store_lock_waited(wait: Duration) {
+pub(crate) fn store_lock_waited(wait: Duration) {
     if ACTIVE.load(Relaxed) {
         STORE_LOCK_WAIT.record(wait.as_micros() as u64);
     }
 }
 
-pub(super) fn store_lock_held(hold: Duration) {
+pub(crate) fn store_lock_held(hold: Duration) {
     if ACTIVE.load(Relaxed) {
         STORE_LOCK_HOLD.record(hold.as_micros() as u64);
     }

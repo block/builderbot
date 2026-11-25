@@ -30,7 +30,6 @@ mod guard;
 mod histogram;
 pub(crate) mod metrics;
 mod server;
-pub(crate) mod store_lock;
 pub(crate) mod stream_frames;
 
 /// The loopback port to serve on. Unset, nothing here runs.

@@ -89,7 +89,7 @@ impl Store {
         subpath: Option<&str>,
     ) -> Result<Option<ProjectRepo>, StoreError> {
         let id: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.read_conn();
             conn.query_row(
                 "SELECT id FROM project_repos
                  WHERE project_id = ?1 AND github_repo = ?2
@@ -117,7 +117,7 @@ impl Store {
         subpath: Option<&str>,
     ) -> Result<Option<Branch>, StoreError> {
         let id: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.read_conn();
             conn.query_row(
                 "SELECT b.id FROM branches b
                  INNER JOIN project_repos pr ON pr.id = b.project_repo_id

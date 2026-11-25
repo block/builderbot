@@ -361,7 +361,7 @@ impl Store {
         session_id: &str,
         window: TranscriptWindow,
     ) -> Result<Vec<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&session_messages_window_sql(&window))?;
         let rows = stmt.query_map(
             &session_messages_window_params(&session_id, &window)[..],
@@ -381,7 +381,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
              FROM session_messages
@@ -599,7 +599,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
              FROM session_messages
@@ -619,7 +619,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
              FROM session_messages
@@ -644,7 +644,7 @@ impl Store {
         since_id: i64,
         refetch_ids: &[i64],
     ) -> Result<Vec<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::get_session_acp_metadata_messages_since_with_conn(
             &conn,
             session_id,
@@ -694,7 +694,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Option<AcpMessageMetadata>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
              FROM session_messages
@@ -735,7 +735,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Option<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
              FROM session_messages AS prompt
@@ -769,7 +769,7 @@ impl Store {
         session_id: &str,
         prompt_id: i64,
     ) -> Result<Option<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
              FROM session_messages
@@ -798,7 +798,7 @@ impl Store {
         session_id: &str,
         message_id: i64,
     ) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT EXISTS(
@@ -829,7 +829,7 @@ impl Store {
         session_id: &str,
         since: i64,
     ) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM session_messages
@@ -852,7 +852,7 @@ impl Store {
         session_id: &str,
         after_timestamp: i64,
     ) -> Result<i64, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let count: i64 = conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM session_messages
@@ -871,7 +871,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<(Option<i64>, Option<i64>), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT
@@ -892,7 +892,7 @@ impl Store {
     /// someone else (the reconcile service, after the runner is gone) reads
     /// it back to scope note extraction to that turn.
     pub fn latest_user_message_id(&self, session_id: &str) -> Result<Option<i64>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let id = conn.query_row(
             "SELECT MAX(id) FROM session_messages WHERE session_id = ?1 AND role = 'user'",
             params![session_id],
@@ -914,7 +914,7 @@ impl Store {
         since_id: i64,
         refetch_ids: &[i64],
     ) -> Result<Vec<SessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::get_session_messages_since_with_conn(&conn, session_id, since_id, refetch_ids)
     }
 

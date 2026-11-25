@@ -283,17 +283,20 @@ fn drain(shared: &Shared, store: &Store) {
 }
 
 impl Store {
-    /// A store sharing this one's connection and change and session feeds,
-    /// for the writer
-    /// thread to run jobs against. It has no queue of its own: a job that
-    /// queues another write runs it in place, which is already its turn.
+    /// A store sharing this one's connections and change and session feeds,
+    /// for the writer thread to run jobs against. It has no queue of its
+    /// own: a job that queues another write runs it in place, which is
+    /// already its turn.
     fn writer_view(&self) -> Store {
         Store {
             conn: Arc::clone(&self.conn),
+            readers: Arc::clone(&self.readers),
             change_tx: self.change_tx.clone(),
             session_feed: self.session_feed.clone(),
             writes: OnceLock::new(),
             is_writer_view: true,
+            #[cfg(test)]
+            temp_dir: None,
         }
     }
 

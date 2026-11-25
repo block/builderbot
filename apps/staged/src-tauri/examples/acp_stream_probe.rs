@@ -11,7 +11,11 @@ struct NoopStore;
 
 #[async_trait]
 impl Store for NoopStore {
-    fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String> {
+    async fn set_agent_session_id(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), String> {
         println!(
             "[probe] set_agent_session_id: session_id={} agent_session_id={}",
             session_id, agent_session_id

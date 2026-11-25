@@ -144,7 +144,7 @@ impl Store {
         &self,
         note_id: &str,
     ) -> Result<Option<NoteVersion>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, note_id, title, content, saved_at
              FROM note_versions

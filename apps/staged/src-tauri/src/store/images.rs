@@ -199,7 +199,7 @@ impl Store {
         if ids.is_empty() {
             return Ok(MediaReferences::default());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::media_references_on(&conn, ids, except_note_id)
     }
 
@@ -228,7 +228,7 @@ impl Store {
         if ids.is_empty() {
             return Ok(HashSet::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::embedded_in_notes(&conn, &ids, None)
     }
 
@@ -274,12 +274,12 @@ impl Store {
 #[cfg(test)]
 impl Store {
     pub(crate) fn media_is_referenced(&self, id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::referenced_by_notes(&conn, id, None)
     }
 
     pub(crate) fn image_has_chat_references(&self, id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::referenced_by_chat(&conn, id)
     }
 
@@ -290,7 +290,7 @@ impl Store {
         id: &str,
         note_id: &str,
     ) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Ok(!Self::referenced_by_notes(&conn, id, Some(note_id))?
             && !Self::referenced_by_chat(&conn, id)?)
     }
@@ -326,7 +326,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(SESSION_ATTACHMENTS_PER_IMAGE_SQL)?;
         let ids = stmt
             .query_map(params![session_id], |row| row.get(0))?
@@ -434,7 +434,7 @@ impl Store {
     /// back as `dimensions: None` like NULL does, so this is what tells the
     /// backfill not to read it again.
     pub fn image_dimensions_recorded(&self, id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT density IS NOT NULL FROM images WHERE id = ?1",
             params![id],
@@ -446,7 +446,7 @@ impl Store {
     }
 
     pub fn get_image(&self, id: &str) -> Result<Option<Image>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!("SELECT {IMAGE_COLUMNS} FROM images WHERE id = ?1"),
             params![id],
@@ -461,7 +461,7 @@ impl Store {
     /// Images with a `session_id` are excluded — those are session-scoped
     /// attachments that only appear in the session message history.
     pub fn list_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {IMAGE_COLUMNS} FROM images
              WHERE branch_id = ?1 AND session_id IS NULL ORDER BY created_at DESC"
@@ -476,7 +476,7 @@ impl Store {
     /// branch-level attachments; this is the whole set, for callers that have to
     /// account for the files on disk (moving a branch between projects).
     pub fn list_all_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {IMAGE_COLUMNS} FROM images WHERE branch_id = ?1 ORDER BY created_at ASC"
         ))?;
@@ -507,7 +507,7 @@ impl Store {
         filename: &str,
         reserved: &HashSet<String>,
     ) -> Result<String, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut existing: HashSet<String> = match branch_id {
             Some(bid) => {
                 let mut stmt = conn.prepare("SELECT filename FROM images WHERE branch_id = ?1")?;
@@ -569,7 +569,7 @@ impl Store {
     /// rather than by a scan of both note tables for each attachment. A
     /// session with nothing attached makes no pass.
     pub fn get_image_ids_for_session(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(SESSION_ATTACHMENTS_SQL)?;
         let mut ids = stmt
             .query_map(params![session_id], |row| row.get(0))?

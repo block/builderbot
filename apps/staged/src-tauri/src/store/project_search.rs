@@ -77,7 +77,7 @@ impl Store {
     /// Every note, project note and review title across all projects, in no
     /// particular order. Read under one lock, so the three kinds agree.
     pub fn list_project_search_items(&self) -> Result<Vec<ProjectSearchItem>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut items = Vec::new();
         for (sql, kind) in ITEM_QUERIES {
             collect_items(&conn, sql, kind, &mut items)?;

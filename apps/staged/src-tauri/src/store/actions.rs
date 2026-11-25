@@ -39,7 +39,7 @@ impl Store {
     }
 
     pub fn list_action_contexts(&self) -> Result<Vec<ActionContext>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at
              FROM action_contexts
@@ -50,7 +50,7 @@ impl Store {
     }
 
     pub fn get_action_context(&self, id: &str) -> Result<Option<ActionContext>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at
              FROM action_contexts WHERE id = ?1",
@@ -62,7 +62,7 @@ impl Store {
     }
 
     pub fn count_action_contexts_for_repo(&self, github_repo: &str) -> Result<i64, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT COUNT(*) FROM action_contexts WHERE github_repo = ?1",
             params![github_repo],
@@ -76,7 +76,7 @@ impl Store {
         github_repo: &str,
         subpath: Option<&str>,
     ) -> Result<Option<ActionContext>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::find_action_context(&conn, github_repo, subpath)
     }
 
@@ -176,7 +176,7 @@ impl Store {
     /// Only the startup sweep reads the owner pid, so it stays off
     /// [`ActionContext`] and the six SELECT column lists that build it.
     pub fn list_detecting_action_contexts(&self) -> Result<Vec<(String, Option<u32>)>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, detecting_pid FROM action_contexts
              WHERE detecting_actions = 1
@@ -273,7 +273,7 @@ impl Store {
     }
 
     pub fn get_repo_action(&self, id: &str) -> Result<Option<RepoAction>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, context_id, name, command, action_type, sort_order, run_detection_mode, pinned, icon, created_at, updated_at
              FROM repo_actions WHERE id = ?1",
@@ -285,7 +285,7 @@ impl Store {
     }
 
     pub fn list_repo_actions(&self, context_id: &str) -> Result<Vec<RepoAction>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, context_id, name, command, action_type, sort_order, run_detection_mode, pinned, icon, created_at, updated_at
              FROM repo_actions WHERE context_id = ?1 ORDER BY sort_order ASC",
@@ -301,7 +301,7 @@ impl Store {
     /// rendering them can't insert context rows. A repo absent from the result
     /// has no context yet, which callers treat as an empty action list.
     pub fn list_all_repo_actions(&self) -> Result<Vec<RepoContextActions>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT a.id, a.context_id, a.name, a.command, a.action_type, a.sort_order, a.run_detection_mode, a.pinned, a.icon, a.created_at, a.updated_at, c.github_repo, c.subpath
              FROM repo_actions a

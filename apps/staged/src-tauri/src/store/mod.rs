@@ -18,6 +18,7 @@ mod actions;
 mod branch_move;
 mod branches;
 mod commits;
+mod connections;
 mod control_grants;
 pub mod images;
 mod messages;
@@ -101,9 +102,13 @@ pub use tool_bodies::{
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 pub use write_queue::{RowSlot, RowWrite};
 
+use connections::{ReadGuard, ReadPool};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+#[cfg(test)]
+use timed_lock::TimedGuard;
+use timed_lock::TimedMutex;
 use tokio::sync::broadcast;
 
 // =============================================================================
@@ -322,18 +327,16 @@ pub struct ResolvedSession {
 // Store
 // =============================================================================
 
-/// The connection's lock: one that logs slow waits and holds (see
-/// [`timed_lock`]), or, in the load-test harness build, one that records
-/// them as metrics.
-#[cfg(not(feature = "perf-harness"))]
-type ConnMutex = timed_lock::TimedMutex<Connection>;
-#[cfg(feature = "perf-harness")]
-type ConnMutex = crate::perf_harness::store_lock::TimedMutex<Connection>;
-
 pub struct Store {
-    /// The one connection, behind a timed lock (see [`ConnMutex`]). Shared
-    /// with the writer thread's view of the store (see [`write_queue`]).
-    conn: Arc<ConnMutex>,
+    /// The write connection, behind a lock that logs slow waits and holds
+    /// (see [`timed_lock`]). Every write and every read that decides a write
+    /// runs here. Shared with the writer thread's view of the store (see
+    /// [`write_queue`]).
+    conn: Arc<TimedMutex<Connection>>,
+    /// Read-only connections for plain reads (see [`connections`]), each
+    /// behind its own timed lock. Empty when the database is not in WAL mode;
+    /// reads then take `conn`.
+    readers: Arc<ReadPool>,
     /// Change feed for mutating methods. `None` (the default, and what unit
     /// tests get) makes every publish a no-op; the app wires a sender in at
     /// construction so a task above the Tauri boundary can forward changes
@@ -350,6 +353,10 @@ pub struct Store {
     /// This is the writer thread's own view of the store: queued writes run
     /// in place.
     is_writer_view: bool,
+    /// The directory a test store's database lives in, removed with it.
+    /// Last, so it goes after the connections close.
+    #[cfg(test)]
+    temp_dir: Option<tempfile::TempDir>,
 }
 
 impl Store {
@@ -358,16 +365,32 @@ impl Store {
     /// The caller should check compatibility first with
     /// [`check_db_compatibility`] — this method does not validate
     /// an existing schema.
+    ///
+    /// Opens the write connection, brings the schema up to date on it, then
+    /// opens the read-only connections (see [`connections`]).
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
         let conn = Connection::open(path)?;
-        let store = Self {
-            conn: Arc::new(ConnMutex::new(conn)),
+        let wal = connections::configure_writer(&conn)?;
+        let conn = TimedMutex::new(conn, "the write connection");
+        #[cfg(feature = "perf-harness")]
+        let conn = conn.recording_perf_metrics();
+        let mut store = Self {
+            conn: Arc::new(conn),
+            readers: Arc::new(ReadPool::empty()),
             change_tx: None,
             session_feed: None,
             writes: OnceLock::new(),
             is_writer_view: false,
+            #[cfg(test)]
+            temp_dir: None,
         };
         store.init_schema()?;
+        if wal {
+            store.readers = Arc::new(ReadPool::open(path, connections::READERS));
+        } else {
+            log::warn!("The store database is not in WAL mode; reads share the write connection");
+        }
         Ok(store)
     }
 
@@ -382,31 +405,62 @@ impl Store {
     }
 
     /// Attach the session feed. The caller keeps its own handle to drain it.
+    ///
+    /// Like [`Self::with_change_sender`], call it before the first queued
+    /// write: the writer thread's view copies the feed when the queue starts.
     pub fn with_session_feed(mut self, feed: Arc<SessionFeed>) -> Self {
         self.session_feed = Some(feed);
         self
     }
 
-    /// In-memory database for testing.
+    /// A fresh database for testing, in its own temporary directory that
+    /// goes with the store.
+    ///
+    /// File-backed, not `:memory:`: an in-memory database has no WAL, so it
+    /// would get no readers and tests would never run a read on one. Shared
+    /// cache would give it readers, but with table locks that fail a read
+    /// outright while a write is open, which the app never sees.
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory()?;
-        let store = Self {
-            conn: Arc::new(ConnMutex::new(conn)),
-            change_tx: None,
-            session_feed: None,
-            writes: OnceLock::new(),
-            is_writer_view: false,
-        };
-        store.init_schema()?;
+        let dir = tempfile::tempdir()
+            .map_err(|e| StoreError(format!("Couldn't create a test database directory: {e}")))?;
+        let mut store = Self::new(dir.path().join("staged.db"))?;
+        assert!(
+            store.readers.len() > 0,
+            "a test store should have read-only connections"
+        );
+        store.temp_dir = Some(dir);
         Ok(store)
     }
 
-    /// Holds the connection as a long write does, for tests of what must not
-    /// wait on it.
+    /// Holds the write connection as a long write does, for tests of what
+    /// must not wait on it.
     #[cfg(test)]
-    pub(crate) fn hold_connection(&self) -> impl std::ops::Deref<Target = Connection> + '_ {
+    pub(crate) fn hold_connection(&self) -> TimedGuard<'_, Connection> {
         self.conn.lock().unwrap()
+    }
+
+    /// Holds every read-only connection as long reads do, for tests of what
+    /// must not wait on them.
+    #[cfg(test)]
+    pub(crate) fn hold_readers(&self) -> Vec<TimedGuard<'_, Connection>> {
+        (0..self.readers.len())
+            .map(|_| self.readers.checkout().expect("the pool has readers"))
+            .collect()
+    }
+
+    /// A connection for a plain read: a read-only one when the store has
+    /// them, so the read neither waits behind writes nor holds them up;
+    /// otherwise the write connection. Its statements share one snapshot
+    /// until the guard drops. Not for a read that decides a write (see
+    /// [`connections`]).
+    #[track_caller]
+    pub(crate) fn read_conn(&self) -> ReadGuard<'_> {
+        let conn = match self.readers.checkout() {
+            Some(reader) => reader,
+            None => self.conn.lock().unwrap(),
+        };
+        ReadGuard::begin(conn)
     }
 
     /// Publish a change to the feed, if one is attached.

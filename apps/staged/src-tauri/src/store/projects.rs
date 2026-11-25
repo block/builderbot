@@ -49,7 +49,7 @@ impl Store {
     }
 
     pub fn get_project(&self, id: &str) -> Result<Option<Project>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1"),
             params![id],
@@ -63,7 +63,7 @@ impl Store {
     /// (`idx_projects_name`) and compared as stored: case-sensitively, with
     /// no trimming.
     pub fn get_project_by_name(&self, name: &str) -> Result<Option<Project>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE name = ?1"),
             params![name],
@@ -74,7 +74,7 @@ impl Store {
     }
 
     pub fn get_project_by_repo(&self, github_repo: &str) -> Result<Option<Project>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE github_repo = ?1"),
             params![github_repo],
@@ -89,7 +89,7 @@ impl Store {
         github_repo: &str,
         subpath: Option<&str>,
     ) -> Result<Option<Project>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT {PROJECT_COLUMNS} FROM projects WHERE github_repo = ?1 AND subpath IS ?2"
@@ -102,7 +102,7 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> Result<Vec<Project>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             // Newest first. The rowid tiebreak keeps the order stable when two
             // projects share a created_at millisecond, giving the later insert
@@ -118,7 +118,7 @@ impl Store {
     /// `session:<session-id>`. Projects created from the app's own UI have
     /// no creator and are never returned.
     pub fn list_project_ids_created_by(&self, actor: &str) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id FROM projects WHERE created_by = ?1 ORDER BY created_at DESC, rowid DESC",
         )?;
@@ -131,7 +131,7 @@ impl Store {
     /// carry it. Projects created from the app's own UI have no creator and
     /// are not counted.
     pub fn count_projects_by_creator(&self) -> Result<Vec<(String, usize)>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT created_by, COUNT(*) FROM projects
              WHERE created_by IS NOT NULL

@@ -428,6 +428,7 @@ impl AcpDriver {
                             session_id,
                             &self.agent_label,
                             &[],
+                            None,
                         )
                         .await?,
                     );
@@ -499,6 +500,7 @@ impl AcpDriver {
                             agent_label: &self.agent_label,
                             auth_selection: None,
                             unattended_session_mode: self.unattended_session_mode.as_deref(),
+                            timeline: None,
                         };
                         latest_prompt = catch_up_after_cancel(
                             &context,
@@ -720,8 +722,9 @@ async fn run_attach(
         .lock()
         .await
         .start_prompt(context.agent_session_id.clone());
-    let setup = tokio::time::timeout(
-        ACP_SETUP_TIMEOUT,
+    let timeline = SetupTimeline::start(&context.our_session_id, ACP_SETUP_TIMEOUT);
+    let setup = tokio::time::timeout_at(
+        timeline.deadline(),
         setup_acp_session(AcpSessionSetupContext {
             connection,
             working_dir: &context.working_dir,
@@ -734,6 +737,7 @@ async fn run_attach(
             agent_label: &context.agent_label,
             auth_selection: context.auth_selection.as_ref(),
             unattended_session_mode: context.unattended_session_mode.as_deref(),
+            timeline: Some(&timeline),
         }),
     );
     tokio::pin!(setup);
@@ -744,27 +748,34 @@ async fn run_attach(
         _ = transport.lost().cancelled() => {
             match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut setup).await {
                 Ok(result) => result,
-                Err(_) => return Ok(lost_outcome(transport)),
+                Err(_) => {
+                    timeline.failed("transport lost");
+                    return Ok(lost_outcome(transport));
+                }
             }
         }
     };
     match setup_result {
-        Ok(Ok(_)) => {}
+        Ok(Ok(_)) => timeline.completed(),
         Ok(Err(e))
             if transport.first_signal().is_some() || formatted_error_is_transport_closed(&e) =>
         {
+            timeline.failed(&e);
             log::info!(
                 "ACP session {}: attach lost its transport during setup: {e}",
                 context.agent_session_id
             );
             return Ok(lost_outcome(transport));
         }
-        Ok(Err(e)) => return Err(e),
+        Ok(Err(e)) => {
+            timeline.failed(&e);
+            return Err(e);
+        }
         Err(_) => {
-            return Err(format!(
+            return Err(timeline.timed_out(&format!(
                 "Timed out attaching to the ACP session after {}s",
                 ACP_SETUP_TIMEOUT.as_secs()
-            ))
+            )))
         }
     }
     handler.finish_catch_up().await;

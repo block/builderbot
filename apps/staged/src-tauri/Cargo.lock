@@ -76,6 +76,7 @@ dependencies = [
  "async-trait",
  "blox-cli",
  "doctor",
+ "libc",
  "log",
  "nix",
  "serde",

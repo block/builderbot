@@ -59,6 +59,8 @@ mod remote_liveness;
 mod remote_process;
 mod remote_routing;
 mod response_completion;
+mod sched_state;
+mod setup_timing;
 mod transport_loss;
 
 pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, TurnResult};
@@ -79,6 +81,7 @@ pub use transport_loss::{
 };
 
 use remote_routing::RemoteLoss;
+use setup_timing::{timed, SetupStep, SetupTimeline};
 
 static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -6952,8 +6955,9 @@ async fn run_acp_session(
     pending_reply: &RefCell<Option<oneshot::Sender<SessionTurnResult>>>,
     reattached_turn: Option<remote_process::ReattachedTurn>,
 ) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
-    let setup_task = tokio::time::timeout(
-        ACP_SETUP_TIMEOUT,
+    let timeline = SetupTimeline::start(our_session_id, ACP_SETUP_TIMEOUT);
+    let setup_task = tokio::time::timeout_at(
+        timeline.deadline(),
         setup_acp_session(AcpSessionSetupContext {
             connection,
             working_dir,
@@ -6966,6 +6970,7 @@ async fn run_acp_session(
             agent_label,
             auth_selection,
             unattended_session_mode,
+            timeline: Some(&timeline),
         }),
     );
     let transport = &handler.transport;
@@ -6989,23 +6994,27 @@ async fn run_acp_session(
                 Ok(result) => result,
                 Err(_) => {
                     transport.confirm(TransportLossPhase::Setup);
-                    return Err(transport.lost_error("during session setup"));
+                    let error = transport.lost_error("during session setup");
+                    timeline.failed(&error);
+                    return Err(error);
                 }
             }
         }
     };
     let mut setup = setup_result
         .map_err(|_| {
-            format!(
+            timeline.timed_out(&format!(
                 "Timed out waiting for ACP protocol startup after {}s",
                 ACP_SETUP_TIMEOUT.as_secs()
-            )
+            ))
         })?
         .inspect_err(|error| {
+            timeline.failed(error);
             if formatted_error_is_transport_closed(error) {
                 transport.confirm(TransportLossPhase::Setup);
             }
         })?;
+    timeline.completed();
     if steering_disabled && setup.steering_supported {
         log::info!(
             "ACP session {our_session_id}: steering disabled by the driver; steers will be refused"
@@ -8427,6 +8436,10 @@ struct AcpSessionSetupContext<'a> {
     auth_selection: Option<&'a AcpAuthenticationSelection>,
     /// See [`AcpDriver::with_unattended_session_mode`].
     unattended_session_mode: Option<&'a str>,
+    /// Records each setup step for the log and a timeout's error; `None`
+    /// where setup is not under the setup budget (an attach-cancel's
+    /// catch-up, tests).
+    timeline: Option<&'a SetupTimeline>,
 }
 
 /// `_meta` for `session/new` and `session/load` asking the Claude bridge to
@@ -8487,20 +8500,26 @@ async fn initialize_connection(
     our_session_id: &str,
     agent_label: &str,
     mcp_servers: &[McpServer],
+    timeline: Option<&SetupTimeline>,
 ) -> Result<(InitializeResponse, TaskTrackingMode), String> {
     let writer = &handler.writer;
     let init_request = build_initialize_request();
 
-    let init_response = connection
-        .send_request(init_request)
-        .block_task()
-        .await
-        .map_err(|e| format!("ACP init failed: {e:?}"))?;
+    let init_response = timed(
+        timeline,
+        SetupStep::Initialize,
+        connection.send_request(init_request).block_task(),
+    )
+    .await
+    .map_err(|e| format!("ACP init failed: {e:?}"))?;
 
     log_initialize_response(agent_label, &init_response);
-    writer
-        .on_initialize(&initialize_metadata(&init_response))
-        .await;
+    timed(
+        timeline,
+        SetupStep::RecordInitialize,
+        writer.on_initialize(&initialize_metadata(&init_response)),
+    )
+    .await;
 
     if init_response.protocol_version != ProtocolVersion::V1 {
         return Err(format!(
@@ -8570,6 +8589,7 @@ async fn load_acp_session(
         agent_label,
         auth_selection,
         unattended_session_mode,
+        timeline,
         ..
     } = *context;
     let writer = &handler.writer;
@@ -8586,19 +8606,29 @@ async fn load_acp_session(
             // sessions keep the raw background-task frames flowing.
             .meta(background_task_tracking_meta(task_tracking_mode))
     };
-    let load_response = send_session_setup_request(
-        connection,
-        load_request,
-        &init_response.auth_methods,
-        auth_selection,
-        "load ACP session",
+    let load_response = timed(
+        timeline,
+        SetupStep::LoadSession,
+        send_session_setup_request(
+            connection,
+            load_request,
+            &init_response.auth_methods,
+            auth_selection,
+            "load ACP session",
+        ),
     )
     .await?;
 
     if let Some(ref modes) = load_response.modes {
-        writer.on_model_state_update(modes).await;
+        timed(
+            timeline,
+            SetupStep::RecordModes,
+            writer.on_model_state_update(modes),
+        )
+        .await;
     }
-    apply_unattended_session_mode(
+    apply_unattended_session_mode_timed(
+        timeline,
         connection,
         existing_id,
         load_response.modes.as_ref(),
@@ -8606,15 +8636,43 @@ async fn load_acp_session(
         agent_label,
     )
     .await;
-    apply_or_record_session_config_options(
-        connection,
-        existing_id,
-        load_response.config_options.as_deref(),
-        config_options,
-        writer,
-        true,
+    timed(
+        timeline,
+        SetupStep::ConfigOptions,
+        apply_or_record_session_config_options(
+            connection,
+            existing_id,
+            load_response.config_options.as_deref(),
+            config_options,
+            writer,
+            true,
+        ),
     )
     .await
+}
+
+/// [`apply_unattended_session_mode`], timed as a setup step only when there
+/// is a mode to apply, so the log shows no empty step.
+async fn apply_unattended_session_mode_timed(
+    timeline: Option<&SetupTimeline>,
+    connection: &ConnectionTo<Agent>,
+    agent_session_id: &str,
+    modes: Option<&SessionModeState>,
+    unattended_session_mode: Option<&str>,
+    agent_label: &str,
+) {
+    let apply = apply_unattended_session_mode(
+        connection,
+        agent_session_id,
+        modes,
+        unattended_session_mode,
+        agent_label,
+    );
+    if unattended_session_mode.is_some() {
+        timed(timeline, SetupStep::SetMode, apply).await;
+    } else {
+        apply.await;
+    }
 }
 
 async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSessionSetup, String> {
@@ -8630,6 +8688,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         agent_label,
         auth_selection,
         unattended_session_mode,
+        timeline,
     } = context;
     let writer = &handler.writer;
     let (init_response, task_tracking_mode) = initialize_connection(
@@ -8638,6 +8697,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         our_session_id,
         agent_label,
         mcp_servers,
+        timeline,
     )
     .await?;
     let agent_capabilities = init_response.agent_capabilities.clone();
@@ -8648,7 +8708,12 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         Some(existing_id) => {
             // Before the load goes out: its replay streams `session/update`s
             // ahead of the response, and they must pass the own-session gate.
-            handler.name_session(existing_id).await;
+            timed(
+                timeline,
+                SetupStep::NameSession,
+                handler.name_session(existing_id),
+            )
+            .await;
             load_acp_session(&context, existing_id, &init_response, task_tracking_mode).await?;
             Ok(AcpSessionSetup {
                 agent_session_id: existing_id.to_string(),
@@ -8664,25 +8729,42 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                     .mcp_servers(mcp_servers.to_vec())
                     .meta(background_task_tracking_meta(task_tracking_mode))
             };
-            let session_response = send_session_setup_request(
-                connection,
-                new_session_request,
-                &init_response.auth_methods,
-                auth_selection,
-                "create ACP session",
+            let session_response = timed(
+                timeline,
+                SetupStep::NewSession,
+                send_session_setup_request(
+                    connection,
+                    new_session_request,
+                    &init_response.auth_methods,
+                    auth_selection,
+                    "create ACP session",
+                ),
             )
             .await?;
 
             let new_id = session_response.session_id.to_string();
-            handler.name_session(&new_id).await;
-            store
-                .set_agent_session_id(our_session_id, &new_id)
-                .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
+            timed(
+                timeline,
+                SetupStep::NameSession,
+                handler.name_session(&new_id),
+            )
+            .await;
+            timed(timeline, SetupStep::SaveAgentSessionId, async {
+                store.set_agent_session_id(our_session_id, &new_id)
+            })
+            .await
+            .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
 
             if let Some(ref modes) = session_response.modes {
-                writer.on_model_state_update(modes).await;
+                timed(
+                    timeline,
+                    SetupStep::RecordModes,
+                    writer.on_model_state_update(modes),
+                )
+                .await;
             }
-            apply_unattended_session_mode(
+            apply_unattended_session_mode_timed(
+                timeline,
                 connection,
                 &new_id,
                 session_response.modes.as_ref(),
@@ -8690,13 +8772,17 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 agent_label,
             )
             .await;
-            apply_or_record_session_config_options(
-                connection,
-                &new_id,
-                session_response.config_options.as_deref(),
-                config_options,
-                writer,
-                false,
+            timed(
+                timeline,
+                SetupStep::ConfigOptions,
+                apply_or_record_session_config_options(
+                    connection,
+                    &new_id,
+                    session_response.config_options.as_deref(),
+                    config_options,
+                    writer,
+                    false,
+                ),
             )
             .await?;
 
@@ -9789,6 +9875,7 @@ mod tests {
                     agent_label: "Codex",
                     auth_selection: None,
                     unattended_session_mode: None,
+                    timeline: None,
                 })
                 .await
                 .map(|_| ())
@@ -9858,6 +9945,7 @@ mod tests {
                     agent_label: "Claude",
                     auth_selection: None,
                     unattended_session_mode: None,
+                    timeline: None,
                 })
                 .await
                 .map(|_| ())
@@ -9874,6 +9962,80 @@ mod tests {
             calls.lock().unwrap().as_slice(),
             &["session/load:session-1"]
         );
+    }
+
+    /// A setup that runs out of budget waiting on `session/new` names that
+    /// step, the steps that finished before it, and the timer's lateness.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_setup_timeout_names_the_step_it_was_waiting_on() {
+        use agent_client_protocol::schema::v1::{
+            InitializeRequest, InitializeResponse, NewSessionResponse,
+        };
+
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(InitializeResponse::new(request.protocol_version))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    // Never answers, as a stalled session thread never reads
+                    // the answer.
+                    std::future::pending::<()>().await;
+                    responder.respond(NewSessionResponse::new("never"))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+        let headline = "Timed out waiting for ACP protocol startup after 90s";
+
+        let error = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                let timeline =
+                    super::SetupTimeline::start("local-session", super::ACP_SETUP_TIMEOUT);
+                let setup = tokio::time::timeout_at(
+                    timeline.deadline(),
+                    setup_acp_session(AcpSessionSetupContext {
+                        connection: &connection,
+                        working_dir: Path::new("/tmp"),
+                        store: &store,
+                        handler: &handler,
+                        our_session_id: "local-session",
+                        acp_session_id: None,
+                        config_options: &[],
+                        mcp_servers: &[],
+                        agent_label: "Claude",
+                        auth_selection: None,
+                        unattended_session_mode: None,
+                        timeline: Some(&timeline),
+                    }),
+                )
+                .await;
+                match setup {
+                    Err(_) => Ok(timeline.timed_out(headline)),
+                    Ok(_) => Err(agent_client_protocol::util::internal_error(
+                        "setup should not finish",
+                    )),
+                }
+            })
+            .await
+            .expect("the setup should time out");
+
+        let expected = format!(
+            "{headline}: waiting for session/new for 90.0s; completed: initialize 0.00s, \
+             storing initialize 0.00s; timer fired 0.00s late; scheduling at start: "
+        );
+        assert!(error.starts_with(&expected), "{error}");
+        assert!(error.contains("; at timeout: "), "{error}");
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {

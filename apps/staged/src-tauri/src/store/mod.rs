@@ -45,6 +45,7 @@ mod session_titles;
 mod sessions;
 mod tag_import;
 mod tags;
+mod timed_lock;
 mod tool_bodies;
 mod tool_images;
 mod workdirs;
@@ -319,13 +320,16 @@ pub struct ResolvedSession {
 // Store
 // =============================================================================
 
-/// The connection's lock. The load-test harness build times it.
+/// The connection's lock: one that logs slow waits and holds (see
+/// [`timed_lock`]), or, in the load-test harness build, one that records
+/// them as metrics.
 #[cfg(not(feature = "perf-harness"))]
-type ConnMutex = std::sync::Mutex<Connection>;
+type ConnMutex = timed_lock::TimedMutex<Connection>;
 #[cfg(feature = "perf-harness")]
 type ConnMutex = crate::perf_harness::store_lock::TimedMutex<Connection>;
 
 pub struct Store {
+    /// The one connection, behind a timed lock (see [`ConnMutex`]).
     conn: ConnMutex,
     /// Change feed for mutating methods. `None` (the default, and what unit
     /// tests get) makes every publish a no-op; the app wires a sender in at

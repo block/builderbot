@@ -9,6 +9,7 @@ pub mod acp_tools_reconciler;
 pub mod actions;
 pub mod agent;
 pub mod app_lifecycle;
+mod app_log;
 pub mod background_sync;
 pub mod blox;
 mod branch_teardown;
@@ -2343,13 +2344,7 @@ pub fn run() {
                 });
             }
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            app.handle().plugin(app_log::plugin())?;
             Ok(())
         })
         .on_menu_event(|app, event| {

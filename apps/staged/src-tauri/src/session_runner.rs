@@ -37,6 +37,7 @@
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
 pub(crate) mod attachments;
+mod connection_turn;
 mod disconnect;
 mod failed_run;
 mod late_stop;
@@ -2400,16 +2401,8 @@ pub fn start_session(
                     return Ok(AgentRunOutcome::Cancelled);
                 }
 
-                // Open a session-scoped connection, then send this turn's
-                // prompt over it. Without a background hold the connection
-                // still tears the bridge process down as soon as the prompt
-                // resolves (so a connection serves exactly one turn); with
-                // one, the prompt resolves at hold entry while the bridge
-                // keeps serving background work, so wait for the settled
-                // event before doing anything downstream — Pikchr
-                // validation, post-completion hooks, and the terminal status
-                // must all fire on actual teardown, not on the prompt
-                // resolving.
+                // Open a session-scoped connection, send this turn's prompt
+                // over it, and wait for it to settle (see `connection_turn`).
                 //
                 // A Pikchr correction re-connects, so only the last
                 // connection's settle reason describes how the session ended.
@@ -2419,20 +2412,20 @@ pub fn start_session(
                 prompt_failed.set(false);
                 background_work_left.set(false);
                 reattached.set(false);
-                let turn_result = match driver
-                    .connect(
-                        &config.session_id,
-                        &config.working_dir,
-                        &store_trait,
-                        &writer_trait,
-                        &driver_cancel,
-                        agent_session_id.as_deref(),
-                        &selected_acp_config_options,
-                        None,
-                    )
-                    .await
-                {
-                    Ok(mut connection) => {
+                let turn = connection_turn::run_connection_turn(
+                    &driver,
+                    connection_turn::ConnectionTurnRequest {
+                        session_id: &config.session_id,
+                        working_dir: &config.working_dir,
+                        store: &store_trait,
+                        writer: &writer_trait,
+                        cancel: &driver_cancel,
+                        agent_session_id: agent_session_id.as_deref(),
+                        config_options: &selected_acp_config_options,
+                        prompt: &prompt,
+                        images,
+                    },
+                    |connection| {
                         // Expose the connection's per-task stop where the
                         // `stop_session_async_task` command (another thread)
                         // can reach it; requests are only served while the
@@ -2454,69 +2447,34 @@ pub fn start_session(
                                 connection.detach_handle(),
                             );
                         }
-                        let settled_rx = connection.take_settled_receiver();
-                        // The turn, raced against the inactivity watchdog: a
-                        // finished note behind a silent connection cancels the
-                        // turn on this side (the agent, if it is still there,
-                        // gets a `session/cancel`; a hung proxy never answers
-                        // and the driver gives up after its ack deadline) and
-                        // the result is then read as a lost connection with
-                        // the note delivered.
-                        let prompt_future = connection.prompt(&prompt, images);
-                        tokio::pin!(prompt_future);
-                        let turn_result = match watchdog.as_ref() {
-                            Some(watchdog) => tokio::select! {
-                                biased;
-                                result = &mut prompt_future => result,
-                                idle = watchdog.finished_note_found() => {
-                                    inactivity_probe_found_note.set(Some(idle));
-                                    remote_outbox_collected_for_turn.set(true);
-                                    remote_outbox_own_note_collected.set(true);
-                                    driver_cancel.cancel();
-                                    prompt_future.await
-                                }
-                            },
-                            None => prompt_future.await,
-                        };
-                        match settled_rx {
-                            Some(rx) => match rx.await {
-                                Ok(settled) => {
-                                    settle_reason.set(Some(settled.reason));
-                                    transport_loss.set(settled.transport_loss);
-                                    cancel_unacknowledged.set(settled.cancel_unacknowledged);
-                                    prompt_failed.set(settled.prompt_failed);
-                                    background_work_left.set(settled.background_work_left);
-                                    match settled.reason {
-                                        acp_client::SessionSettleReason::HeldUntilCap => {
-                                            log::warn!(
-                                                "Session {}: background hold cap expired before \
-                                                 quiescence; post-completion hooks run \
-                                                 best-effort",
-                                                config.session_id
-                                            );
-                                        }
-                                        acp_client::SessionSettleReason::HoldStopped => {
-                                            log::info!(
-                                                "Session {}: background hold stopped before \
-                                                 quiescence; the completed turn stands and \
-                                                 post-completion hooks run best-effort",
-                                                config.session_id
-                                            );
-                                        }
-                                        _ => {}
-                                    }
-                                    settled.fold_turn_result(turn_result)
-                                }
-                                // The connection task died without settling;
-                                // the turn result is the best information
-                                // available.
-                                Err(_) => turn_result,
-                            },
-                            None => turn_result,
-                        }
-                    }
-                    Err(e) => Err(e),
-                };
+                    },
+                    // The turn, raced against the inactivity watchdog: a
+                    // finished note behind a silent connection cancels the
+                    // turn, and the result is then read as a lost connection
+                    // with the note delivered.
+                    watchdog
+                        .as_ref()
+                        .map(|watchdog| watchdog.finished_note_found()),
+                    |idle| {
+                        inactivity_probe_found_note.set(Some(idle));
+                        remote_outbox_collected_for_turn.set(true);
+                        remote_outbox_own_note_collected.set(true);
+                        driver_cancel.cancel();
+                    },
+                )
+                .await;
+                // Why setup failed, when a start over can fix it (see
+                // `startup_restart`). Read off the settle: the error text
+                // reaches here wrapped by the SDK.
+                let setup_failure = turn.setup_failure();
+                if let Some(settled) = &turn.settled {
+                    settle_reason.set(Some(settled.reason));
+                    transport_loss.set(settled.transport_loss);
+                    cancel_unacknowledged.set(settled.cancel_unacknowledged);
+                    prompt_failed.set(settled.prompt_failed);
+                    background_work_left.set(settled.background_work_left);
+                }
+                let turn_result = turn.result;
 
                 // The turn's writes went on the store's write queue (see
                 // `store::write_queue`). Everything below reads the
@@ -2600,45 +2558,21 @@ pub fn start_session(
                 // A connection that failed before its prompt went out is
                 // started over once (see `startup_restart`): its turn's
                 // prompt row is already stored, and the agent never got it.
-                if let Err(error) = &turn_result {
-                    let restart = if cancel_token.is_cancelled()
-                        || reattached.get()
-                        || crate::app_lifecycle::is_quitting(&app_handle)
-                    {
-                        None
-                    } else {
-                        startup_restarts.after_failed_connection(
-                            error,
-                            agent_session_id.is_some(),
-                            || {
-                                startup_restart::agent_output_recorded_or_assumed(
-                                    &store,
-                                    &config.session_id,
-                                )
-                            },
-                        )
-                    };
-                    match restart {
-                        Some(startup_restart::StartupRestart::RetryTimedOutSetup) => {
-                            log::warn!(
-                                "Session {}: ACP setup timed out before the prompt was sent;                                  retrying once on a fresh agent process: {error}",
-                                config.session_id
-                            );
-                            include_images = images_this_attempt;
-                            continue;
-                        }
-                        Some(startup_restart::StartupRestart::StartFresh) => {
-                            log::warn!(
-                                "Session {}: the agent has no session {} and never answered in                                  this one; starting a fresh agent session: {error}",
-                                config.session_id,
-                                agent_session_id.as_deref().unwrap_or_default()
-                            );
-                            agent_session_id = None;
-                            include_images = images_this_attempt;
-                            continue;
-                        }
-                        None => {}
-                    }
+                if startup_restarts
+                    .after_turn(
+                        &config.session_id,
+                        &turn_result,
+                        setup_failure,
+                        cancel_token.is_cancelled()
+                            || reattached.get()
+                            || crate::app_lifecycle::is_quitting(&app_handle),
+                        &mut agent_session_id,
+                        &store,
+                    )
+                    .is_some()
+                {
+                    include_images = images_this_attempt;
+                    continue;
                 }
 
                 if !should_validate_pikchr_after_turn(&turn_result, cancel_token.is_cancelled()) {
@@ -10283,6 +10217,8 @@ mod tests {
     mod detached_turn_pickup;
     mod note_completion;
     mod note_draft;
+    #[cfg(unix)]
+    mod startup_restart_connection;
     mod swept_note_pikchr;
     mod taken_over_note;
     mod unread_run_end;
@@ -12363,6 +12299,7 @@ draft file (its path is in your instructions), counting from the first non-blank
             cancel_unacknowledged,
             background_work_left: false,
             prompt_failed: false,
+            setup_failure: None,
         }
     }
 

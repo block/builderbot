@@ -7,7 +7,7 @@
 //! - Remote workspace support via Blox
 //! - Cancellation support
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -1084,6 +1084,28 @@ pub struct SessionSettled {
     /// This is the structured form of "the run failed on the prompt": a
     /// caller that needs to know it reads this instead of the error text.
     pub prompt_failed: bool,
+    /// Why the connection's session setup failed, for the failures a caller
+    /// can start over from (see [`SetupFailure`]). `None` for a connection
+    /// that got through setup, failed in it for another reason, or settled
+    /// any way but [`SessionSettleReason::Failed`].
+    ///
+    /// The structured form of "setup timed out" and "no such session": the
+    /// error text reaches the caller wrapped by the SDK ("ACP protocol
+    /// failed: Error { … }"), so it is not something to match on.
+    pub setup_failure: Option<SetupFailure>,
+}
+
+/// A session setup failure a caller can start over from. Recorded on
+/// [`SessionSettled::setup_failure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupFailure {
+    /// A setup step ran past its deadline (see
+    /// [`AcpDriver::with_setup_step_timeout`]). Setup comes before the
+    /// prompt, so the agent never got the connection's turn.
+    TimedOut,
+    /// The agent said it has no session by the id it was asked to load (see
+    /// [`agent_output_recorded`] for when starting fresh loses nothing).
+    SessionNotFound,
 }
 
 impl SessionSettled {
@@ -1258,6 +1280,9 @@ pub struct AcpDriver {
     /// when the agent advertises it; see
     /// [`AcpDriver::with_unattended_session_mode`].
     unattended_session_mode: Option<String>,
+    /// Each session setup step's deadline (see [`ACP_SETUP_STEP_TIMEOUT`]
+    /// and [`AcpDriver::with_setup_step_timeout`]).
+    setup_step_timeout: Duration,
     /// The workstation process a Blox driver's session runs on; `None` for
     /// local drivers. See [`AcpDriver::for_workspace`].
     blox_process: Option<BloxProcess>,
@@ -1295,6 +1320,7 @@ impl AcpDriver {
                 agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
+                setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
                 blox_process: None,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
@@ -1318,6 +1344,7 @@ impl AcpDriver {
                 agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
+                setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
                 blox_process: None,
             })
             .ok_or_else(|| {
@@ -1326,7 +1353,9 @@ impl AcpDriver {
             })
     }
 
-    pub(crate) fn from_agent(agent: &crate::types::AcpAgent) -> Self {
+    /// A local driver for `agent`'s command, without looking it up among the
+    /// known agents.
+    pub fn from_agent(agent: &crate::types::AcpAgent) -> Self {
         Self {
             binary_path: agent.binary_path.clone(),
             acp_args: agent.acp_args.clone(),
@@ -1342,6 +1371,7 @@ impl AcpDriver {
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
     }
@@ -1404,6 +1434,7 @@ impl AcpDriver {
             unattended_session_mode: agent_id
                 .and_then(blox_unattended_session_mode)
                 .map(str::to_string),
+            setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
             blox_process: Some(BloxProcess::new(workspace_name, command)),
         }
     }
@@ -1521,6 +1552,14 @@ impl AcpDriver {
     /// it is and the omission is logged. `None` clears the request.
     pub fn with_unattended_session_mode(mut self, mode_id: Option<String>) -> Self {
         self.unattended_session_mode = mode_id;
+        self
+    }
+
+    /// Give each session setup step `timeout` instead of
+    /// [`ACP_SETUP_STEP_TIMEOUT`]'s 90s. For tests and harnesses that need a
+    /// setup to time out without waiting a minute and a half.
+    pub fn with_setup_step_timeout(mut self, timeout: Duration) -> Self {
+        self.setup_step_timeout = timeout;
         self
     }
 
@@ -3056,6 +3095,7 @@ impl AcpDriver {
         let unattended_session_mode = self.unattended_session_mode.clone();
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
+        let setup_step_timeout = self.setup_step_timeout;
         let connection_transport = Arc::clone(&transport);
 
         let connection_task = tokio::task::spawn_local(async move {
@@ -3070,6 +3110,9 @@ impl AcpDriver {
             // with the child already stopped — the old per-turn ordering.
             let pending_reply: RefCell<Option<oneshot::Sender<SessionTurnResult>>> =
                 RefCell::new(None);
+            // Set by `run_acp_session` when setup fails in a way the caller
+            // can start over from, while it still holds the error unwrapped.
+            let setup_failure: Cell<Option<SetupFailure>> = Cell::new(None);
             let protocol_result: Result<_, String> = staged_client(&handler)
                 .connect_with(byte_streams, async |connection| {
                     let result = run_acp_session(
@@ -3095,6 +3138,8 @@ impl AcpDriver {
                         &hold_active_for_task,
                         &pending_reply,
                         reattached_turn,
+                        setup_step_timeout,
+                        &setup_failure,
                     )
                     .await;
                     session_returned.set(true);
@@ -3209,6 +3254,10 @@ impl AcpDriver {
                 cancel_unacknowledged: transport.cancel_unacknowledged(),
                 background_work_left: transport.background_work_left(),
                 prompt_failed: transport.answered_error(),
+                setup_failure: match settle_reason {
+                    SessionSettleReason::Failed => setup_failure.get(),
+                    _ => None,
+                },
             });
 
             if let Some(reply) = pending_reply.borrow_mut().take() {
@@ -6981,11 +7030,13 @@ async fn run_acp_session(
     hold_active: &AtomicBool,
     pending_reply: &RefCell<Option<oneshot::Sender<SessionTurnResult>>>,
     reattached_turn: Option<remote_process::ReattachedTurn>,
+    setup_step_timeout: Duration,
+    setup_failure: &Cell<Option<SetupFailure>>,
 ) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
     let timeline = SetupTimeline::start(
         our_session_id,
         ACP_SETUP_TIMEOUT_HEADLINE,
-        ACP_SETUP_STEP_TIMEOUT,
+        setup_step_timeout,
     );
     // No deadline over the whole: each step has its own (see
     // `ACP_SETUP_STEP_TIMEOUT`), and a step's timeout is its error.
@@ -7036,6 +7087,7 @@ async fn run_acp_session(
         if formatted_error_is_transport_closed(error) {
             transport.confirm(TransportLossPhase::Setup);
         }
+        setup_failure.set(classify_setup_failure(&timeline, error));
     })?;
     timeline.completed();
     if steering_disabled && setup.steering_supported {
@@ -8015,25 +8067,26 @@ pub fn is_missing_mcp_transport_error(error: &str) -> bool {
     error.contains(MISSING_MCP_TRANSPORT_PREFIX)
 }
 
-/// Whether a session error is a setup step's timeout (see
-/// [`ACP_SETUP_STEP_TIMEOUT`]): the agent did not finish starting the session,
-/// so no prompt of the connection's was sent. A caller can start over on a
-/// fresh connection without anything having been done twice.
-pub fn is_session_setup_timeout_error(error: &str) -> bool {
-    error.starts_with(ACP_SETUP_TIMEOUT_HEADLINE)
-}
-
 /// Starts the error a session setup ends with when the agent said it has no
 /// session by the id it was asked for, typically on `session/load` of an id
 /// that was stored for a session the agent never kept (it never got a
-/// prompt). Producer and matcher share it, as with the prefixes above.
+/// prompt).
 const SESSION_NOT_FOUND_PREFIX: &str = "The agent has no session by that id";
 
-/// Whether a session error means the agent has no session by the id it was
-/// asked to load. See [`agent_output_recorded`] for when starting fresh with
-/// `session/new` instead loses nothing.
-pub fn is_session_not_found_error(error: &str) -> bool {
-    error.starts_with(SESSION_NOT_FOUND_PREFIX)
+/// What a failed setup can be started over from, if anything. `error` is
+/// setup's own error, before the SDK wraps it in "ACP protocol failed: …" on
+/// its way to the caller: matching the text after that is what kept a
+/// timed-out setup from ever being retried. A step's timeout is told by the
+/// timeline itself; a refused load by the prefix its producer
+/// (`send_session_setup_request`) put on the error.
+fn classify_setup_failure(timeline: &SetupTimeline, error: &str) -> Option<SetupFailure> {
+    if timeline.timed_out() {
+        Some(SetupFailure::TimedOut)
+    } else if error.starts_with(SESSION_NOT_FOUND_PREFIX) {
+        Some(SetupFailure::SessionNotFound)
+    } else {
+        None
+    }
 }
 
 /// Whether `store` holds anything the agent said in `session_id`: a replay
@@ -9310,6 +9363,8 @@ mod tests {
     mod response_completion;
     mod session_isolation;
     mod settlement;
+    #[cfg(unix)]
+    mod setup_failure;
     mod transport_loss;
     mod turn_control;
 
@@ -10116,12 +10171,20 @@ mod tests {
             .expect("protocol should succeed")
             .expect_err("an unknown session should fail the load");
 
-        assert!(super::is_session_not_found_error(&error), "{error}");
         assert!(
             error.starts_with("The agent has no session by that id (failed to load ACP session): "),
             "{error}"
         );
-        assert!(!super::is_session_setup_timeout_error(&error), "{error}");
+        // What the runner starts fresh from (see `SessionSettled::setup_failure`).
+        let timeline = super::SetupTimeline::start(
+            "local-session",
+            super::ACP_SETUP_TIMEOUT_HEADLINE,
+            super::ACP_SETUP_STEP_TIMEOUT,
+        );
+        assert_eq!(
+            super::classify_setup_failure(&timeline, &error),
+            Some(super::SetupFailure::SessionNotFound)
+        );
     }
 
     #[test]
@@ -10387,8 +10450,6 @@ mod tests {
         assert!(error.starts_with(expected), "{error}");
         assert!(error.contains("; at timeout: "), "{error}");
         assert!(!is_transport_loss_error(&error), "{error}");
-        // What the runner retries on a fresh agent process.
-        assert!(super::is_session_setup_timeout_error(&error), "{error}");
     }
 
     /// A config step that stalls after a late `session/new` times out on its
@@ -11629,6 +11690,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_env_snapshot(snapshot.clone());
@@ -11647,6 +11709,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_env_snapshot(snapshot);
@@ -11676,6 +11739,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_interpreter_env_snapshot(snapshot.clone());
@@ -11694,6 +11758,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_interpreter_env_snapshot(snapshot);
@@ -14737,6 +14802,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             cancel_unacknowledged: false,
             background_work_left: false,
             prompt_failed: false,
+            setup_failure: None,
         };
 
         // A hold that was cancelled or failed after the turn completed is the

@@ -196,6 +196,12 @@ impl SetupTimeline {
         );
     }
 
+    /// Whether a step has timed out: the structured form of a timeout's
+    /// error, which callers see only after the SDK has wrapped it.
+    pub(super) fn timed_out(&self) -> bool {
+        self.timed_out.get()
+    }
+
     /// Log a completed setup with each step's time.
     pub(super) fn completed(&self) {
         log::info!(

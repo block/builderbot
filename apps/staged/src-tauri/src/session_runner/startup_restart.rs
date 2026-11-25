@@ -2,7 +2,7 @@
 //!
 //! Two failures leave nothing done that a second connection would do twice:
 //!
-//! - A setup step timed out (`acp_client::is_session_setup_timeout_error`).
+//! - A setup step timed out (`acp_client::SetupFailure::TimedOut`).
 //!   Setup comes before the prompt, so the agent never got this turn. The
 //!   start is tried once more on a fresh agent process: on a machine where
 //!   the session's thread was not scheduled for a minute and a half, the
@@ -11,7 +11,7 @@
 //!   the user: the turn's prompt row is stored before the loop and the retry
 //!   sends the same prompt.
 //! - The agent has no session by the stored id
-//!   (`acp_client::is_session_not_found_error`) and nothing the agent said is
+//!   (`acp_client::SetupFailure::SessionNotFound`) and nothing the agent said is
 //!   recorded for the session (`acp_client::agent_output_recorded`). Earlier
 //!   builds stored the id as soon as `session/new` answered, before setup
 //!   finished, so a session whose setup failed kept an id for a conversation
@@ -19,8 +19,16 @@
 //!   `session/new` loses nothing. A session the agent has spoken in keeps
 //!   the error: starting over there would silently drop its conversation.
 //!
+//! Both are read off the connection's settle
+//! (`acp_client::SessionSettled::setup_failure`), never off the error text:
+//! that reaches the runner wrapped by the SDK ("ACP protocol failed: Error {
+//! … }"), and matching its start is what kept the timeout retry from ever
+//! firing.
+//!
 //! Each happens at most once per run, so a run makes at most three
 //! connections before it gives up.
+
+use acp_client::SetupFailure;
 
 /// How to start a failed connection over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,20 +48,21 @@ pub(super) struct StartupRestarts {
 }
 
 impl StartupRestarts {
-    /// Whether to start over after a connection failed with `error`, and
-    /// how. `resuming` is whether the connection was asked to load a stored
-    /// agent session. `agent_output_recorded` is only asked when the agent
-    /// refused that load as not found.
+    /// Whether to start over after a connection failed, and how.
+    /// `setup_failure` is what its settle said about setup. `resuming` is
+    /// whether the connection was asked to load a stored agent session.
+    /// `agent_output_recorded` is only asked when the agent refused that load
+    /// as not found.
     ///
     /// The caller rules out a Stop, a quit and a reattached turn first:
     /// those are not startup failures to try again.
     pub(super) fn after_failed_connection(
         &mut self,
-        error: &str,
+        setup_failure: Option<SetupFailure>,
         resuming: bool,
         agent_output_recorded: impl FnOnce() -> bool,
     ) -> Option<StartupRestart> {
-        if acp_client::is_session_setup_timeout_error(error) {
+        if setup_failure == Some(SetupFailure::TimedOut) {
             if self.timeout_retried {
                 return None;
             }
@@ -62,13 +71,55 @@ impl StartupRestarts {
         }
         if resuming
             && !self.started_fresh
-            && acp_client::is_session_not_found_error(error)
+            && setup_failure == Some(SetupFailure::SessionNotFound)
             && !agent_output_recorded()
         {
             self.started_fresh = true;
             return Some(StartupRestart::StartFresh);
         }
         None
+    }
+
+    /// The runner's start-over decision once a connection's turn has ended
+    /// with `turn_result`: [`Self::after_failed_connection`] for a failed
+    /// one, unless `ruled_out` (a Stop, a quit or a reattached turn). Logs
+    /// the restart and, for [`StartupRestart::StartFresh`], clears
+    /// `agent_session_id` so the next connection sends `session/new`. The
+    /// caller sends the same prompt again on a fresh connection.
+    pub(super) fn after_turn(
+        &mut self,
+        session_id: &str,
+        turn_result: &Result<acp_client::AgentRunOutcome, String>,
+        setup_failure: Option<SetupFailure>,
+        ruled_out: bool,
+        agent_session_id: &mut Option<String>,
+        store: &crate::store::Store,
+    ) -> Option<StartupRestart> {
+        let Err(error) = turn_result else {
+            return None;
+        };
+        if ruled_out {
+            return None;
+        }
+        let restart =
+            self.after_failed_connection(setup_failure, agent_session_id.is_some(), || {
+                agent_output_recorded_or_assumed(store, session_id)
+            })?;
+        match restart {
+            StartupRestart::RetryTimedOutSetup => log::warn!(
+                "Session {session_id}: ACP setup timed out before the prompt was sent; retrying \
+                 once on a fresh agent process: {error}"
+            ),
+            StartupRestart::StartFresh => {
+                log::warn!(
+                    "Session {session_id}: the agent has no session {} and never answered in \
+                     this one; starting a fresh agent session: {error}",
+                    agent_session_id.as_deref().unwrap_or_default()
+                );
+                *agent_session_id = None;
+            }
+        }
+        Some(restart)
     }
 }
 
@@ -93,10 +144,8 @@ mod tests {
     use super::*;
     use crate::store::{MessageRole, Store};
 
-    const TIMEOUT: &str = "Timed out waiting for ACP protocol startup: session/new did not \
-                           answer within 90s; completed: initialize 0.50s";
-    const NOT_FOUND: &str = "The agent has no session by that id (failed to load ACP \
-                             session): Error { code: -32002 }";
+    const TIMEOUT: Option<SetupFailure> = Some(SetupFailure::TimedOut);
+    const NOT_FOUND: Option<SetupFailure> = Some(SetupFailure::SessionNotFound);
 
     #[test]
     fn a_setup_timeout_is_retried_once() {
@@ -124,18 +173,23 @@ mod tests {
     #[test]
     fn other_failures_are_not_retried() {
         let mut restarts = StartupRestarts::default();
-        for error in [
-            "Prompt failed: overloaded",
-            "Failed to create ACP session: Error { code: -32603 }",
-            "ACP authentication is required to load ACP session. Sign this agent in, then retry.",
-            "Remote agent lost: bloxlet reports the process stopped",
-        ] {
-            assert_eq!(
-                restarts.after_failed_connection(error, true, || false),
-                None,
-                "{error}"
-            );
-        }
+        // A connection that failed any other way (the prompt, authentication,
+        // a lost remote agent) settles without a setup failure.
+        assert_eq!(restarts.after_failed_connection(None, true, || false), None);
+        assert_eq!(
+            restarts.after_failed_connection(None, false, || false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_session_the_agent_does_not_know_is_not_started_fresh() {
+        // Only a load can be answered by starting fresh instead.
+        let mut restarts = StartupRestarts::default();
+        assert_eq!(
+            restarts.after_failed_connection(NOT_FOUND, false, || unreachable!()),
+            None
+        );
     }
 
     #[test]

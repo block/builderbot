@@ -213,6 +213,7 @@ impl FakeSq {
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
     }

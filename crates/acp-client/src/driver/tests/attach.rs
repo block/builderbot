@@ -294,6 +294,7 @@ fn driver(log: &Path, mode: &str, probe: Arc<ScriptedProbe>, dedicated: bool) ->
         agent_process_observer: None,
         steering_disabled: false,
         unattended_session_mode: None,
+        setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
         blox_process: Some(BloxProcess {
             workspace_name: "ws".to_string(),
             command: BloxAcpCommand {

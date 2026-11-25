@@ -1268,18 +1268,27 @@ fn reserve_child_session(
 /// keeps the diagram session (which records the failure) reachable from the
 /// failed tool card. A write failure here is non-fatal — the button is simply
 /// missing until (and unless) the call completes successfully.
+///
+/// Queued behind the parent's own transcript writes (see
+/// `store::write_queue`) rather than written in place: this runs on the
+/// parent's session thread, and the row belongs after the `generate_pikchr`
+/// tool call the parent's writer has queued.
 fn announce_pikchr_child_session(store: &Store, parent_session_id: &str, child_session_id: &str) {
     let metadata = AcpMessageMetadata {
         acp_event_kind: Some(PIKCHR_SESSION_STARTED_EVENT.to_string()),
         acp_content: Some(serde_json::json!({ "innerSessionId": child_session_id })),
         ..Default::default()
     };
-    if let Err(e) = store.add_acp_metadata_message(parent_session_id, &metadata) {
-        log::warn!(
-            "Failed to announce Pikchr child session {child_session_id} in parent \
-             session {parent_session_id}: {e}"
-        );
-    }
+    let parent_session_id = parent_session_id.to_string();
+    let child_session_id = child_session_id.to_string();
+    store.queue_write(move |store| {
+        if let Err(e) = store.add_acp_metadata_message(&parent_session_id, &metadata) {
+            log::warn!(
+                "Failed to announce Pikchr child session {child_session_id} in parent \
+                 session {parent_session_id}: {e}"
+            );
+        }
+    });
 }
 
 fn mark_pikchr_child_session_error(store: &Store, session_id: &str, message: &str) {
@@ -1850,6 +1859,7 @@ arrow from COLL.e to SNOW.w"#;
             .expect("create parent session");
 
         announce_pikchr_child_session(&store, &parent.id, "child-session-1");
+        assert!(store.flush_writes_blocking(std::time::Duration::from_secs(30)));
 
         let rows = store
             .get_session_acp_metadata_messages(&parent.id)

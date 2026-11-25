@@ -257,6 +257,7 @@ impl AcpDriver {
             handler.cancel_pending_permissions();
             writer.finalize().await;
             stop_proxy(&mut child, &transport).await;
+            writer.wait_until_stored().await;
             match protocol_result {
                 Ok(outcome) => Ok(outcome),
                 // The SDK ended the connection under the attach.
@@ -519,6 +520,7 @@ impl AcpDriver {
         handler.cancel_pending_permissions();
         writer.finalize().await;
         stop_proxy(&mut child, &transport).await;
+        writer.wait_until_stored().await;
         match protocol_result {
             Ok(caught_up) => Ok(caught_up),
             Err(_) if transport.first_signal().is_some() => {

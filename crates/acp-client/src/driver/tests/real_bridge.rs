@@ -467,7 +467,11 @@ struct BridgeStore {
 
 #[async_trait::async_trait]
 impl Store for BridgeStore {
-    fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String> {
+    async fn set_agent_session_id(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), String> {
         self.agent_session_ids
             .lock()
             .unwrap()

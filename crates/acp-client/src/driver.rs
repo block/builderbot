@@ -101,6 +101,12 @@ pub trait MessageWriter: Send + Sync {
     /// Flush all buffered text and close the current message block.
     async fn finalize(&self);
 
+    /// Wait until everything recorded so far has been stored, for a writer
+    /// that stores in the background. Called as a connection ends, after the
+    /// last [`finalize`](Self::finalize), so whoever sees the connection end
+    /// can read the whole transcript. The default has nothing to wait for.
+    async fn wait_until_stored(&self) {}
+
     /// Whether the caller's current response is a finished artifact that should
     /// release a background hold. Called only at a successful response boundary;
     /// implementations must flush buffered output before inspecting it and must
@@ -1123,7 +1129,17 @@ fn serialize_value<T: serde::Serialize>(value: &T) -> Option<serde_json::Value> 
 #[async_trait]
 pub trait Store: Send + Sync {
     /// Save the agent's session ID for resumption.
-    fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String>;
+    ///
+    /// Async so an implementation can hand the write to another thread and
+    /// await its answer, leaving the session's runtime (its agent reader
+    /// and setup timers) running meanwhile. Dropping the future before it
+    /// resolves (a setup step that timed out) should leave the id unsaved
+    /// where the implementation can still tell.
+    async fn set_agent_session_id(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), String>;
 
     /// Retrieve existing visible session messages as `(role, content)` pairs.
     ///
@@ -3143,6 +3159,10 @@ impl AcpDriver {
             // detached connection's, or a shared process's, proxy is stopped
             // without SIGINT, so remote turns keep running.
             agent_process.release(&transport).await;
+            // After the agent is let go of, so a slow store does not keep it
+            // running; before the settle, so whoever sees the connection end
+            // reads the whole transcript.
+            writer.wait_until_stored().await;
 
             let transport_loss = transport.verdict(
                 session_returned.get(),
@@ -8838,9 +8858,11 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             // the agent keeps no conversation for a session that never got a
             // prompt, so a setup that failed after `session/new` answered
             // must leave the next run to start fresh.
-            timed(timeline, SetupStep::SaveAgentSessionId, async {
-                store.set_agent_session_id(our_session_id, &new_id)
-            })
+            timed(
+                timeline,
+                SetupStep::SaveAgentSessionId,
+                store.set_agent_session_id(our_session_id, &new_id),
+            )
             .await?
             .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
 
@@ -9354,7 +9376,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Store for RecordingStore {
-        fn set_agent_session_id(
+        async fn set_agent_session_id(
             &self,
             session_id: &str,
             agent_session_id: &str,
@@ -10127,7 +10149,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Store for BoundaryStore {
-        fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+        async fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
 

@@ -513,6 +513,7 @@ async fn write_saved_turn(store: &Arc<Store>, session_id: &str, title: &str, clo
         writer.append_text(closing).await;
     }
     writer.finalize().await;
+    acp_client::MessageWriter::wait_until_stored(&writer).await;
 }
 
 #[tokio::test]

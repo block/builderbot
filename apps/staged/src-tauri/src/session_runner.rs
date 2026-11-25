@@ -2515,6 +2515,14 @@ pub fn start_session(
                     Err(e) => Err(e),
                 };
 
+                // The turn's writes went on the store's write queue (see
+                // `store::write_queue`). Everything below reads the
+                // transcript back or writes to it directly, so it waits for
+                // them first. The connection already waited as it ended;
+                // this covers a connection that failed before it got that
+                // far.
+                store.flush_writes().await;
+
                 remote_agent_idle_at_settle.set(Some(activity.idle_for()));
 
                 // The `sq` proxy went while bloxlet still runs the agent,

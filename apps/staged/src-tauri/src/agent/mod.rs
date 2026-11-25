@@ -14,9 +14,22 @@ pub use acp_client::{discover_providers, AcpDriver, AcpProviderInfo, AgentDriver
 use crate::store::{MessageRole, SessionMessage, Store};
 
 // Implement the acp_client::Store trait for our Store
+#[async_trait::async_trait]
 impl acp_client::Store for Store {
-    fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String> {
-        self.set_agent_session_id(session_id, agent_session_id)
+    /// Queued for the store's writer thread like the session's other writes
+    /// (see `store::write_queue`), and awaited, so setup gets the result
+    /// without its thread waiting on the store lock. A setup step that gives
+    /// up first drops the request, and the id is not stored late.
+    async fn set_agent_session_id(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), String> {
+        let session_id = session_id.to_string();
+        let agent_session_id = agent_session_id.to_string();
+        self.queued(move |store| store.set_agent_session_id(&session_id, &agent_session_id))
+            .await
+            .and_then(|saved| saved)
             .map_err(|e| e.to_string())
     }
 

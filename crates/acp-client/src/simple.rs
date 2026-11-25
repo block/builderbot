@@ -18,7 +18,7 @@ struct NoOpStore;
 
 #[async_trait]
 impl crate::driver::Store for NoOpStore {
-    fn set_agent_session_id(
+    async fn set_agent_session_id(
         &self,
         _session_id: &str,
         _agent_session_id: &str,

@@ -332,6 +332,9 @@ async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
             )
             .await;
         writer_dyn.finalize().await;
+        // The writer queues its rows (see `store::write_queue`); what follows
+        // reads the turn's reply back, and writes the next prompt directly.
+        writer_dyn.wait_until_stored().await;
 
         let run_outcome = run_outcome.map_err(GenerationError::Failed)?;
         if run_outcome == acp_client::AgentRunOutcome::Cancelled || cancel_token.is_cancelled() {
@@ -592,6 +595,7 @@ mod tests {
             if agent_session_id.is_none() {
                 store
                     .set_agent_session_id(session_id, "fake-agent-session")
+                    .await
                     .unwrap();
             }
 

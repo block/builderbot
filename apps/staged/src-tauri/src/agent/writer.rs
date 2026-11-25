@@ -4,6 +4,15 @@
 //! the DB at a throttled interval ([`FLUSH_INTERVAL`]). Tool calls and
 //! results are written immediately.
 //!
+//! "Written" means queued for the store's writer thread (see
+//! `store::write_queue`): the writer runs on the session's thread, inline
+//! with the agent reader, so it never takes the store lock itself. Rows it
+//! adds are named by [`RowSlot`]s, so it can queue updates to a row before
+//! the row exists. What the writer has to know from the store (whether a
+//! session title only echoes a prompt, whether the session delivers a note)
+//! is worked out on the writer thread too, after the writes queued before it.
+//! [`acp_client::MessageWriter::wait_until_stored`] waits for all of it.
+//!
 //! This module has **no** protocol-specific types. Any agent driver
 //! (ACP, custom HTTP, mock, etc.) calls the same methods with plain
 //! `&str` arguments.
@@ -16,7 +25,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::store::{title_echoes_input, AcpMessageMetadata, MessageRole, Store};
+use crate::store::{title_echoes_input, AcpMessageMetadata, MessageRole, RowSlot, RowWrite, Store};
 
 use acp_client::{
     autoapprove_permission_decision, strip_code_fences, AcpEventMetadata, AcpInitializeMetadata,
@@ -32,9 +41,10 @@ use agent_client_protocol::schema::MaybeUndefined;
 pub(crate) const CONFIG_OPTION_FALLBACK_EVENT: &str = "config_option_fallback";
 
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
-/// in memory and are written at most this often, reducing mutex contention
-/// when many sessions stream concurrently. [`MessageWriter::finalize`]
-/// always forces an immediate flush regardless of this interval.
+/// in memory and are queued at most this often, reducing mutex contention
+/// when many sessions stream concurrently; flushes the writer thread has not
+/// reached yet collapse into one. [`MessageWriter::finalize`] always forces
+/// an immediate flush regardless of this interval.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Streams agent output into the DB, one session at a time.
@@ -44,8 +54,8 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 pub struct MessageWriter {
     session_id: String,
     store: Arc<Store>,
-    /// DB row id of the current assistant message being streamed into.
-    current_assistant_msg_id: Mutex<Option<i64>>,
+    /// The row of the current assistant message being streamed into.
+    current_assistant_row: Mutex<Option<RowSlot>>,
     /// Accumulated text for the current assistant message (complete, not
     /// a delta). Flushed wholesale on each DB write.
     current_text: Mutex<String>,
@@ -55,13 +65,13 @@ pub struct MessageWriter {
     text_interrupted: Mutex<bool>,
     /// When we last wrote to the DB — used to throttle flush frequency.
     last_flush_at: Mutex<Instant>,
-    /// Maps external tool-call IDs → (DB row ID, last-known title).
-    tool_call_rows: Mutex<HashMap<String, (i64, String)>>,
-    /// Maps external tool-call IDs -> DB row ID for streaming tool results.
+    /// Maps external tool-call IDs → (DB row, last-known title).
+    tool_call_rows: Mutex<HashMap<String, (RowSlot, String)>>,
+    /// Maps external tool-call IDs -> DB row for streaming tool results.
     ///
     /// ACP can send interleaved content updates for multiple tool calls; each
     /// tool call updates its own row instead of sharing one global result row.
-    tool_result_rows: Mutex<HashMap<String, i64>>,
+    tool_result_rows: Mutex<HashMap<String, RowSlot>>,
     /// The session's `write_note` submission slot, when it is a note session.
     /// A filled slot means the turn's deliverable exists, whatever the
     /// assistant text says (see [`MessageWriter::should_finish_after_response`]).
@@ -72,7 +82,7 @@ pub struct MessageWriter {
     /// The text of each prompt this writer's own connection has sent, as
     /// the agent received it (see `on_prompt_sent`): what a session title is
     /// checked against on top of the session's stored messages (see
-    /// [`MessageWriter::title_echoes_input`]).
+    /// [`session_title_echoes_input`]).
     ///
     /// It starts empty for every connection and is never filled from an
     /// earlier one. Each run of a session has a writer of its own, so what
@@ -87,6 +97,17 @@ pub struct MessageWriter {
 /// [`MessageWriter::update_tool_call_title`]); a later update's title
 /// replaces it.
 const UNTITLED_TOOL_CALL: &str = "Tool call";
+
+/// The metadata a tool call's or tool result's row is inserted with: its
+/// call's id, written in the insert itself (see [`RowWrite`]) so a read
+/// between the writer's writes never finds a tool row it cannot tie to its
+/// call. An update leaves the row's metadata alone.
+fn tool_call_row_metadata(tool_call_id: &str) -> AcpMessageMetadata {
+    AcpMessageMetadata {
+        acp_tool_call_id: Some(tool_call_id.to_string()),
+        ..Default::default()
+    }
+}
 
 /// Strip backticks from agent-provided tool-call titles.
 fn sanitize_title(title: &str) -> String {
@@ -173,12 +194,148 @@ fn provider_metadata_for_acp_event(metadata: &AcpEventMetadata) -> Option<serde_
     Some(serde_json::json!({ "acp": { key: content } }))
 }
 
+/// Whether an agent-provided session title only repeats a message Staged
+/// sent in this session, which is how some agents name a session and never
+/// a name worth showing (see [`title_echoes_input`] for the comparison,
+/// which asks more of a title before calling it an echo of a message that
+/// was sent as typed than of one that opens with Staged's instructions).
+///
+/// Every message of the session counts, not just its first: the stored user
+/// rows cover earlier runs, follow-ups and a writer that is only catching
+/// up, so an echo of the first prompt is still recognised when it arrives,
+/// or is sent again, turns later, and an agent that renames the session
+/// after a later message gets the same answer. `sent` is what this
+/// connection sent (see [`MessageWriter::sent_prompts`]).
+fn session_title_echoes_input(
+    store: &Store,
+    session_id: &str,
+    sent: &[String],
+    title: &str,
+) -> bool {
+    any_input(store, session_id, sent, |input| {
+        title_echoes_input(title, input)
+    })
+}
+
+/// [`session_title_echoes_input`] for the title a session has stored, which
+/// went through [`sanitize_title`] on its way in: it is compared with each
+/// input as the same sanitising leaves it.
+fn stored_title_echoes_input(
+    store: &Store,
+    session_id: &str,
+    sent: &[String],
+    stored: &str,
+) -> bool {
+    any_input(store, session_id, sent, |input| {
+        if input.contains('`') {
+            title_echoes_input(stored, &sanitize_title(input))
+        } else {
+            title_echoes_input(stored, input)
+        }
+    })
+}
+
+/// Whether `matches` holds for any message Staged sent in this session: the
+/// prompts of this connection as the agent received them, then the
+/// session's stored user rows.
+fn any_input(
+    store: &Store,
+    session_id: &str,
+    sent: &[String],
+    matches: impl Fn(&str) -> bool,
+) -> bool {
+    if sent.iter().any(|prompt| matches(prompt)) {
+        return true;
+    }
+    match store.any_session_input(session_id, &matches) {
+        Ok(found) => found,
+        Err(e) => {
+            log::warn!(
+                "Session {session_id}: couldn't compare the ACP session title with the \
+                 session's messages; keeping the title: {e}"
+            );
+            false
+        }
+    }
+}
+
+/// Clear the session's stored title when it is itself an echo of a message
+/// Staged sent: one kept by a build that still stored them. Run when an echo
+/// arrives, which is when an agent that names sessions this way sends the
+/// same title again (on every reload of the session, for one), so such a
+/// session goes back to its fallback name instead of keeping the echo for
+/// good. A title the agent wrote is not an echo and stays.
+fn clear_stored_echo_title(store: &Store, session_id: &str, sent: &[String]) {
+    let stored = match store.get_session(session_id) {
+        Ok(session) => session.and_then(|session| session.acp_title),
+        Err(e) => {
+            log::warn!("Session {session_id}: couldn't read the stored ACP session title: {e}");
+            return;
+        }
+    };
+    let Some(stored) = stored else {
+        return;
+    };
+    if !stored_title_echoes_input(store, session_id, sent, &stored) {
+        return;
+    }
+    match store.update_session_acp_title(session_id, None) {
+        Ok(()) => log::info!(
+            "Session {session_id}: cleared a stored ACP session title that repeats a message \
+             Staged sent"
+        ),
+        Err(e) => log::error!("Failed to clear the stored ACP session title: {e}"),
+    }
+}
+
+/// Mirror the agent-provided title onto the session row so it can be shown
+/// as an interim session name while the session runs.
+fn apply_session_title(
+    store: &Store,
+    session_id: &str,
+    sent: &[String],
+    title: &MaybeUndefined<String>,
+) {
+    match title {
+        // A title that only repeats what Staged sent names nothing: the title
+        // the agent wrote for the session, or what the session falls back to
+        // without one, stands. A stored title that is such an echo itself
+        // goes.
+        MaybeUndefined::Value(title)
+            if session_title_echoes_input(store, session_id, sent, title) =>
+        {
+            log::debug!(
+                "Session {session_id}: ignoring an ACP session title that repeats a message \
+                 Staged sent"
+            );
+            clear_stored_echo_title(store, session_id, sent);
+        }
+        MaybeUndefined::Value(title) => {
+            let title = sanitize_title(title);
+            let title = title.trim();
+            if !title.is_empty() {
+                if let Err(e) = store.update_session_acp_title(session_id, Some(title)) {
+                    log::error!("Failed to persist ACP session title: {e}");
+                }
+            }
+        }
+        // The agent explicitly retracted the title.
+        MaybeUndefined::Null => {
+            if let Err(e) = store.update_session_acp_title(session_id, None) {
+                log::error!("Failed to clear ACP session title: {e}");
+            }
+        }
+        // Update was about `updated_at`/meta only — leave the title alone.
+        MaybeUndefined::Undefined => {}
+    }
+}
+
 impl MessageWriter {
     pub fn new(session_id: String, store: Arc<Store>) -> Self {
         Self {
             session_id,
             store,
-            current_assistant_msg_id: Mutex::new(None),
+            current_assistant_row: Mutex::new(None),
             current_text: Mutex::new(String::new()),
             text_interrupted: Mutex::new(false),
             last_flush_at: Mutex::new(Instant::now()),
@@ -210,10 +367,11 @@ impl MessageWriter {
                     match message.role {
                         MessageRole::ToolCall => {
                             let title = stored_tool_call_title(&message.content);
-                            tool_call_rows.insert(tool_call_id, (message.id, title));
+                            tool_call_rows
+                                .insert(tool_call_id, (RowSlot::known(message.id), title));
                         }
                         MessageRole::ToolResult => {
-                            tool_result_rows.insert(tool_call_id, message.id);
+                            tool_result_rows.insert(tool_call_id, RowSlot::known(message.id));
                         }
                         _ => {}
                     }
@@ -244,95 +402,6 @@ impl MessageWriter {
     pub fn with_activity_clock(mut self, clock: Arc<super::ActivityClock>) -> Self {
         self.activity = Some(clock);
         self
-    }
-
-    /// Whether an agent-provided session title only repeats a message
-    /// Staged sent in this session, which is how some agents name a session
-    /// and never a name worth showing (see [`title_echoes_input`] for the
-    /// comparison, which asks more of a title before calling it an echo of a
-    /// message that was sent as typed than of one that opens with Staged's
-    /// instructions).
-    ///
-    /// Every message of the session counts, not just its first: the stored
-    /// user rows cover earlier runs, follow-ups and a writer that is only
-    /// catching up, so an echo of the first prompt is still recognised when
-    /// it arrives, or is sent again, turns later, and an agent that renames
-    /// the session after a later message gets the same answer.
-    fn title_echoes_input(&self, title: &str) -> bool {
-        self.any_input(|input| title_echoes_input(title, input))
-    }
-
-    /// [`MessageWriter::title_echoes_input`] for the title a session has
-    /// stored, which went through [`sanitize_title`] on its way in: it is
-    /// compared with each input as the same sanitising leaves it.
-    fn stored_title_echoes_input(&self, stored: &str) -> bool {
-        self.any_input(|input| {
-            if input.contains('`') {
-                title_echoes_input(stored, &sanitize_title(input))
-            } else {
-                title_echoes_input(stored, input)
-            }
-        })
-    }
-
-    /// Whether `matches` holds for any message Staged sent in this session:
-    /// the prompts of this connection as the agent received them, then the
-    /// session's stored user rows.
-    fn any_input(&self, matches: impl Fn(&str) -> bool) -> bool {
-        if self
-            .sent_prompts
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|prompt| matches(prompt))
-        {
-            return true;
-        }
-        match self.store.any_session_input(&self.session_id, &matches) {
-            Ok(found) => found,
-            Err(e) => {
-                log::warn!(
-                    "Session {}: couldn't compare the ACP session title with the session's \
-                     messages; keeping the title: {e}",
-                    self.session_id
-                );
-                false
-            }
-        }
-    }
-
-    /// Clear the session's stored title when it is itself an echo of a
-    /// message Staged sent: one kept by a build that still stored them. Run
-    /// when an echo arrives, which is when an agent that names sessions this
-    /// way sends the same title again (on every reload of the session, for
-    /// one), so such a session goes back to its fallback name instead of
-    /// keeping the echo for good. A title the agent wrote is not an echo and
-    /// stays.
-    fn clear_stored_echo_title(&self) {
-        let stored = match self.store.get_session(&self.session_id) {
-            Ok(session) => session.and_then(|session| session.acp_title),
-            Err(e) => {
-                log::warn!(
-                    "Session {}: couldn't read the stored ACP session title: {e}",
-                    self.session_id
-                );
-                return;
-            }
-        };
-        let Some(stored) = stored else {
-            return;
-        };
-        if !self.stored_title_echoes_input(&stored) {
-            return;
-        }
-        match self.store.update_session_acp_title(&self.session_id, None) {
-            Ok(()) => log::info!(
-                "Session {}: cleared a stored ACP session title that repeats a message Staged \
-                 sent",
-                self.session_id
-            ),
-            Err(e) => log::error!("Failed to clear the stored ACP session title: {e}"),
-        }
     }
 
     /// The agent was heard from: record it for the watchdog, if any.
@@ -367,7 +436,7 @@ impl MessageWriter {
     /// cancellation) to ensure no text is lost.
     pub async fn finalize(&self) {
         self.flush_text().await;
-        self.current_assistant_msg_id.lock().await.take();
+        self.current_assistant_row.lock().await.take();
         *self.current_text.lock().await = String::new();
         *self.text_interrupted.lock().await = false;
     }
@@ -380,7 +449,7 @@ impl MessageWriter {
 
     /// Persist a user message the ACP connection delivered itself — steered
     /// into the turn in flight, or sent as the prompt after an interrupt —
-    /// as an ordinary `user` row, and return its id.
+    /// as an ordinary `user` row.
     ///
     /// Finalizes first so the row lands after whatever the assistant had
     /// streamed so far and the next [`append_text`](Self::append_text) opens
@@ -402,7 +471,7 @@ impl MessageWriter {
         text: &str,
         images: &[PromptImage],
         image_ids: &[String],
-    ) -> Option<i64> {
+    ) {
         self.finalize().await;
         if images.len() != image_ids.len() {
             log::debug!(
@@ -413,32 +482,30 @@ impl MessageWriter {
                 image_ids.len()
             );
         }
-        let id = match self.store.add_session_message_with_images(
-            &self.session_id,
-            MessageRole::User,
-            text,
-            image_ids,
-        ) {
-            Ok(id) => id,
-            Err(e) => {
+        let session_id = self.session_id.clone();
+        let text = text.to_string();
+        let image_ids = image_ids.to_vec();
+        self.store.queue_write(move |store| {
+            if let Err(e) = store.add_session_message_with_images(
+                &session_id,
+                MessageRole::User,
+                &text,
+                &image_ids,
+            ) {
                 log::error!("Failed to insert delivered user message: {e}");
-                return None;
+                return;
             }
-        };
-        // Same association `start_session` makes for the prompt's images, so
-        // the attachments show under this session in the branch timeline.
-        if !image_ids.is_empty() {
-            if let Err(e) = self
-                .store
-                .set_images_session_id(image_ids, &self.session_id)
-            {
-                log::warn!(
-                    "Failed to associate images {image_ids:?} with session {}: {e}",
-                    self.session_id
-                );
+            // Same association `start_session` makes for the prompt's images,
+            // so the attachments show under this session in the branch
+            // timeline.
+            if !image_ids.is_empty() {
+                if let Err(e) = store.set_images_session_id(&image_ids, &session_id) {
+                    log::warn!(
+                        "Failed to associate images {image_ids:?} with session {session_id}: {e}"
+                    );
+                }
             }
-        }
-        Some(id)
+        });
     }
 
     // =====================================================================
@@ -464,26 +531,23 @@ impl MessageWriter {
         // Some providers may resend ToolCall for the same ID while streaming.
         // Treat those as updates to the existing row.
         let mut rows = self.tool_call_rows.lock().await;
-        if let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) {
-            *stored_title = title.clone();
-            let _ = self.store.update_message_content(*row_id, &content);
-            return;
-        }
-
-        // The call's id goes in with the row: the rest of its ACP metadata
-        // is a second write (`record_tool_call_metadata`), and a row read
-        // between the two must already be tied to its call.
-        match self.store.add_tool_session_message(
-            &self.session_id,
-            MessageRole::ToolCall,
-            &content,
-            tool_call_id,
-        ) {
-            Ok(id) => {
-                rows.insert(tool_call_id.to_string(), (id, title));
+        let slot = match rows.get_mut(tool_call_id) {
+            Some((slot, stored_title)) => {
+                *stored_title = title;
+                slot.clone()
             }
-            Err(e) => log::error!("Failed to insert tool_call message: {e}"),
-        }
+            None => {
+                let slot = RowSlot::new();
+                rows.insert(tool_call_id.to_string(), (slot.clone(), title));
+                slot
+            }
+        };
+        self.queue_row(
+            slot,
+            MessageRole::ToolCall,
+            content,
+            Some(tool_call_row_metadata(tool_call_id)),
+        );
     }
 
     /// Update a previously recorded tool call's title and/or raw input.
@@ -502,7 +566,7 @@ impl MessageWriter {
         raw_input: Option<&serde_json::Value>,
     ) {
         let mut rows = self.tool_call_rows.lock().await;
-        let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) else {
+        let Some((slot, stored_title)) = rows.get_mut(tool_call_id) else {
             drop(rows);
             log::warn!(
                 "Tool call {tool_call_id} updated before it was recorded; recording it from the update"
@@ -520,36 +584,61 @@ impl MessageWriter {
             None => stored_title.clone(),
         };
         let content = format_tool_call_content(&effective_title, raw_input);
-        let _ = self.store.update_message_content(*row_id, &content);
+        let slot = slot.clone();
+        drop(rows);
+        self.queue_row(
+            slot,
+            MessageRole::ToolCall,
+            content,
+            Some(tool_call_row_metadata(tool_call_id)),
+        );
     }
 
     /// Record the result/output of a tool call.
     pub async fn record_tool_result(&self, tool_call_id: &str, content: &str) {
         let content = strip_code_fences(content);
         let mut result_rows = self.tool_result_rows.lock().await;
-        if let Some(id) = result_rows.get(tool_call_id).copied() {
-            let _ = self.store.update_message_content(id, &content);
-            return;
-        }
-
-        // One statement, so the result is never readable without the id of
-        // the call it answers.
-        match self.store.add_tool_session_message(
-            &self.session_id,
+        let slot = result_rows
+            .entry(tool_call_id.to_string())
+            .or_default()
+            .clone();
+        drop(result_rows);
+        self.queue_row(
+            slot,
             MessageRole::ToolResult,
-            &content,
-            tool_call_id,
-        ) {
-            Ok(id) => {
-                result_rows.insert(tool_call_id.to_string(), id);
-            }
-            Err(e) => log::error!("Failed to insert tool_result message: {e}"),
-        }
+            content,
+            Some(tool_call_row_metadata(tool_call_id)),
+        );
     }
 
     // =====================================================================
     // Internal
     // =====================================================================
+
+    /// Queue a write of `content` to `slot`'s row: an insert as `role` if
+    /// the row does not exist yet, otherwise an update.
+    fn queue_row(
+        &self,
+        slot: RowSlot,
+        role: MessageRole,
+        content: String,
+        on_insert: Option<AcpMessageMetadata>,
+    ) {
+        self.store.queue_row_write(RowWrite {
+            slot,
+            session_id: self.session_id.clone(),
+            role,
+            content,
+            on_insert,
+        });
+    }
+
+    /// Queue a store write for the writer thread, after this writer's
+    /// earlier ones.
+    fn queue_write(&self, job: impl FnOnce(&Store, &str) + Send + 'static) {
+        let session_id = self.session_id.clone();
+        self.store.queue_write(move |store| job(store, &session_id));
+    }
 
     /// Flush accumulated text to the DB unconditionally (insert or update).
     ///
@@ -560,24 +649,13 @@ impl MessageWriter {
         if text.is_empty() {
             return;
         }
-        let mut msg_id = self.current_assistant_msg_id.lock().await;
-        match *msg_id {
-            Some(id) => {
-                let _ = self.store.update_message_content(id, &text);
-            }
-            None => {
-                match self.store.add_session_message(
-                    &self.session_id,
-                    MessageRole::Assistant,
-                    &text,
-                ) {
-                    Ok(id) => {
-                        *msg_id = Some(id);
-                    }
-                    Err(e) => log::error!("Failed to insert assistant message: {e}"),
-                }
-            }
-        }
+        let slot = self
+            .current_assistant_row
+            .lock()
+            .await
+            .get_or_insert_with(RowSlot::new)
+            .clone();
+        self.queue_row(slot, MessageRole::Assistant, text.clone(), None);
         *self.last_flush_at.lock().await = Instant::now();
     }
 
@@ -602,6 +680,10 @@ impl acp_client::MessageWriter for MessageWriter {
         self.finalize().await
     }
 
+    async fn wait_until_stored(&self) {
+        self.store.flush_writes().await
+    }
+
     async fn record_user_message(
         &self,
         text: &str,
@@ -612,7 +694,7 @@ impl acp_client::MessageWriter for MessageWriter {
         self.record_user_message(text, images, attachment_ids).await;
     }
 
-    /// Keep the prompt's text for [`MessageWriter::title_echoes_input`]: an
+    /// Keep the prompt's text for [`session_title_echoes_input`]: an
     /// agent that names a session after its input reads every text block of
     /// the request, run together, so the blocks are kept joined (the join
     /// is whitespace, which the comparison collapses), and the prompt block
@@ -645,7 +727,21 @@ impl acp_client::MessageWriter for MessageWriter {
         // Inspect only the currently streamed response, never older transcript
         // rows. The ACP caller invokes this only at a completed response boundary.
         self.flush_text().await;
-        if !crate::session_runner::session_has_note_artifact(&self.store, &self.session_id) {
+        let has_note = self
+            .store
+            .queued({
+                let session_id = self.session_id.clone();
+                move |store| crate::session_runner::session_has_note_artifact(store, &session_id)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "Session {}: couldn't tell whether the session delivers a note: {e}",
+                    self.session_id
+                );
+                false
+            });
+        if !has_note {
             return false;
         }
         // The tool call is the deliverable; the `---` text is the fallback.
@@ -698,51 +794,17 @@ impl acp_client::MessageWriter for MessageWriter {
             acp_session_info: serde_json::to_value(info).ok(),
             ..Default::default()
         };
-        if let Err(e) = self
-            .store
-            .add_acp_metadata_message(&self.session_id, &metadata)
-        {
-            log::error!("Failed to persist ACP session info update: {e}");
-        }
-
-        // Mirror the agent-provided title onto the session row so it can be
-        // shown as an interim session name while the session runs. The row
-        // above keeps the update as received either way; nothing reads a
-        // title from it.
-        match &info.title {
-            // A title that only repeats what Staged sent names nothing: the
-            // title the agent wrote for the session, or what the session
-            // falls back to without one, stands. A stored title that is such
-            // an echo itself goes.
-            MaybeUndefined::Value(title) if self.title_echoes_input(title) => {
-                log::debug!(
-                    "Session {}: ignoring an ACP session title that repeats a message Staged \
-                     sent",
-                    self.session_id
-                );
-                self.clear_stored_echo_title();
+        // The row keeps the update as received; the title is then mirrored
+        // onto the session row (see `apply_session_title`). Nothing reads a
+        // title from the row.
+        let sent = self.sent_prompts.lock().unwrap().clone();
+        let title = info.title.clone();
+        self.queue_write(move |store, session_id| {
+            if let Err(e) = store.add_acp_metadata_message(session_id, &metadata) {
+                log::error!("Failed to persist ACP session info update: {e}");
             }
-            MaybeUndefined::Value(title) => {
-                let title = sanitize_title(title);
-                let title = title.trim();
-                if !title.is_empty() {
-                    if let Err(e) = self
-                        .store
-                        .update_session_acp_title(&self.session_id, Some(title))
-                    {
-                        log::error!("Failed to persist ACP session title: {e}");
-                    }
-                }
-            }
-            // The agent explicitly retracted the title.
-            MaybeUndefined::Null => {
-                if let Err(e) = self.store.update_session_acp_title(&self.session_id, None) {
-                    log::error!("Failed to clear ACP session title: {e}");
-                }
-            }
-            // Update was about `updated_at`/meta only — leave the title alone.
-            MaybeUndefined::Undefined => {}
-        }
+            apply_session_title(store, session_id, &sent, &title);
+        });
     }
 
     async fn on_model_state_update(&self, state: &acp_client::SessionModelState) {
@@ -752,12 +814,11 @@ impl acp_client::MessageWriter for MessageWriter {
             acp_session_mode_state: serde_json::to_value(state).ok(),
             ..Default::default()
         };
-        if let Err(e) = self
-            .store
-            .add_acp_metadata_message(&self.session_id, &metadata)
-        {
-            log::error!("Failed to persist ACP session mode state: {e}");
-        }
+        self.queue_write(move |store, session_id| {
+            if let Err(e) = store.add_acp_metadata_message(session_id, &metadata) {
+                log::error!("Failed to persist ACP session mode state: {e}");
+            }
+        });
     }
 
     async fn on_config_option_update(&self, options: &[acp_client::SessionConfigOption]) {
@@ -771,12 +832,11 @@ impl acp_client::MessageWriter for MessageWriter {
             acp_config_options: serde_json::to_value(options).ok(),
             ..Default::default()
         };
-        if let Err(e) = self
-            .store
-            .add_acp_metadata_message(&self.session_id, &metadata)
-        {
-            log::error!("Failed to persist ACP config options update: {e}");
-        }
+        self.queue_write(move |store, session_id| {
+            if let Err(e) = store.add_acp_metadata_message(session_id, &metadata) {
+                log::error!("Failed to persist ACP config options update: {e}");
+            }
+        });
     }
 
     /// Substituting a model out from under a pinned selection is not something
@@ -792,14 +852,17 @@ impl acp_client::MessageWriter for MessageWriter {
         self.heard_from_agent();
         self.finalize().await;
 
-        if let Err(e) = self.store.add_authored_session_message(
-            &self.session_id,
-            MessageRole::Assistant,
-            notice,
-            CONFIG_OPTION_FALLBACK_EVENT,
-        ) {
-            log::error!("Failed to persist ACP config fallback notice: {e}");
-        }
+        let notice = notice.to_string();
+        self.queue_write(move |store, session_id| {
+            if let Err(e) = store.add_authored_session_message(
+                session_id,
+                MessageRole::Assistant,
+                &notice,
+                CONFIG_OPTION_FALLBACK_EVENT,
+            ) {
+                log::error!("Failed to persist ACP config fallback notice: {e}");
+            }
+        });
     }
 
     async fn on_initialize(&self, metadata: &AcpInitializeMetadata) {
@@ -812,56 +875,55 @@ impl acp_client::MessageWriter for MessageWriter {
             acp_agent_info: metadata.agent_info.clone(),
             ..Default::default()
         };
-        if let Err(e) = self
-            .store
-            .add_acp_metadata_message(&self.session_id, &metadata)
-        {
-            log::error!("Failed to persist ACP initialization metadata: {e}");
-        }
+        self.queue_write(move |store, session_id| {
+            if let Err(e) = store.add_acp_metadata_message(session_id, &metadata) {
+                log::error!("Failed to persist ACP initialization metadata: {e}");
+            }
+        });
     }
 
     async fn record_tool_call_metadata(&self, metadata: AcpToolCallMetadata) {
         self.heard_from_agent();
         let tool_call_id = metadata.tool_call_id.clone();
         let metadata = acp_tool_call_metadata(metadata);
-        let row_id = if let Some(tool_call_id) = tool_call_id {
+        let row = if let Some(tool_call_id) = tool_call_id {
             let rows = self.tool_call_rows.lock().await;
-            rows.get(&tool_call_id).map(|(row_id, _)| *row_id)
+            rows.get(&tool_call_id).map(|(slot, _)| slot.clone())
         } else {
             None
         };
 
-        let result = match row_id {
-            Some(row_id) => self.store.update_message_acp_metadata(row_id, &metadata),
-            None => self
-                .store
-                .add_acp_metadata_message(&self.session_id, &metadata)
-                .map(|_| ()),
-        };
-
-        if let Err(e) = result {
-            log::error!("Failed to persist ACP tool-call metadata: {e}");
-        }
+        self.queue_write(move |store, session_id| {
+            // The call's row, if the writes queued before this one stored it.
+            let result = match row.as_ref().and_then(RowSlot::id) {
+                Some(row_id) => store.update_message_acp_metadata(row_id, &metadata),
+                None => store
+                    .add_acp_metadata_message(session_id, &metadata)
+                    .map(|_| ()),
+            };
+            if let Err(e) = result {
+                log::error!("Failed to persist ACP tool-call metadata: {e}");
+            }
+        });
     }
 
     async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
         self.heard_from_agent();
-        if let Some(provider_metadata) = provider_metadata_for_acp_event(&metadata) {
-            if let Err(e) = self
-                .store
-                .merge_session_provider_metadata(&self.session_id, &provider_metadata)
-            {
-                log::warn!("Failed to persist provider metadata: {e}");
-            }
-        }
+        let provider_metadata = provider_metadata_for_acp_event(&metadata);
         let metadata = acp_event_metadata(metadata);
         let role = acp_event_role(&metadata);
-        if let Err(e) =
-            self.store
-                .add_acp_metadata_message_with_role(&self.session_id, role, &metadata)
-        {
-            log::error!("Failed to persist ACP event metadata: {e}");
-        }
+        self.queue_write(move |store, session_id| {
+            if let Some(provider_metadata) = provider_metadata {
+                if let Err(e) =
+                    store.merge_session_provider_metadata(session_id, &provider_metadata)
+                {
+                    log::warn!("Failed to persist provider metadata: {e}");
+                }
+            }
+            if let Err(e) = store.add_acp_metadata_message_with_role(session_id, role, &metadata) {
+                log::error!("Failed to persist ACP event metadata: {e}");
+            }
+        });
     }
 
     async fn request_permission(
@@ -935,6 +997,7 @@ mod tests {
             writer.append_text("# Current note\nFull body.\n").await;
             writer.append_text("```suggested-next-steps\n{\"suggestedNextCommitStep\":\"Implement\",\"suggestedNextNoteStep\":null}\n```").await;
             assert!(writer.should_finish_after_response().await);
+            store.flush_writes().await;
             let messages = store.get_session_messages(&session_id).unwrap();
             let saved = &messages.last().unwrap().content;
             assert!(saved.contains("Full body."));
@@ -956,13 +1019,14 @@ mod tests {
         writer.append_text("Working on the first ").await;
         writer.append_text("instruction.").await;
         writer.finalize().await;
-        let user_row = writer
+        writer
             .record_user_message("Actually, do the second thing instead.", &[], &[])
-            .await
-            .expect("user row inserted");
+            .await;
         writer.append_text("Switching to the second thing.").await;
         writer.finalize().await;
+        store.flush_writes().await;
 
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         let rows: Vec<(MessageRole, &str)> = messages
             .iter()
@@ -976,7 +1040,6 @@ mod tests {
                 (MessageRole::Assistant, "Switching to the second thing."),
             ]
         );
-        assert_eq!(messages[1].id, user_row);
         assert!(messages[1].image_ids.is_empty());
         assert!(messages[1].acp.acp_event_kind.is_none());
     }
@@ -996,6 +1059,7 @@ mod tests {
         writer.append_text("Reply.").await;
         writer.finalize().await;
 
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         let rows: Vec<(MessageRole, &str)> = messages
             .iter()
@@ -1029,18 +1093,18 @@ mod tests {
             Some(session_id.clone())
         );
 
-        let user_row = writer
+        writer
             .record_user_message(
                 "See attached.",
                 &[acp_client::PromptImage::new("AAAA", "image/png")],
                 std::slice::from_ref(&image.id),
             )
-            .await
-            .expect("user row inserted");
+            .await;
+        store.flush_writes().await;
 
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].id, user_row);
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[0].image_ids, vec![image.id.clone()]);
         assert_eq!(
@@ -1105,6 +1169,7 @@ mod tests {
                 option_id: "allow-once".to_string()
             }
         );
+        store.flush_writes().await;
         let metadata = store
             .get_session_acp_metadata_archive(&session_id)
             .expect("metadata");
@@ -1150,6 +1215,104 @@ mod tests {
         assert_eq!(decision, AcpPermissionDecision::Cancelled);
     }
 
+    /// The writer runs on the session's thread, inline with the agent
+    /// reader, so recording a turn must not wait for the store lock: with
+    /// another thread holding it, a whole turn (timed text flushes, a tool
+    /// call and its streamed result, more text) is recorded at once, and
+    /// only waiting for it to be stored waits for the lock. Once it is
+    /// free, the rows land in the order the turn made them.
+    #[test]
+    fn a_turn_is_recorded_while_another_thread_holds_the_store_lock() {
+        let (store, session_id, writer) = setup_writer();
+        let held = store.hold_connection();
+        let (recorded_tx, recorded_rx) = std::sync::mpsc::channel();
+
+        let session = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                writer.append_text("Looking").await;
+                tokio::time::sleep(super::FLUSH_INTERVAL).await;
+                writer.append_text(" at it.").await;
+                tokio::time::sleep(super::FLUSH_INTERVAL).await;
+                writer.append_text("..").await;
+                writer.record_tool_call("tc-1", "Read", None).await;
+                writer.record_tool_result("tc-1", "part").await;
+                writer.record_tool_result("tc-1", "all of it").await;
+                writer.append_text("Done.").await;
+                writer.finalize().await;
+                recorded_tx.send(()).unwrap();
+                acp_client::MessageWriter::wait_until_stored(&writer).await;
+            });
+        });
+
+        recorded_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the turn is recorded without waiting for the store lock");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !session.is_finished(),
+            "waiting for the turn to be stored waits for the lock"
+        );
+        drop(held);
+        session.join().unwrap();
+
+        let rows: Vec<(MessageRole, String)> = store
+            .get_session_messages(&session_id)
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (MessageRole::Assistant, "Looking at it...".to_string()),
+                (MessageRole::ToolCall, "Read".to_string()),
+                (MessageRole::ToolResult, "all of it".to_string()),
+                (MessageRole::Assistant, "Done.".to_string()),
+            ]
+        );
+        let result = &store.get_session_replay_messages(&session_id).unwrap()[2];
+        assert_eq!(result.acp.acp_tool_call_id.as_deref(), Some("tc-1"));
+    }
+
+    /// Two writers for one session (one connection's, then the next's)
+    /// queue onto the same store, so the second's rows land after the
+    /// first's even when neither has been stored when the second starts.
+    #[tokio::test]
+    async fn a_second_writer_queues_behind_the_first() {
+        let (store, session_id, first) = setup_writer();
+        let held = store.hold_connection();
+        first.append_text("First run.").await;
+        first.record_tool_call("tc-1", "Bash", None).await;
+        first.record_tool_result("tc-1", "ok").await;
+        first.finalize().await;
+
+        let second = MessageWriter::new(session_id.clone(), Arc::clone(&store));
+        second.append_text("Second run.").await;
+        second.finalize().await;
+        drop(held);
+        acp_client::MessageWriter::wait_until_stored(&second).await;
+
+        let rows: Vec<(MessageRole, String)> = store
+            .get_session_messages(&session_id)
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (MessageRole::Assistant, "First run.".to_string()),
+                (MessageRole::ToolCall, "Bash".to_string()),
+                (MessageRole::ToolResult, "ok".to_string()),
+                (MessageRole::Assistant, "Second run.".to_string()),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn record_tool_result_updates_existing_row_for_streaming_updates() {
         let (store, session_id, writer) = setup_writer();
@@ -1160,6 +1323,7 @@ mod tests {
         writer.record_tool_result("tc-1", "first chunk").await;
         writer.record_tool_result("tc-1", "second chunk").await;
 
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1185,6 +1349,7 @@ mod tests {
         writer.record_tool_result("tc-1", "first final").await;
         writer.record_tool_result("tc-2", "second final").await;
 
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1211,6 +1376,7 @@ mod tests {
         writer.append_text(" search is back").await;
         writer.finalize().await;
 
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::Assistant);
@@ -1227,6 +1393,7 @@ mod tests {
         writer.append_text("They passed").await;
         writer.finalize().await;
 
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         let rows: Vec<_> = messages
             .iter()
@@ -1253,6 +1420,7 @@ mod tests {
             .record_tool_call("tc-dup", "Run updated title", None)
             .await;
 
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1270,6 +1438,7 @@ mod tests {
             .record_tool_call("tc-json", "Read file", Some(&raw_input))
             .await;
 
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1294,6 +1463,7 @@ mod tests {
             .update_tool_call_title("tc-ri", None, Some(&raw_input))
             .await;
 
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1345,6 +1515,7 @@ mod tests {
         )
         .await;
 
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1394,6 +1565,7 @@ mod tests {
         .await;
         writer.record_tool_result("tc-orphan", "3 passed").await;
 
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1427,6 +1599,7 @@ mod tests {
             .await;
         writer.append_text(" Next.").await;
         writer.finalize().await;
+        store.flush_writes().await;
         let messages = store
             .get_session_messages(&session_id)
             .expect("query messages");
@@ -1469,6 +1642,9 @@ mod tests {
         // The Claude bridge's refinement: the description is the content.
         writer.record_tool_result("tc-1", "Run step 1").await;
         writer.finalize().await;
+        // As the lost connection does as it ends: what it recorded is stored
+        // before anything reads the transcript back.
+        acp_client::MessageWriter::wait_until_stored(&writer).await;
         drop(writer);
 
         let writer = MessageWriter::catching_up(session_id.clone(), Arc::clone(&store));
@@ -1487,6 +1663,7 @@ mod tests {
         .await;
         writer.record_tool_result("tc-1", "step 1 done").await;
 
+        store.flush_writes().await;
         let messages = store.get_session_replay_messages(&session_id).unwrap();
         assert_eq!(messages.len(), 2, "{messages:?}");
         assert_eq!(messages[0].role, MessageRole::ToolCall);
@@ -1502,6 +1679,7 @@ mod tests {
         // A call it has never seen is recorded as usual.
         writer.record_tool_call("tc-2", "ls", None).await;
         writer.record_tool_result("tc-2", "a b").await;
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         assert_eq!(messages.len(), 4);
     }
@@ -1541,11 +1719,13 @@ mod tests {
         )
         .await;
 
+        store.flush_writes().await;
         assert!(
             store.get_session_messages(&session_id).unwrap().is_empty(),
             "initialization metadata should not appear in transcript rows"
         );
 
+        store.flush_writes().await;
         let metadata = store
             .get_session_acp_initialization(&session_id)
             .unwrap()
@@ -1580,11 +1760,13 @@ mod tests {
         )
         .await;
 
+        store.flush_writes().await;
         assert!(
             store.get_session_messages(&session_id).unwrap().is_empty(),
             "ACP event metadata should not appear in transcript rows"
         );
 
+        store.flush_writes().await;
         let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
         assert_eq!(metadata_rows.len(), 1);
         assert_eq!(
@@ -1624,6 +1806,7 @@ mod tests {
         )
         .await;
 
+        store.flush_writes().await;
         let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
         assert_eq!(metadata_rows.len(), 1);
         assert_eq!(metadata_rows[0].acp.acp_origin.as_deref(), Some(&*origin));
@@ -1640,10 +1823,12 @@ mod tests {
         let info = acp_client::SessionInfoUpdate::new().title("  `Fix the login flow`  ");
         <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
 
+        store.flush_writes().await;
         let session = store.get_session(&session_id).unwrap().unwrap();
         assert_eq!(session.acp_title.as_deref(), Some("Fix the login flow"));
 
         // The metadata-row archive of the raw update is unchanged behavior.
+        store.flush_writes().await;
         let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
         assert_eq!(metadata_rows.len(), 1);
         assert_eq!(
@@ -1662,6 +1847,7 @@ mod tests {
         let info = acp_client::SessionInfoUpdate::new().title(MaybeUndefined::Null);
         <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
 
+        store.flush_writes().await;
         let session = store.get_session(&session_id).unwrap().unwrap();
         assert_eq!(session.acp_title, None);
     }
@@ -1676,6 +1862,7 @@ mod tests {
         let info = acp_client::SessionInfoUpdate::new().updated_at("2026-08-04T00:00:00Z");
         <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
 
+        store.flush_writes().await;
         let session = store.get_session(&session_id).unwrap().unwrap();
         assert_eq!(session.acp_title.as_deref(), Some("Earlier title"));
     }
@@ -1690,6 +1877,7 @@ mod tests {
         let info = acp_client::SessionInfoUpdate::new().title("  ``  ");
         <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
 
+        store.flush_writes().await;
         let session = store.get_session(&session_id).unwrap().unwrap();
         assert_eq!(session.acp_title.as_deref(), Some("Earlier title"));
     }
@@ -1716,6 +1904,7 @@ mod tests {
     }
 
     fn acp_title(store: &Store, session_id: &str) -> Option<String> {
+        assert!(store.flush_writes_blocking(std::time::Duration::from_secs(30)));
         store.get_session(session_id).unwrap().unwrap().acp_title
     }
 
@@ -1755,6 +1944,7 @@ mod tests {
 
         assert_eq!(acp_title(&store, &session_id), None);
         // The update itself is still on record, as every ACP event is.
+        store.flush_writes().await;
         let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
         assert_eq!(metadata_rows.len(), 1);
         assert_eq!(

@@ -158,8 +158,9 @@ fn stored_transcript() -> Vec<ReplayBoundary> {
 
 pub(super) struct TranscriptStore(pub(super) Vec<ReplayBoundary>);
 
+#[async_trait::async_trait]
 impl Store for TranscriptStore {
-    fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+    async fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -972,8 +973,9 @@ async fn attach_cancel_on_a_replaced_process_catches_up_from_its_replay() {
 #[tokio::test(flavor = "current_thread")]
 async fn an_unreadable_transcript_cancels_without_catching_up() {
     struct UnreadableStore;
+    #[async_trait::async_trait]
     impl Store for UnreadableStore {
-        fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+        async fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
         fn get_session_replay_boundaries(&self, _: &str) -> Result<Vec<ReplayBoundary>, String> {

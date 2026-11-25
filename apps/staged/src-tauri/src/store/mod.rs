@@ -49,6 +49,7 @@ mod timed_lock;
 mod tool_bodies;
 mod tool_images;
 mod workdirs;
+mod write_queue;
 
 #[cfg(test)]
 mod images_tests;
@@ -98,10 +99,11 @@ pub use tool_bodies::{
     in_flight_tool_row_len, ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES,
 };
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
+pub use write_queue::{RowSlot, RowWrite};
 
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
 
 // =============================================================================
@@ -329,8 +331,9 @@ type ConnMutex = timed_lock::TimedMutex<Connection>;
 type ConnMutex = crate::perf_harness::store_lock::TimedMutex<Connection>;
 
 pub struct Store {
-    /// The one connection, behind a timed lock (see [`ConnMutex`]).
-    conn: ConnMutex,
+    /// The one connection, behind a timed lock (see [`ConnMutex`]). Shared
+    /// with the writer thread's view of the store (see [`write_queue`]).
+    conn: Arc<ConnMutex>,
     /// Change feed for mutating methods. `None` (the default, and what unit
     /// tests get) makes every publish a no-op; the app wires a sender in at
     /// construction so a task above the Tauri boundary can forward changes
@@ -340,6 +343,13 @@ pub struct Store {
     /// `None` (the default) makes every mark a no-op, and an attached feed
     /// records nothing until its consumer activates it.
     session_feed: Option<Arc<SessionFeed>>,
+    /// Session-thread writes queued for the writer thread (see
+    /// [`write_queue`]); started on the first one. `None` inside if the
+    /// thread could not be started.
+    writes: OnceLock<Option<write_queue::WriteQueue>>,
+    /// This is the writer thread's own view of the store: queued writes run
+    /// in place.
+    is_writer_view: bool,
 }
 
 impl Store {
@@ -351,9 +361,11 @@ impl Store {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         let store = Self {
-            conn: ConnMutex::new(conn),
+            conn: Arc::new(ConnMutex::new(conn)),
             change_tx: None,
             session_feed: None,
+            writes: OnceLock::new(),
+            is_writer_view: false,
         };
         store.init_schema()?;
         Ok(store)
@@ -361,6 +373,9 @@ impl Store {
 
     /// Attach the change feed sender. Keeps `Store` Tauri-agnostic: it only
     /// knows it publishes [`StoreChange`]s, not who listens.
+    ///
+    /// Call it before the first queued write: the writer thread's view of
+    /// the store copies the sender when the queue starts.
     pub fn with_change_sender(mut self, tx: broadcast::Sender<StoreChange>) -> Self {
         self.change_tx = Some(tx);
         self
@@ -377,9 +392,11 @@ impl Store {
     pub fn in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         let store = Self {
-            conn: ConnMutex::new(conn),
+            conn: Arc::new(ConnMutex::new(conn)),
             change_tx: None,
             session_feed: None,
+            writes: OnceLock::new(),
+            is_writer_view: false,
         };
         store.init_schema()?;
         Ok(store)

@@ -2080,6 +2080,7 @@ mod tests {
                     "body",
                     &[],
                     &[],
+                    &no_media_retargeted,
                 )
                 .unwrap();
         }
@@ -2112,6 +2113,7 @@ mod tests {
                 &[],
                 &[],
                 &[child_move(&child, &f.target_branch.id)],
+                &no_media_retargeted,
             )
             .unwrap();
 

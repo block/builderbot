@@ -23,6 +23,10 @@ const fsHooks = vi.hoisted(() => ({
   beforeRemove: null as null | ((path: string) => void),
   /** Called with both paths of every `renameSync`, before it runs. May throw. */
   beforeRename: null as null | ((from: string, to: string) => void),
+  /** Called with both paths of every `renameSync` that succeeded. */
+  afterRename: null as null | ((from: string, to: string) => void),
+  /** Called with the path of every `writeFileSync`, before it runs. May throw. */
+  beforeWrite: null as null | ((path: string) => void),
 }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -34,7 +38,12 @@ vi.mock('node:fs', async (importOriginal) => {
     },
     renameSync: (...args: Parameters<typeof actual.renameSync>) => {
       fsHooks.beforeRename?.(String(args[0]), String(args[1]));
-      return actual.renameSync(...args);
+      actual.renameSync(...args);
+      fsHooks.afterRename?.(String(args[0]), String(args[1]));
+    },
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      fsHooks.beforeWrite?.(String(args[0]));
+      return actual.writeFileSync(...args);
     },
   };
 });
@@ -51,6 +60,8 @@ beforeEach(() => {
 afterEach(() => {
   fsHooks.beforeRemove = null;
   fsHooks.beforeRename = null;
+  fsHooks.afterRename = null;
+  fsHooks.beforeWrite = null;
   for (const child of children.splice(0)) child.kill('SIGKILL');
   rmSync(scratch, { recursive: true, force: true });
 });
@@ -59,6 +70,39 @@ afterEach(() => {
 const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
 /** A process that is running, is not this one, and will not take or release anything. */
 const otherPid = process.ppid;
+/** Another such process, for a test that needs three. */
+function sleeperPid(): number {
+  const child = spawn('/bin/sleep', ['60'], { stdio: 'ignore' });
+  children.push(child);
+  return child.pid as number;
+}
+
+const takings = () => readdirSync(scratch).filter((name) => name.startsWith('build.lock.taking-'));
+
+/**
+ * Run `take` as a process that is killed in the middle of it: before it
+ * writes its owner file (`write`), or with the directory ready and not yet
+ * renamed to the lock (`rename`). Nothing of the taking runs after that
+ * step, its own tidying up included.
+ */
+function killedBefore(step: 'write' | 'rename', take: () => unknown) {
+  const killed = new Error('killed');
+  const die = () => {
+    throw killed;
+  };
+  if (step === 'write') fsHooks.beforeWrite = die;
+  else {
+    fsHooks.beforeRename = die;
+    fsHooks.beforeRemove = die;
+  }
+  try {
+    expect(take).toThrow(killed);
+  } finally {
+    fsHooks.beforeWrite = null;
+    fsHooks.beforeRename = null;
+    fsHooks.beforeRemove = null;
+  }
+}
 
 describe('taking the build lock', () => {
   it('is held by one taker at a time and free again once released', () => {
@@ -92,6 +136,95 @@ describe('taking the build lock', () => {
     tryLock(lock).release?.();
     expect(readdirSync(scratch)).toEqual([]);
   });
+
+  // Three runs meet a lock whose holder died long ago. Two of them read the
+  // dead owner; the first moves the lock aside, and before it does anything
+  // more the third takes the free lock and clears what is past its hour.
+  // The second, still acting on the dead owner, then tries its own move. It
+  // must fail on the buried lock, which is what keeps that name taken.
+  it('keeps a lock buried just now through a taker that passes at once, however old the lock was', () => {
+    expect(tryLock(lock, deadPid()).release).toBeTypeOf('function');
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(lock, old, old);
+
+    const firstPid = sleeperPid();
+    let first: ReturnType<typeof tryLock> | undefined;
+    let third: ReturnType<typeof tryLock> | undefined;
+    const burying = (from: string, to: string) => from === lock && to.startsWith(`${lock}.dead-`);
+    fsHooks.beforeRename = (from, to) => {
+      // The second is about to move the dead lock. The first gets there first.
+      if (first || !burying(from, to)) return;
+      first = { heldBy: null };
+      first = tryLock(lock, firstPid);
+    };
+    fsHooks.afterRename = (from, to) => {
+      // The first has moved it, and has done nothing since.
+      if (third || !burying(from, to)) return;
+      third = { heldBy: null };
+      third = tryLock(lock, otherPid);
+    };
+    const second = tryLock(lock);
+
+    // One holder: the third. The second did not move the third's lock away
+    // and take the name for itself.
+    expect(third?.release).toBeTypeOf('function');
+    expect(first).toEqual({ heldBy: otherPid });
+    expect(second).toEqual({ heldBy: otherPid });
+    expect(JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')).pid).toBe(otherPid);
+    expect(readdirSync(scratch).filter((name) => name.startsWith('build.lock.dead-'))).toHaveLength(
+      1
+    );
+    third?.release?.();
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it('removes what a process killed in the middle of taking it left behind', () => {
+    const dead = deadPid();
+    killedBefore('write', () => tryLock(lock, dead));
+    killedBefore('rename', () => tryLock(lock, dead));
+    // Two directories, one of them empty, and no lock.
+    expect(takings()).toHaveLength(2);
+    expect(
+      takings()
+        .map((name) => readdirSync(join(scratch, name)))
+        .sort()
+    ).toEqual([[], ['owner.json']]);
+    expect(existsSync(lock)).toBe(false);
+
+    const taken = tryLock(lock);
+    expect(readdirSync(scratch)).toEqual(['build.lock']);
+    taken.release?.();
+    expect(readdirSync(scratch)).toEqual([]);
+  });
+
+  // A running process is stood at each step of its taking while another
+  // takes the lock and clears up. Had its directory been removed, its next
+  // step would fail on a path that is gone.
+  it.each(['write', 'rename'] as const)(
+    'never removes the taking of a running process (stood before its %s)',
+    (step) => {
+      // One a dead process left is there too, and the same pass clears it.
+      killedBefore('write', () => tryLock(lock, deadPid()));
+      const left = takings();
+
+      let passing: ReturnType<typeof tryLock> | undefined;
+      const stand = () => {
+        if (passing) return;
+        passing = { heldBy: null };
+        const standing = takings().filter((name) => !left.includes(name));
+        expect(standing).toHaveLength(1);
+        passing = tryLock(lock);
+        expect(takings()).toEqual(standing);
+      };
+      if (step === 'write') fsHooks.beforeWrite = stand;
+      else fsHooks.beforeRename = stand;
+
+      expect(tryLock(lock, otherPid)).toEqual({ heldBy: process.pid });
+      expect(passing?.release).toBeTypeOf('function');
+      passing?.release?.();
+      expect(readdirSync(scratch)).toEqual([]);
+    }
+  );
 
   it('records who holds it and since when', () => {
     const before = Date.now();

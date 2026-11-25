@@ -389,6 +389,35 @@ describe('SessionStreamOwner', () => {
       expect(h.last().summaryWindow).toBe(HINT_ROW_WINDOW);
     });
 
+    it('sends a burst’s interest when its first change is due, however long the changes go on', async () => {
+      await h.open();
+      const calls = h.interests.length;
+      const consumer = h.owner.consume();
+      const started = Date.now();
+      /** When each interest call was made, in ms after the first change. */
+      const sentAt: number[] = [];
+
+      // A view mounting row after row: a change every 5 ms for 100 ms.
+      const ids: string[] = [];
+      for (let step = 0; step < 20; step++) {
+        ids.push(`s${step}`);
+        consumer.sync({ summary: [...ids], title: [] });
+        const before = h.interests.length;
+        await vi.advanceTimersByTimeAsync(5);
+        if (h.interests.length > before) sentAt.push(Date.now() - started);
+      }
+
+      // The first call goes out when the first change is due, with what had
+      // gathered by then, and not once the changes stop.
+      expect(sentAt[0]).toBe(INTEREST_DELAY_MS);
+      expect(levels(h.interests[calls])).toEqual({ s0: 'summary', s1: 'summary' });
+      // Nor does any later change wait longer than that.
+      expect(sentAt).toEqual([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+
+      await h.settle();
+      expect(Object.keys(levels(h.last()))).toHaveLength(20);
+    });
+
     it('declares a session once, at the highest level any consumer wants', async () => {
       await h.open();
       const section = h.owner.consume();
@@ -1398,6 +1427,62 @@ describe('SessionStreamOwner', () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(h.interests.map((interest) => interest.generation)).toEqual([1, 2, 3]);
       expect(h.owner.availability).toBe('established');
+    });
+
+    it('retries when the back-off ends, neither sooner nor later for changes made meanwhile', async () => {
+      await h.open();
+      const consumer = h.owner.consume();
+      h.state.failing = true;
+      consumer.sync({ summary: ['s1'], title: [] });
+      await h.settle();
+      // Refused just now: the retry is due in RETRY_BASE_MS.
+      const calls = h.interests.length;
+      h.state.failing = false;
+
+      // A change at once does not cut the wait short.
+      consumer.sync({ summary: ['s1', 's2'], title: [] });
+      await vi.advanceTimersByTimeAsync(RETRY_BASE_MS - 20);
+      expect(h.interests).toHaveLength(calls);
+
+      // Changes every 5 ms across its end do not push the retry back.
+      const ids = ['s1', 's2'];
+      for (let step = 0; step < 4; step++) {
+        expect(h.interests).toHaveLength(calls);
+        ids.push(`late${step}`);
+        consumer.sync({ summary: [...ids], title: [] });
+        await vi.advanceTimersByTimeAsync(5);
+      }
+      expect(h.interests).toHaveLength(calls + 1);
+      expect(Object.keys(levels(h.last()))).toHaveLength(6);
+      expect(h.owner.availability).toBe('established');
+    });
+
+    it('moves a pending interest back for a wait imposed after its timer was set', async () => {
+      await h.open();
+      const consumer = await show(['s1']);
+      const gap = () =>
+        h.raw({
+          generation: h.last().generation,
+          seq: 5,
+          sessionId: 's1',
+          kind: 'delta',
+          summary: summary([]),
+        });
+      gap();
+      await h.settle();
+      const calls = h.interests.length;
+
+      // A change sets the timer, and a second lost frame then imposes the
+      // spacing between restarts, counted from the first.
+      consumer.sync({ summary: ['s1', 's2'], title: [] });
+      await vi.advanceTimersByTimeAsync(INTEREST_DELAY_MS / 2);
+      gap();
+
+      await vi.advanceTimersByTimeAsync(GAP_RESTART_SPACING_MS - INTEREST_DELAY_MS * 1.5 - 1);
+      expect(h.interests).toHaveLength(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.interests).toHaveLength(calls + 1);
+      expect(levels(h.last())).toEqual({ s1: 'summary', s2: 'summary' });
     });
 
     it('falls back when an established stream starts refusing, and returns when it stops', async () => {

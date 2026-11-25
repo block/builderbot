@@ -64,7 +64,8 @@ A run stops by itself, with a partial result, when:
    directory is shared by every tree it builds, so a lock in it (`perf-harness-build.lock`) is held
    from before `cargo build` until the binary has been copied to the tree's cache: a build of
    another tree at the same time waits, and each run stages the binary it built. A lock left by a
-   build that was killed is taken over. The wait is at most `--build-wait` seconds (3600; 0 fails
+   build that was killed is taken over, and the next build to take the lock removes what a build
+   killed in the middle of taking it left beside it. The wait is at most `--build-wait` seconds (3600; 0 fails
    at once): after that the run exits 2 with the holder's process id, its command line and when it
    took the lock. That is what ends a wait on a lock nobody will release, which is what a killed
    build's lock becomes once its process id has been given to another process; the message says

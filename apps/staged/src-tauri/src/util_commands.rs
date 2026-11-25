@@ -107,9 +107,11 @@ pub async fn read_text_file(file_path: String) -> Result<String, String> {
 ///
 /// Runs [`resolve_path_aliases_impl`] on the blocking pool: each path is a
 /// `canonicalize` on the filesystem, which as a synchronous command ran on
-/// the main thread. The frontend asks once per root and caches the answer
-/// (`pathDisplayRoots.ts`), for the roots a running session's subtitle or an
-/// open chat shortens its tool paths against.
+/// the main thread. The frontend asks for the roots a running session's
+/// subtitle or an open chat shortens its tool paths against, one root to a
+/// call, and caches the answer (`pathDisplayRoots.ts`): for good when the
+/// root has an alias, and for five seconds when the answer is the root
+/// alone or the call failed, after which the next use asks again.
 #[tauri::command]
 pub async fn resolve_path_aliases(paths: Vec<String>) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || resolve_path_aliases_impl(paths))

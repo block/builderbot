@@ -904,14 +904,17 @@ export class SessionStreamOwner {
     // Closed: `onOpen` sends. Sending: the call's end looks again.
     if (!this.#link || !this.#open || this.#sending) return;
     if (JSON.stringify(this.#interest()) === this.#sentKey && !this.#snapshotWanted()) return;
-    const now = Date.now();
-    const due = Math.max(now + INTEREST_DELAY_MS, this.#notBefore);
     if (this.#sendTimer !== null) {
       // The burst's first change set the timer, and later ones ride on it,
-      // unless a wait has been imposed since that it would cut short.
-      if (this.#sendDue >= due) return;
+      // unless a wait has been imposed since that it would cut short. The
+      // timer is held against that wait and not against a time counted from
+      // now: counted from now, every later change would move it, and steady
+      // changes would keep the interest from ever going out.
+      if (this.#sendDue >= this.#notBefore) return;
       clearTimeout(this.#sendTimer);
     }
+    const now = Date.now();
+    const due = Math.max(now + INTEREST_DELAY_MS, this.#notBefore);
     this.#sendDue = due;
     this.#sendTimer = setTimeout(() => {
       this.#sendTimer = null;

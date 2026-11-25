@@ -11,6 +11,11 @@
 // holds its owner file. Releasing it is one rename too, away from the
 // lock's name. So there is no moment at which the lock exists without an
 // owner, in the taking or in the letting go.
+//
+// Beside the lock, under its name and a suffix, are the directory a taking
+// is prepared in (`.taking-<pid>-<id>`), a dead holder's lock moved aside
+// (`.dead-<id>`) and a released one on its way out (`.released-<id>`).
+// Whoever takes the lock removes the ones nothing needs any more.
 
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -64,9 +69,15 @@ const ownerOf = (lock) => {
 function bury(lock, owner) {
   const grave = `${lock}.dead-${owner.id}`;
   try {
+    // Its age is counted from now, not from when the lock was taken, and
+    // the time is put on before the move, which keeps it. Put on after, the
+    // buried lock would for a moment show the age of the taking: over its
+    // hour for a lock taken long ago, so a taker passing just then would
+    // clear it, and the name it was to keep taken would be free. (If the
+    // lock has been taken afresh meanwhile, this touches the new one, which
+    // nothing reads the time of, and the move then fails as it should.)
+    utimesSync(lock, new Date(), new Date());
     renameSync(lock, grave);
-    // Its age is counted from now, not from when the lock was taken.
-    utimesSync(grave, new Date(), new Date());
   } catch {
     /* buried by another waiter, or released */
   }
@@ -88,13 +99,36 @@ function clearBuried(lock) {
 }
 
 /**
+ * Remove what a process left when it was killed in the middle of taking the
+ * lock: the directory it was preparing beside it. The name holds that
+ * process's id, since the directory is empty until its owner file is
+ * written, and one is removed only when that process is no longer running.
+ * So a taking under way is never removed, and one left under a process id
+ * that has since gone to another process stays until that one ends too.
+ */
+function clearAbandonedTakings(lock) {
+  const dir = dirname(lock);
+  const prefix = `${basename(lock)}.taking-`;
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(prefix)) continue;
+    const taker = /^(\d+)-[0-9a-f]+$/.exec(name.slice(prefix.length));
+    if (!taker || alive(Number(taker[1]))) continue;
+    try {
+      rmSync(join(dir, name), { recursive: true, force: true });
+    } catch {
+      /* removed by another build */
+    }
+  }
+}
+
+/**
  * Take `lock` if it is free. Returns `{ release }` when taken, and
  * `{ heldBy }` (the holder's pid, `null` if it let go meanwhile) when not.
  * A lock whose holder is no longer running is taken over.
  */
 export function tryLock(lock, pid = process.pid) {
   const id = randomBytes(8).toString('hex');
-  const mine = `${lock}.taking-${id}`;
+  const mine = `${lock}.taking-${pid}-${id}`;
   for (let attempt = 0; attempt < 2; attempt++) {
     mkdirSync(mine, { recursive: true });
     writeFileSync(join(mine, OWNER), JSON.stringify({ pid, id, since: new Date().toISOString() }));
@@ -110,6 +144,7 @@ export function tryLock(lock, pid = process.pid) {
       continue;
     }
     clearBuried(lock);
+    clearAbandonedTakings(lock);
     return {
       release() {
         if (ownerOf(lock)?.id !== id) return;

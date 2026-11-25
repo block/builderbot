@@ -39,7 +39,8 @@ pub(super) enum SetupStep {
     NewSession,
     /// The `session/load` round trip (with any authentication retry).
     LoadSession,
-    /// Storing the agent's session id.
+    /// Storing the agent's session id: the last step of a fresh session's
+    /// setup, so a setup that fails leaves none stored to resume.
     SaveAgentSessionId,
     /// Storing the session's mode state.
     RecordModes,
@@ -405,7 +406,7 @@ mod tests {
         let steps = [
             done(SetupStep::Initialize, 0.0, 0.4),
             done(SetupStep::NewSession, 0.4, 89.0),
-            done(SetupStep::SaveAgentSessionId, 89.4, 0.01),
+            done(SetupStep::RecordModes, 89.4, 0.01),
             running(SetupStep::SetConfigOption("model"), 89.41),
         ];
         let message = describe_timeout(
@@ -422,7 +423,7 @@ mod tests {
             message.starts_with(
                 "Timed out waiting for ACP protocol startup: session/set_config_option (model) \
                  did not answer within 90s; completed: initialize 0.40s, session/new 89.0s, \
-                 storing the agent session id 0.01s; setup ran 179.4s; timer fired 0.00s late"
+                 storing session modes 0.01s; setup ran 179.4s; timer fired 0.00s late"
             ),
             "{message}"
         );

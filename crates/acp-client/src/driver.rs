@@ -7995,6 +7995,39 @@ pub fn is_missing_mcp_transport_error(error: &str) -> bool {
     error.contains(MISSING_MCP_TRANSPORT_PREFIX)
 }
 
+/// Whether a session error is a setup step's timeout (see
+/// [`ACP_SETUP_STEP_TIMEOUT`]): the agent did not finish starting the session,
+/// so no prompt of the connection's was sent. A caller can start over on a
+/// fresh connection without anything having been done twice.
+pub fn is_session_setup_timeout_error(error: &str) -> bool {
+    error.starts_with(ACP_SETUP_TIMEOUT_HEADLINE)
+}
+
+/// Starts the error a session setup ends with when the agent said it has no
+/// session by the id it was asked for, typically on `session/load` of an id
+/// that was stored for a session the agent never kept (it never got a
+/// prompt). Producer and matcher share it, as with the prefixes above.
+const SESSION_NOT_FOUND_PREFIX: &str = "The agent has no session by that id";
+
+/// Whether a session error means the agent has no session by the id it was
+/// asked to load. See [`agent_output_recorded`] for when starting fresh with
+/// `session/new` instead loses nothing.
+pub fn is_session_not_found_error(error: &str) -> bool {
+    error.starts_with(SESSION_NOT_FOUND_PREFIX)
+}
+
+/// Whether `store` holds anything the agent said in `session_id`: a replay
+/// boundary that is not a user row. Without one, no prompt of the session's
+/// is known to have reached the agent (or it never answered one), so a
+/// `session/load` the agent refuses as not found has nothing to restore, and
+/// a fresh `session/new` loses no conversation.
+pub fn agent_output_recorded(store: &dyn Store, session_id: &str) -> Result<bool, String> {
+    Ok(store
+        .get_session_replay_boundaries(session_id)?
+        .iter()
+        .any(|boundary| boundary.role != "user"))
+}
+
 /// Apply each selection with `session/set_config_option`, then store the
 /// options the agent ends up with; with no selections, store the options the
 /// agent opened with. Under a setup `timeline`, each request is a step with
@@ -8772,11 +8805,6 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 handler.name_session(&new_id),
             )
             .await?;
-            timed(timeline, SetupStep::SaveAgentSessionId, async {
-                store.set_agent_session_id(our_session_id, &new_id)
-            })
-            .await?
-            .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
 
             if let Some(ref modes) = session_response.modes {
                 timed(
@@ -8805,6 +8833,16 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 timeline,
             )
             .await?;
+            // Stored last, once nothing in setup can fail any more: a stored
+            // id is what makes the next run resume with `session/load`, and
+            // the agent keeps no conversation for a session that never got a
+            // prompt, so a setup that failed after `session/new` answered
+            // must leave the next run to start fresh.
+            timed(timeline, SetupStep::SaveAgentSessionId, async {
+                store.set_agent_session_id(our_session_id, &new_id)
+            })
+            .await?
+            .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
 
             Ok(AcpSessionSetup {
                 agent_session_id: new_id,
@@ -8979,8 +9017,23 @@ where
                 )),
             }
         }
+        Err(error) if is_session_not_found_answer(&error) => Err(format!(
+            "{SESSION_NOT_FOUND_PREFIX} (failed to {operation}): {error:?}"
+        )),
         Err(error) => Err(format!("Failed to {operation}: {error:?}")),
     }
+}
+
+/// Whether the agent answered a session request by saying it has no such
+/// session: `-32002` (resource not found), which the Claude bridge answers a
+/// `session/load` for an unknown session with, or an error whose message says
+/// the session was not found.
+fn is_session_not_found_answer(error: &agent_client_protocol::Error) -> bool {
+    if error.code == ErrorCode::ResourceNotFound {
+        return true;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("session") && message.contains("not found")
 }
 
 async fn authenticate_with_explicit_method(
@@ -9984,6 +10037,122 @@ mod tests {
         );
     }
 
+    /// An id stored for a session the agent never kept (setup failed after
+    /// `session/new` answered, before this fix stored ids only at the end)
+    /// is refused at `session/load` as not found. The error says so in a
+    /// form the runner can match, to start fresh instead.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_session_load_the_agent_does_not_know_reads_as_not_found() {
+        use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::default().load_session(true)),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: LoadSessionRequest, responder, _cx| {
+                    responder
+                        .respond_with_error(agent_client_protocol::Error::resource_not_found(None))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+
+        let error = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(setup_acp_session(AcpSessionSetupContext {
+                    connection: &connection,
+                    working_dir: Path::new("/tmp"),
+                    store: &store,
+                    handler: &handler,
+                    our_session_id: "local-session",
+                    acp_session_id: Some("never-prompted"),
+                    config_options: &[],
+                    mcp_servers: &[],
+                    agent_label: "Claude",
+                    auth_selection: None,
+                    unattended_session_mode: None,
+                    timeline: None,
+                })
+                .await
+                .map(|_| ()))
+            })
+            .await
+            .expect("protocol should succeed")
+            .expect_err("an unknown session should fail the load");
+
+        assert!(super::is_session_not_found_error(&error), "{error}");
+        assert!(
+            error.starts_with("The agent has no session by that id (failed to load ACP session): "),
+            "{error}"
+        );
+        assert!(!super::is_session_setup_timeout_error(&error), "{error}");
+    }
+
+    #[test]
+    fn a_not_found_answer_is_recognised_by_code_or_by_message() {
+        use super::ErrorCode;
+        use agent_client_protocol::Error;
+
+        assert!(super::is_session_not_found_answer(
+            &Error::resource_not_found(None)
+        ));
+        // An agent that says so in an internal error instead.
+        assert!(super::is_session_not_found_answer(&Error::new(
+            ErrorCode::InternalError.into(),
+            "Session not found: abc"
+        )));
+        assert!(!super::is_session_not_found_answer(&Error::internal_error()));
+        assert!(!super::is_session_not_found_answer(&Error::new(
+            ErrorCode::InternalError.into(),
+            "model not found"
+        )));
+    }
+
+    /// A store holding `boundaries` as its replay boundaries.
+    struct BoundaryStore(Vec<ReplayBoundary>);
+
+    #[async_trait::async_trait]
+    impl Store for BoundaryStore {
+        fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn get_session_replay_boundaries(&self, _: &str) -> Result<Vec<ReplayBoundary>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn agent_output_is_recorded_only_once_the_agent_has_said_something() {
+        let user = ReplayBoundary::legacy("user".to_string(), "do the thing".to_string());
+        let assistant = ReplayBoundary::legacy("assistant".to_string(), "on it".to_string());
+        let tool = ReplayBoundary::legacy("tool_call".to_string(), "Read".to_string());
+
+        let recorded = |boundaries: Vec<ReplayBoundary>| {
+            super::agent_output_recorded(&BoundaryStore(boundaries), "local-session")
+                .expect("boundaries should load")
+        };
+        assert!(!recorded(vec![]));
+        // The prompt rows of runs whose setup never finished.
+        assert!(!recorded(vec![user.clone(), user.clone()]));
+        assert!(recorded(vec![user.clone(), assistant]));
+        assert!(recorded(vec![user, tool]));
+    }
+
     /// `setup_acp_session` as `run_acp_session` runs it: a fresh session,
     /// each step under its own deadline. Returns the agent session id.
     async fn run_timed_setup(
@@ -10196,6 +10365,8 @@ mod tests {
         assert!(error.starts_with(expected), "{error}");
         assert!(error.contains("; at timeout: "), "{error}");
         assert!(!is_transport_loss_error(&error), "{error}");
+        // What the runner retries on a fresh agent process.
+        assert!(super::is_session_setup_timeout_error(&error), "{error}");
     }
 
     /// A config step that stalls after a late `session/new` times out on its
@@ -10231,7 +10402,8 @@ mod tests {
                 },
                 agent_client_protocol::on_receive_request!(),
             );
-        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let recording_store = Arc::new(RecordingStore::default());
+        let store: Arc<dyn Store> = recording_store.clone();
         let handler = Arc::new(AcpNotificationHandler::new(
             Arc::new(BasicMessageWriter::new()),
             false,
@@ -10250,10 +10422,16 @@ mod tests {
 
         let expected = "Timed out waiting for ACP protocol startup: session/set_config_option \
                         (model) did not answer within 90s; completed: initialize 0.00s, storing \
-                        initialize 0.00s, session/new 89.0s, storing held frames 0.00s, storing \
-                        the agent session id 0.00s; setup ran 179.0s; timer fired 0.00s late; \
-                        scheduling at start: ";
+                        initialize 0.00s, session/new 89.0s, storing held frames 0.00s; setup \
+                        ran 179.0s; timer fired 0.00s late; scheduling at start: ";
         assert!(error.starts_with(expected), "{error}");
+        // The agent answered `session/new`, but setup never finished: no id
+        // is stored, so the next run starts fresh instead of loading a
+        // session the agent kept nothing for.
+        assert!(
+            recording_store.agent_session_ids.lock().unwrap().is_empty(),
+            "a failed setup must not store the agent session id"
+        );
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {

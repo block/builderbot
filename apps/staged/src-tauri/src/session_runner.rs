@@ -42,6 +42,7 @@ mod failed_run;
 mod late_stop;
 mod network_failure;
 pub(crate) mod reconcile;
+mod startup_restart;
 
 pub(crate) use disconnect::may_still_run_on_workstation;
 pub(crate) mod remote_note_watchdog;
@@ -2303,6 +2304,7 @@ pub fn start_session(
             let mut repair_attempts = 0;
             let mut note_followup_attempts = 0;
             let mut include_images = true;
+            let mut startup_restarts = startup_restart::StartupRestarts::default();
 
             loop {
                 remote_outbox_collected_for_turn.set(false);
@@ -2342,6 +2344,9 @@ pub fn start_session(
                 } else {
                     &[]
                 };
+                // A start over (see `startup_restart`) sends this attempt's
+                // prompt again, images included.
+                let images_this_attempt = include_images;
                 include_images = false;
 
                 // Last look before an agent process exists. Nothing between the
@@ -2558,6 +2563,50 @@ pub fn start_session(
                     remote_outbox_collected_for_turn.set(false);
                 }
                 let turn_result = picked_up.result;
+
+                // A connection that failed before its prompt went out is
+                // started over once (see `startup_restart`): its turn's
+                // prompt row is already stored, and the agent never got it.
+                if let Err(error) = &turn_result {
+                    let restart = if cancel_token.is_cancelled()
+                        || reattached.get()
+                        || crate::app_lifecycle::is_quitting(&app_handle)
+                    {
+                        None
+                    } else {
+                        startup_restarts.after_failed_connection(
+                            error,
+                            agent_session_id.is_some(),
+                            || {
+                                startup_restart::agent_output_recorded_or_assumed(
+                                    &store,
+                                    &config.session_id,
+                                )
+                            },
+                        )
+                    };
+                    match restart {
+                        Some(startup_restart::StartupRestart::RetryTimedOutSetup) => {
+                            log::warn!(
+                                "Session {}: ACP setup timed out before the prompt was sent;                                  retrying once on a fresh agent process: {error}",
+                                config.session_id
+                            );
+                            include_images = images_this_attempt;
+                            continue;
+                        }
+                        Some(startup_restart::StartupRestart::StartFresh) => {
+                            log::warn!(
+                                "Session {}: the agent has no session {} and never answered in                                  this one; starting a fresh agent session: {error}",
+                                config.session_id,
+                                agent_session_id.as_deref().unwrap_or_default()
+                            );
+                            agent_session_id = None;
+                            include_images = images_this_attempt;
+                            continue;
+                        }
+                        None => {}
+                    }
+                }
 
                 if !should_validate_pikchr_after_turn(&turn_result, cancel_token.is_cancelled()) {
                     return turn_result.map_err(AgentRunError::from);

@@ -1075,13 +1075,34 @@ impl Store {
     /// Store the ACP session ID returned by the agent after `new_session`.
     /// This is used by `load_session` to resume the conversation on follow-up turns.
     pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> Result<(), StoreError> {
+        self.set_agent_session_id_if(id, agent_session_id, || true)
+            .map(|_stored| ())
+    }
+
+    /// [`Self::set_agent_session_id`] for a caller that may stop wanting the
+    /// id stored while this waits for the write connection. `still_wanted`
+    /// is asked once, with the connection held and before the write, and the
+    /// id is stored only if it says so. Whether the id was stored.
+    ///
+    /// A stored id makes the next run resume with `session/load`, so one
+    /// stored for a setup that was given up poisons the session: the agent
+    /// was released without a prompt and keeps no such conversation.
+    pub fn set_agent_session_id_if(
+        &self,
+        id: &str,
+        agent_session_id: &str,
+        still_wanted: impl FnOnce() -> bool,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
+        if !still_wanted() {
+            return Ok(false);
+        }
         let rows = conn.execute(
             "UPDATE sessions SET agent_id = ?1, updated_at = ?2 WHERE id = ?3",
             params![agent_session_id, now_timestamp(), id],
         )?;
         self.mark_session_written(id, rows);
-        Ok(())
+        Ok(true)
     }
 
     /// Record the worktree HEAD a run started from (`None` when the run has no

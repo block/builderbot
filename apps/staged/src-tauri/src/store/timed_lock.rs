@@ -25,6 +25,8 @@
 use std::ops::{Deref, DerefMut};
 use std::panic::Location;
 use std::ptr;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{LockResult, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
@@ -76,6 +78,11 @@ pub(crate) struct TimedMutex<T> {
     holder: AtomicPtr<Location<'static>>,
     /// Which lock this is, for the report ("the write connection").
     name: String,
+    /// Threads inside [`Self::lock`] that do not have the lock yet, so a
+    /// test can tell that another thread has reached the lock and is
+    /// waiting on it.
+    #[cfg(test)]
+    waiting: AtomicUsize,
     /// Record waits and holds in the load-test harness's metrics.
     #[cfg(feature = "perf-harness")]
     perf_metrics: bool,
@@ -87,6 +94,8 @@ impl<T> TimedMutex<T> {
             inner: Mutex::new(value),
             holder: AtomicPtr::new(ptr::null_mut()),
             name: name.into(),
+            #[cfg(test)]
+            waiting: AtomicUsize::new(0),
             #[cfg(feature = "perf-harness")]
             perf_metrics: false,
         }
@@ -145,10 +154,14 @@ impl<T> TimedMutex<T> {
         let caller = Location::caller();
         let holder_at_entry = self.holder_location();
         let began = Instant::now();
+        #[cfg(test)]
+        self.waiting.fetch_add(1, Ordering::SeqCst);
         let (guard, poisoned) = match self.inner.lock() {
             Ok(guard) => (guard, false),
             Err(poison) => (poison.into_inner(), true),
         };
+        #[cfg(test)]
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
         let guard = self.held(
             guard,
             caller,
@@ -190,6 +203,13 @@ impl<T> TimedMutex<T> {
     #[cfg(test)]
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    /// How many threads are in [`Self::lock`] without the lock yet. One
+    /// counted here has got as far as the lock, whatever it did before.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
     }
 
     /// The `lock()` call site holding the lock right now, if it is held.

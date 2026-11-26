@@ -34,7 +34,11 @@
 //!   gets it through a oneshot the caller awaits, which leaves its runtime
 //!   free while it waits. A request whose caller has stopped waiting (a
 //!   setup step that timed out) is dropped unrun, so a write the caller
-//!   gave up on does not land after it moved on.
+//!   gave up on does not land after it moved on. That check is made when
+//!   the writer thread takes the job, which can then wait a long time for
+//!   the write connection. A job whose write must not land late asks again
+//!   once it holds the connection ([`Store::queued_cancellable`] and its
+//!   [`Requester`]).
 //! - **Flushing.** [`Store::flush_writes`] waits until everything queued
 //!   before it is stored, and [`Store::flush_writes_blocking`] does the same
 //!   for a thread that is not on a runtime (the quit path). Dropping the
@@ -193,6 +197,21 @@ impl RowWrite {
             }
             Err(e) => log::error!("Failed to insert {} message: {e}", role.as_str()),
         }
+    }
+}
+
+/// The caller awaiting a [`Store::queued_cancellable`] job, as the job sees
+/// it from the writer thread.
+pub struct Requester<'a> {
+    gone: &'a (dyn Fn() -> bool + 'a),
+}
+
+impl Requester<'_> {
+    /// Whether the caller has stopped waiting for the job's result: it
+    /// dropped the future [`Store::queued_cancellable`] gave it. Once true
+    /// it stays true.
+    pub fn gone(&self) -> bool {
+        (self.gone)()
     }
 }
 
@@ -516,12 +535,31 @@ impl Store {
         &self,
         job: impl FnOnce(&Store) -> T + Send + 'static,
     ) -> impl Future<Output = Result<T, StoreError>> + Send + 'static {
+        self.queued_cancellable(move |store, _| job(store))
+    }
+
+    /// [`Store::queued`] for a job that must not write once its caller has
+    /// stopped waiting.
+    ///
+    /// The queue drops a job unrun if the caller has gone by the time the
+    /// writer thread takes it. A job that has started can still wait on the
+    /// write connection for as long as another thread holds it, and the
+    /// caller can go during that wait. So the job is handed a [`Requester`]
+    /// to ask once it holds the connection, before it writes. Nothing stops
+    /// a write that has begun: a caller that goes after the job last asked
+    /// does not undo it.
+    pub fn queued_cancellable<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&Store, &Requester<'_>) -> T + Send + 'static,
+    ) -> impl Future<Output = Result<T, StoreError>> + Send + 'static {
         let (tx, rx) = oneshot::channel();
         let job = move |store: &Store| {
             if tx.is_closed() {
                 return;
             }
-            let _ = tx.send(job(store));
+            let gone = || tx.is_closed();
+            let result = job(store, &Requester { gone: &gone });
+            let _ = tx.send(result);
         };
         match self.write_queue() {
             Some(queue) => queue.push(Job::Run(Box::new(job))),

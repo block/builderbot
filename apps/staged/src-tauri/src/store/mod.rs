@@ -100,7 +100,7 @@ pub use tool_bodies::{
     in_flight_tool_row_len, ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES,
 };
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
-pub use write_queue::{RowSlot, RowWrite};
+pub use write_queue::{Requester, RowSlot, RowWrite};
 
 use connections::{ReadGuard, ReadPool};
 use rusqlite::{Connection, OptionalExtension};
@@ -438,6 +438,13 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn hold_connection(&self) -> TimedGuard<'_, Connection> {
         self.conn.lock().unwrap()
+    }
+
+    /// How many threads are waiting for the write connection right now,
+    /// for tests that need another thread to have reached it.
+    #[cfg(test)]
+    pub(crate) fn connection_waiters(&self) -> usize {
+        self.conn.waiting()
     }
 
     /// Holds every read-only connection as long reads do, for tests of what

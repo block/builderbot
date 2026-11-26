@@ -232,6 +232,42 @@ async fn an_abandoned_request_does_not_run() {
     assert!(!ran.load(Ordering::SeqCst));
 }
 
+/// A job that has started can still learn that its caller stopped waiting:
+/// the queue's own check is made before the job runs, and the job may wait
+/// a long time after that. The job here stands for one on the connection
+/// lock: it is running, and held up until the test lets it go.
+#[tokio::test]
+async fn a_running_job_sees_its_requester_go() {
+    let (store, _session_id) = store_with_session();
+    let run = |store: &Store| {
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<(bool, bool)>();
+        let request = store.queued_cancellable(move |_, requester| {
+            let at_start = requester.gone();
+            let _ = started_tx.send(());
+            let _ = resume_rx.recv();
+            let _ = seen_tx.send((at_start, requester.gone()));
+        });
+        started_rx
+            .recv_timeout(WRITER_WAIT)
+            .expect("the writer thread starts the job");
+        (request, resume_tx, seen_rx)
+    };
+
+    // The caller goes while the job is running.
+    let (request, resume, seen) = run(&store);
+    drop(request);
+    resume.send(()).unwrap();
+    assert_eq!(seen.recv_timeout(WRITER_WAIT).unwrap(), (false, true));
+
+    // The caller waits: the job never sees it gone, and it gets the result.
+    let (request, resume, seen) = run(&store);
+    resume.send(()).unwrap();
+    request.await.unwrap();
+    assert_eq!(seen.recv_timeout(WRITER_WAIT).unwrap(), (false, false));
+}
+
 /// The point of the queue: a session thread (a current-thread runtime)
 /// that queues writes and awaits a queued request keeps running its
 /// other tasks, a timer here, while another thread holds the connection

@@ -138,7 +138,8 @@ impl RowWrite {
         match inserted {
             Ok(id) => {
                 let _ = slot.0.set(id);
-                if let Some(mut metadata) = on_insert.filter(|m| *m != AcpMessageMetadata::default())
+                if let Some(mut metadata) =
+                    on_insert.filter(|m| *m != AcpMessageMetadata::default())
                 {
                     metadata.acp_tool_call_id = tool_call_id;
                     if let Err(e) = store.update_message_acp_metadata(id, &metadata) {

@@ -703,6 +703,11 @@ async fn a_row_sent_before_its_metadata_is_sent_again_with_it() {
 /// writes: the call and its result reach the client tied to the call in the
 /// first frame that holds them, whatever the reads fall between, so neither
 /// row has to be sent a second time.
+///
+/// The writer queues its writes on the store's writer thread, so the test
+/// flushes them before moving time on, blocking: awaiting the flush would
+/// leave the runtime idle, and the paused clock would jump to the gather
+/// before the writes land.
 #[tokio::test(start_paused = true)]
 async fn the_writers_tool_rows_are_tied_to_their_call_in_every_frame() {
     use acp_client::MessageWriter as _;
@@ -712,6 +717,7 @@ async fn the_writers_tool_rows_are_tied_to_their_call_in_every_frame() {
     h.say(&session, MessageRole::User, "the prompt");
     let client = open_chat(&h, &session).await;
     let writer = crate::agent::MessageWriter::new(session.id.clone(), h.store.clone());
+    let flush = || assert!(h.store.flush_writes_blocking(Duration::from_secs(20)));
     let metadata = |kind: &str, status: &str| acp_client::AcpToolCallMetadata {
         event_kind: Some(kind.to_string()),
         tool_call_id: Some("tc-1".to_string()),
@@ -721,6 +727,7 @@ async fn the_writers_tool_rows_are_tied_to_their_call_in_every_frame() {
 
     // The row, before the writer is given the call's metadata.
     writer.record_tool_call("tc-1", "Read notes.md", None).await;
+    flush();
     past_the_gather().await;
     let frame = only(client.take());
     let (visible, hidden) = full_ids(&frame);
@@ -735,6 +742,7 @@ async fn the_writers_tool_rows_are_tied_to_their_call_in_every_frame() {
     writer
         .record_tool_call_metadata(metadata("tool_call", "pending"))
         .await;
+    flush();
     past_the_gather().await;
     // The metadata arrives as a metadata row, under the id the visible row
     // already has.
@@ -749,6 +757,7 @@ async fn the_writers_tool_rows_are_tied_to_their_call_in_every_frame() {
         .record_tool_call_metadata(metadata("tool_call_update", "completed"))
         .await;
     writer.record_tool_result("tc-1", "the notes").await;
+    flush();
     past_the_gather().await;
     let frame = only(client.take());
     let (visible, hidden) = full_ids(&frame);

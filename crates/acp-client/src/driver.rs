@@ -93,6 +93,13 @@ static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// This trait allows different storage backends (database, in-memory, etc.)
 /// to receive streaming agent output without coupling to the ACP protocol.
+///
+/// A call returning means the write is recorded, not that it is stored: a
+/// writer may store in the background, and a reader that needs what was
+/// recorded waits with [`wait_until_stored`](Self::wait_until_stored) first.
+/// The connection waits once, as it ends, and not before it answers a
+/// [`TurnControlHandle`] request: a caller told there that its message was
+/// delivered waits on its own store before it reads the message's row.
 #[async_trait]
 pub trait MessageWriter: Send + Sync {
     /// Append a text chunk to the current assistant message.
@@ -2359,7 +2366,7 @@ impl TurnControlHandle {
         steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
-        Self::scripted_connection(steer, interrupt, false)
+        Self::scripted_connection(steer, interrupt, false, None)
     }
 
     /// [`Self::scripted`] whose connection reports itself gone right after it
@@ -2372,13 +2379,29 @@ impl TurnControlHandle {
         steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
-        Self::scripted_connection(steer, interrupt, true)
+        Self::scripted_connection(steer, interrupt, true, None)
+    }
+
+    /// [`Self::scripted`] whose connection persists the message through
+    /// `writer` before it answers `Ok`, in the order a real connection keeps
+    /// (see [`MessageWriter::record_user_message`]): a steer answered `Ok`,
+    /// or an interrupt answered `Ok`, records the user message and only then
+    /// answers. A request answered `Err` records nothing. For tests of what
+    /// a caller may read once it is told a message was delivered.
+    #[doc(hidden)]
+    pub fn scripted_recording(
+        steer: Result<SteerOutcome, SteerError>,
+        interrupt: Result<(), String>,
+        writer: Arc<dyn MessageWriter>,
+    ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+        Self::scripted_connection(steer, interrupt, false, Some(writer))
     }
 
     fn scripted_connection(
         steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
         gone_after_first_answer: bool,
+        writer: Option<Arc<dyn MessageWriter>>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
         let (turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2409,11 +2432,42 @@ impl TurnControlHandle {
                 if gone_after_first_answer {
                     alive.store(false, Ordering::Relaxed);
                 }
-                match request {
-                    TurnControlRequest::Steer { reply, .. } => {
+                let (prompt, images, attachment_ids, answered_ok, answer) = match request {
+                    TurnControlRequest::Steer {
+                        prompt,
+                        images,
+                        attachment_ids,
+                        reply,
+                    } => (
+                        prompt,
+                        images,
+                        attachment_ids,
+                        steer.is_ok(),
+                        TurnControlReply::Steer(reply),
+                    ),
+                    TurnControlRequest::Interrupt {
+                        prompt,
+                        images,
+                        attachment_ids,
+                        reply,
+                    } => (
+                        prompt,
+                        images,
+                        attachment_ids,
+                        interrupt.is_ok(),
+                        TurnControlReply::Interrupt(reply),
+                    ),
+                };
+                if let Some(writer) = writer.as_ref().filter(|_| answered_ok) {
+                    writer
+                        .record_user_message(&prompt, &images, &attachment_ids)
+                        .await;
+                }
+                match answer {
+                    TurnControlReply::Steer(reply) => {
                         let _ = reply.send(steer.clone());
                     }
-                    TurnControlRequest::Interrupt { reply, .. } => {
+                    TurnControlReply::Interrupt(reply) => {
                         let _ = reply.send(interrupt.clone());
                     }
                 }

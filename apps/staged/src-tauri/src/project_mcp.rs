@@ -1998,9 +1998,14 @@ mod tests {
                 &self.session.id,
                 message,
                 &[],
-                crate::session_commands::ContinueWaits::uniform(std::time::Duration::from_millis(
-                    200,
-                )),
+                crate::session_commands::ContinueWaits {
+                    // Long enough for a delivered message's row to be
+                    // stored, as the tool's own budget is meant to be.
+                    stored: std::time::Duration::from_secs(30),
+                    ..crate::session_commands::ContinueWaits::uniform(
+                        std::time::Duration::from_millis(200),
+                    )
+                },
                 crate::session_commands::StoppedSessionPolicy::Resume,
             )
             .await
@@ -2078,6 +2083,48 @@ mod tests {
                 "steer:stop, different approach".to_string(),
                 "interrupt:stop, different approach".to_string(),
             ]
+        );
+    }
+
+    /// The reply's last user-message time is the delivered message's own. The
+    /// connection queues the message's row and answers, and the tool reads
+    /// the transcript for its reply right after. Here the row cannot be
+    /// stored until a held write connection is let go, after the connection
+    /// has answered: the reply must wait for it, not carry the time of an
+    /// earlier message (none, in this transcript).
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_reply_to_a_steered_message_carries_that_messages_time() {
+        let f = ContinueFixture::running_note_session();
+        let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(
+            crate::agent::writer::MessageWriter::new(f.session.id.clone(), Arc::clone(&f.store)),
+        );
+        let (turn_control, _served) =
+            TurnControlHandle::scripted_recording(Ok(SteerOutcome::Injected), Ok(()), writer);
+        f.registry
+            .set_turn_control_handle(&f.session.id, turn_control);
+
+        let held = f.store.hold_connection();
+        let let_go = async {
+            while f.store.writes_idle() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            drop(held);
+        };
+        let (payload, ()) = tokio::join!(f.continue_with("also check the tests"), let_go);
+
+        assert_eq!(payload["delivery"], "injected");
+        let user_rows: Vec<SessionMessage> = f
+            .store
+            .get_session_messages(&f.session.id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+        assert_eq!(user_rows.len(), 1, "{user_rows:#?}");
+        assert_eq!(
+            payload["activity"]["last_user_message_at"],
+            serde_json::json!(user_rows[0].created_at)
         );
     }
 

@@ -1579,6 +1579,7 @@ mod tests {
         let (store, session_id, writer) = setup_writer();
 
         writer.record_tool_call("tc-1", "Read file", None).await;
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, MessageRole::ToolCall);
@@ -1586,6 +1587,7 @@ mod tests {
         assert_eq!(messages[0].acp.acp_event_kind, None);
 
         writer.record_tool_result("tc-1", "contents").await;
+        store.flush_writes().await;
         let messages = store.get_session_messages(&session_id).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].role, MessageRole::ToolResult);

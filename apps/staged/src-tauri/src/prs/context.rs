@@ -34,7 +34,8 @@ pub(crate) struct BranchPipelineContext {
 
 /// Resolve branch, project, and working directory for a pipeline command.
 ///
-/// All pipeline commands (create_pr, push_branch, rebase_branch, squash_commits)
+/// All pipeline commands (create_pr, push_branch, rebase_branch, squash_commits,
+/// revert_commit)
 /// share the same setup: look up the branch and project, resolve the working
 /// directory (local worktree vs remote clone), and compute the remote working
 /// directory for workspace-based branches.

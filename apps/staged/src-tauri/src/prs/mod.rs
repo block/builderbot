@@ -18,6 +18,8 @@
 //!   and the force push "Rebase and force push" queues behind its rebase.
 //! - [`push`] is the push pipeline and its variants ([`PushVariant`]).
 //! - [`pull`] fast-forwards the branch to origin, now or queued.
+//! - [`revert`] reverts a completed commit with a new signed-off commit, run
+//!   now and refused while the branch is busy.
 //! - [`git_pipeline`] rebuilds a queued push or pull when it is dequeued.
 //! - [`deferred`] is "Push after current work": a push armed on the branch
 //!   row that fires once the branch and its project are idle.
@@ -37,6 +39,7 @@ mod pipeline;
 mod pr_status;
 mod pull;
 mod push;
+mod revert;
 #[cfg(test)]
 mod tests;
 
@@ -62,3 +65,4 @@ pub(crate) use push::build_push_pipeline_steps;
 pub(crate) use push::{
     has_unpushed_commits_impl, start_or_queue_push_pipeline_for_branch, PushVariant,
 };
+pub(crate) use revert::revert_commit_for_branch;

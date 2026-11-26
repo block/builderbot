@@ -73,6 +73,9 @@ impl PushVariant {
 /// `--no-verify` skips only git's `pre-push` hook; server-side checks still
 /// apply. It goes into both halves of the HTTPS fallback, so the retry doesn't
 /// run the hook either.
+///
+/// Without it the hook runs at most once per step: the fallback retries only
+/// a push that never reached the hook (see [`git_push_with_fallback`]).
 pub(crate) fn build_push_pipeline_steps(
     local_branch: &str,
     remote_branch: &str,

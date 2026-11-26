@@ -5498,8 +5498,9 @@ mod upstream_tracking_tests {
 
     /// "Push without verifying" against a real `pre-push` hook that always
     /// fails and counts its runs. The verifying push fails and runs the hook
-    /// twice, because the HTTPS fallback retries on any failure; the no-verify
-    /// push lands without running it at all.
+    /// once: the HTTPS fallback does not retry a push that reached the hook
+    /// (`prs::tests::push_fallback` covers the fallback itself). The
+    /// no-verify push lands without running it at all.
     #[test]
     fn no_verify_push_skips_a_failing_pre_push_hook() {
         use std::os::unix::fs::PermissionsExt;
@@ -5545,7 +5546,7 @@ mod upstream_tracking_tests {
 
         let verifying = run_push(crate::prs::PushVariant::default());
         assert!(!verifying.status.success());
-        assert_eq!(hook_runs(), 2);
+        assert_eq!(hook_runs(), 1);
         assert_eq!(
             git(origin.path(), &["rev-parse", "refs/heads/feature-x"]),
             origin_before
@@ -5560,7 +5561,7 @@ mod upstream_tracking_tests {
             "{}",
             String::from_utf8_lossy(&no_verify.stderr)
         );
-        assert_eq!(hook_runs(), 2);
+        assert_eq!(hook_runs(), 1);
         assert_eq!(
             git(origin.path(), &["rev-parse", "refs/heads/feature-x"]),
             head

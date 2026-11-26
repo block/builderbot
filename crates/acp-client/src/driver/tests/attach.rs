@@ -756,10 +756,21 @@ async fn attach_setup_times_out_on_the_drivers_step_deadline() {
         ),
         other => panic!("a timed-out attach settled as {other:?}"),
     }
+    // The attach got no further than `initialize`: any request the proxy
+    // logged reading is that one. The log need not hold it. The deadline
+    // runs from when the attach sends the request, and the proxy may not
+    // have read it by then: on a loaded machine `sh` took over 2s to start,
+    // log its arguments, sleep and read. The teardown then stops it with
+    // `initialize` unread in its pipe, and the log is empty or holds only
+    // the arguments and the SIGINT.
     let sent = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
-    assert!(sent.contains(r#""method":"initialize""#), "{sent}");
-    assert!(!sent.contains(r#""method":"session/load""#), "{sent}");
+    assert!(
+        sent.lines()
+            .filter(|line| line.contains(r#""method":"#))
+            .all(|request| request.contains(r#""method":"initialize""#)),
+        "{sent}"
+    );
 }
 
 /// `Requested ACP process has exited`: the turn is over and a new process

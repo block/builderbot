@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// - `replaced`: the pinned process is gone and the proxy started another.
 /// - `eof`: the proxy loses its remote process after the load.
 /// - `hang`: the turn goes on after the load, silently.
+/// - `mute`: `initialize` is never answered.
 /// - `cancel`: `session/cancel` ends the turn with `result` and `idle`.
 /// - `cancel-silent`: `session/cancel` is accepted with no frames.
 /// - `interrupt`: as `cancel`, with the running tool call `t1` failed live
@@ -67,6 +68,7 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/^.*"id":"\([^"]*\)".*$/\1/p')
   case "$line" in
     *'"method":"initialize"'*)
+      [ "$mode" = mute ] && continue
       case "$mode" in
         claude)
           tool t1
@@ -158,8 +160,9 @@ fn stored_transcript() -> Vec<ReplayBoundary> {
 
 pub(super) struct TranscriptStore(pub(super) Vec<ReplayBoundary>);
 
+#[async_trait::async_trait]
 impl Store for TranscriptStore {
-    fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+    async fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -293,6 +296,7 @@ fn driver(log: &Path, mode: &str, probe: Arc<ScriptedProbe>, dedicated: bool) ->
         agent_process_observer: None,
         steering_disabled: false,
         unattended_session_mode: None,
+        setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
         blox_process: Some(BloxProcess {
             workspace_name: "ws".to_string(),
             command: BloxAcpCommand {
@@ -700,6 +704,75 @@ async fn a_process_that_is_gone_settles_process_gone() {
     );
 }
 
+/// An attach's setup steps run on the driver's step deadline
+/// (`with_setup_step_timeout`), as a session start's do. It used the 90s
+/// constant whatever the driver said, and this test then waits that long.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_setup_times_out_on_the_drivers_step_deadline() {
+    let log = log_path("mute");
+    let local = tokio::task::LocalSet::new();
+    let (outcome, waited) = local
+        .run_until(async {
+            let driver = driver(&log, "mute", ScriptedProbe::running(), true)
+                .with_setup_step_timeout(Duration::from_millis(300));
+            let store: Arc<dyn Store> = Arc::new(TranscriptStore(stored_transcript()));
+            let writer: Arc<dyn MessageWriter> = Arc::new(TranscriptLog::default());
+            let began = std::time::Instant::now();
+            let attached = driver
+                .attach_with_timing(
+                    "staged-session",
+                    "sess-1",
+                    None,
+                    &std::env::temp_dir(),
+                    &store,
+                    &writer,
+                    None,
+                    TIMING,
+                )
+                .expect("the proxy spawns");
+            let outcome = tokio::time::timeout(Duration::from_secs(30), attached.settled())
+                .await
+                .expect("the attach gives up on the driver's deadline, not after 90s");
+            (outcome, began.elapsed())
+        })
+        .await;
+
+    // It gave up on the driver's deadline, at the step that stalled.
+    assert!(
+        waited < Duration::from_secs(20),
+        "the attach waited {waited:?} for a 300ms step deadline"
+    );
+    // How a timed-out attach settles is not this test's subject, and today
+    // it depends on an ordering between two tasks: the teardown kills the
+    // proxy before the result is read, so once the stdout reader has seen
+    // that, the attach settles as a lost transport; otherwise as the
+    // timeout's own error. Either is the attach giving up.
+    match &outcome {
+        Ok(AttachOutcome::TransportLost) => {}
+        Err(error) => assert!(
+            error.starts_with("ACP protocol failed") && error.contains("Timed out attaching"),
+            "{error}"
+        ),
+        other => panic!("a timed-out attach settled as {other:?}"),
+    }
+    // The attach got no further than `initialize`: any request the proxy
+    // logged reading is that one. The log need not hold it. The deadline
+    // runs from when the attach sends the request, and the proxy may not
+    // have read it by then: on a loaded machine `sh` took over 2s to start,
+    // log its arguments, sleep and read. The teardown then stops it with
+    // `initialize` unread in its pipe, and the log is empty or holds only
+    // the arguments and the SIGINT.
+    let sent = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    assert!(
+        sent.lines()
+            .filter(|line| line.contains(r#""method":"#))
+            .all(|request| request.contains(r#""method":"initialize""#)),
+        "{sent}"
+    );
+}
+
 /// `Requested ACP process has exited`: the turn is over and a new process
 /// started. The attach only backfills, from the new process's replay, and
 /// never waits on a status.
@@ -972,8 +1045,9 @@ async fn attach_cancel_on_a_replaced_process_catches_up_from_its_replay() {
 #[tokio::test(flavor = "current_thread")]
 async fn an_unreadable_transcript_cancels_without_catching_up() {
     struct UnreadableStore;
+    #[async_trait::async_trait]
     impl Store for UnreadableStore {
-        fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+        async fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
         fn get_session_replay_boundaries(&self, _: &str) -> Result<Vec<ReplayBoundary>, String> {

@@ -342,6 +342,7 @@ async fn session_setup_keeps_own_frames_that_beat_the_session_new_answer() {
                 agent_label: "Fake",
                 auth_selection: None,
                 unattended_session_mode: None,
+                timeline: None,
             })
             .await
             .map_err(agent_client_protocol::util::internal_error)?;

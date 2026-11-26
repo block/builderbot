@@ -14,10 +14,47 @@ pub use acp_client::{discover_providers, AcpDriver, AcpProviderInfo, AgentDriver
 use crate::store::{MessageRole, SessionMessage, Store};
 
 // Implement the acp_client::Store trait for our Store
+#[async_trait::async_trait]
 impl acp_client::Store for Store {
-    fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String> {
-        self.set_agent_session_id(session_id, agent_session_id)
-            .map_err(|e| e.to_string())
+    /// Queued for the store's writer thread like the session's other writes
+    /// (see `store::write_queue`), and awaited, so setup gets the result
+    /// without its thread waiting on the store lock.
+    ///
+    /// A setup that gives up first (the step's deadline, a Stop, a lost
+    /// transport) drops the request, and the id is not stored late: the
+    /// queue skips a request nobody waits for, and the write asks again once
+    /// it holds the write connection, since setup can give up while the
+    /// writer thread waits for that. A request dropped after that, with the
+    /// UPDATE under way, still stores the id.
+    async fn set_agent_session_id(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), String> {
+        let session_id = session_id.to_string();
+        let agent_session_id = agent_session_id.to_string();
+        self.queued_cancellable(move |store, requester| {
+            let stored =
+                store.set_agent_session_id_if(&session_id, &agent_session_id, || !requester.gone());
+            match stored {
+                Ok(false) => log::info!(
+                    "Session {session_id}: its setup gave up while the agent session id waited \
+                     for the store's write connection; the id is not stored"
+                ),
+                // Too late to stop: the write had begun. Say so, since the
+                // next run will ask the agent to load this id.
+                Ok(true) if requester.gone() => log::warn!(
+                    "Session {session_id}: its setup gave up while agent session id \
+                     {agent_session_id} was being stored; the id is stored"
+                ),
+                _ => {}
+            }
+            stored
+        })
+        .await
+        .and_then(|saved| saved)
+        .map(|_stored| ())
+        .map_err(|e| e.to_string())
     }
 
     fn get_session_messages(&self, session_id: &str) -> Result<Vec<(String, String)>, String> {
@@ -43,6 +80,7 @@ impl acp_client::Store for Store {
 // Re-export writer for backward compatibility
 pub use activity::ActivityClock;
 pub use writer::MessageWriter;
+pub(crate) use writer::ShownConfigFallbacks;
 
 fn replay_boundaries_from_messages(
     messages: Vec<SessionMessage>,
@@ -276,6 +314,62 @@ mod tests {
             })),
             ..Default::default()
         }
+    }
+
+    /// The step that stores a fresh session's agent id gives up (its
+    /// deadline, a Stop, a lost transport) while the writer thread has the
+    /// job and is waiting for the write connection behind another thread.
+    /// The id must not be stored once the connection is free: setup was
+    /// abandoned and the agent released without a prompt, so a stored id
+    /// would make the next run send `session/load` for a conversation the
+    /// agent never kept.
+    #[tokio::test]
+    async fn an_id_whose_setup_gave_up_during_the_lock_wait_is_not_stored() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let session = crate::store::Session::new_running("prompt", std::path::Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        let agent_id = |store: &Store| {
+            store
+                .get_session(&session.id)
+                .unwrap()
+                .and_then(|session| session.agent_id)
+        };
+
+        let held = store.hold_connection();
+        let mut request = Box::pin(acp_client::Store::set_agent_session_id(
+            &*store,
+            &session.id,
+            "never-prompted",
+        ));
+        // Poll it once, which queues the job, as the setup step does.
+        tokio::select! {
+            biased;
+            _ = &mut request => panic!("the id cannot be stored while the connection is held"),
+            _ = std::future::ready(()) => {}
+        }
+        // The writer thread has started the job and is on the connection
+        // lock with it: it is past the queue's own check of the requester.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while store.connection_waiters() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer thread never reached the write connection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // What a setup step's timeout does to the request.
+        drop(request);
+        drop(held);
+        store.flush_writes().await;
+
+        assert_eq!(agent_id(&store), None);
+
+        // A request that is waited for still stores its id.
+        acp_client::Store::set_agent_session_id(&*store, &session.id, "prompted")
+            .await
+            .unwrap();
+        assert_eq!(agent_id(&store).as_deref(), Some("prompted"));
     }
 
     #[test]

@@ -86,7 +86,7 @@ impl Store {
     }
 
     pub fn get_branch(&self, id: &str) -> Result<Option<Branch>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::row_to_branch_query(
             &conn,
             &format!("SELECT {BRANCH_COLUMNS} FROM branches WHERE id = ?1"),
@@ -95,7 +95,7 @@ impl Store {
     }
 
     pub fn list_branches_for_project(&self, project_id: &str) -> Result<Vec<Branch>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {BRANCH_COLUMNS} FROM branches WHERE project_id = ?1 ORDER BY created_at ASC"
         ))?;
@@ -104,7 +104,7 @@ impl Store {
     }
 
     pub fn list_branch_ids(&self) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare("SELECT id FROM branches")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -157,7 +157,7 @@ impl Store {
         &self,
         project_id: Option<&str>,
     ) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id FROM branches
              WHERE deferred_push IS NOT NULL AND (?1 IS NULL OR project_id = ?1)

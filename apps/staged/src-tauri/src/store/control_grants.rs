@@ -106,7 +106,7 @@ impl Store {
     }
 
     pub fn get_control_grant(&self, id: &str) -> Result<Option<ControlGrantRecord>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Ok(conn
             .query_row(
                 &format!("SELECT {COLUMNS} FROM control_grants WHERE id = ?1"),
@@ -120,7 +120,7 @@ impl Store {
     /// included so the Settings panel can show them as expired; revoked
     /// rows are history and stay out of the list.
     pub fn list_control_grants(&self) -> Result<Vec<ControlGrantRecord>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLUMNS} FROM control_grants WHERE revoked_at IS NULL \
              ORDER BY created_at DESC, id"

@@ -43,7 +43,7 @@ impl Store {
 
     /// Get the most recent repositories, up to the specified limit.
     pub fn list_recent_repos(&self, limit: usize) -> Result<Vec<RecentRepo>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, github_repo, subpath, last_used_at
              FROM recent_repos

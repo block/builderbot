@@ -413,9 +413,10 @@ impl LeaseDetacher {
 /// by: once the connection that prompted it had initialized — or, when that is
 /// not known, once that connection's setup could at the latest have reached
 /// it after the prompt, which is written before the connection starts `sq`.
+/// `initialize` is setup's first step, so its own deadline bounds that.
 fn process_up_by(turn: &super::ReattachTurn) -> i64 {
     turn.connected_at.unwrap_or_else(|| {
-        let setup_ms = i64::try_from(super::ACP_SETUP_TIMEOUT.as_millis()).unwrap_or(i64::MAX);
+        let setup_ms = i64::try_from(super::ACP_SETUP_STEP_TIMEOUT.as_millis()).unwrap_or(i64::MAX);
         turn.prompted_at.saturating_add(setup_ms)
     })
 }

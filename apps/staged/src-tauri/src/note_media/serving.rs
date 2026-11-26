@@ -20,10 +20,11 @@ use tauri::http::{header, Method, Request, Response, StatusCode};
 pub(crate) type StoreSource = dyn Fn() -> Result<Arc<Store>, StatusCode> + Send + Sync;
 
 /// Where each served file is and what it is, by `<id>.<ext>`, so that only
-/// the first request for a file asks the store. Every store read waits on the
-/// one connection mutex the rest of the app writes through, and WebKit sends
-/// a video's requests one after another, so a wait there used to be paid by
-/// each of the hundreds of requests behind a single seek.
+/// the first request for a file asks the store. A store read waits for a
+/// connection (it once shared the one the rest of the app writes through;
+/// now it waits for one of a few read-only ones), and WebKit sends a video's
+/// requests one after another, so a wait there used to be paid by each of the
+/// hundreds of requests behind a single seek.
 ///
 /// An id names bytes that never change, but the file moves when its project
 /// does and goes when its last reference is deleted. An entry is therefore

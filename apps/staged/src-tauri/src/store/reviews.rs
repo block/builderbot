@@ -101,7 +101,7 @@ impl Store {
         commit_sha: &str,
         scope: ReviewScope,
     ) -> Result<Option<Review>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         // ORDER BY created_at DESC so we get the latest when multiple
         // reviews share the same (branch, commit, scope) triple.
         let existing: Option<Review> = conn
@@ -126,7 +126,7 @@ impl Store {
 
     /// Get a review by id, loading all child data.
     pub fn get_review(&self, id: &str) -> Result<Option<Review>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let review = conn
             .query_row(
                 "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
@@ -147,7 +147,7 @@ impl Store {
 
     /// List all reviews for a branch, with all child data loaded.
     pub fn list_reviews_for_branch(&self, branch_id: &str) -> Result<Vec<Review>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
              FROM reviews WHERE branch_id = ?1 ORDER BY created_at ASC",
@@ -310,7 +310,7 @@ impl Store {
 
     /// Get soft-deleted comments for a review, ordered by deletion time (newest first).
     pub fn get_deleted_comments(&self, review_id: &str) -> Result<Vec<Comment>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, deleted_at, github_comment_id, github_comment_type, github_comment_stale, note_session_id, commit_session_id
              FROM comments WHERE review_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
@@ -366,7 +366,7 @@ impl Store {
 
     /// Find a review by its session ID (for post-completion hooks).
     pub fn get_review_by_session(&self, session_id: &str) -> Result<Option<Review>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let review = conn
             .query_row(
                 "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
@@ -412,7 +412,7 @@ impl Store {
         branch_id: &str,
         since: i64,
     ) -> Result<Vec<Review>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
              FROM reviews

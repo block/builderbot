@@ -2052,9 +2052,16 @@ mod tests {
 
     /// Many ticks, each far shorter than the probe interval — the shipped
     /// policy's shape (300 ticks, 20 probes) compressed into milliseconds, so
-    /// the tests below can count probes against ticks without a clock of their
-    /// own. How many ticks actually fit is up to the machine; the assertions
-    /// don't depend on it.
+    /// the tests below can count probes against ticks.
+    ///
+    /// The tests that use it run on tokio's paused clock (`start_paused`).
+    /// The loop's deadline and sleeps are tokio time, which then moves only
+    /// across the sleep between ticks and never while a tick is in its
+    /// (blocking) store calls: every run gets the same 51 ticks in no real
+    /// time. On the real clock the cap also had to cover the store calls. The
+    /// test store is a database file, and with many tests running, the first
+    /// read alone was measured at 50–120 ms, so the wait gave up at the end
+    /// of its first tick, before the tick a test was waiting for.
     const MANY_TICKS: DetectionWaitPolicy = DetectionWaitPolicy {
         interval: std::time::Duration::from_millis(1),
         max_wait: std::time::Duration::from_millis(50),
@@ -2189,7 +2196,7 @@ mod tests {
             .unwrap());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_wait_probes_the_owner_once_across_many_ticks() {
         let store = Store::in_memory().unwrap();
         // Another live Staged instance, wedged mid-detection: the wait re-reads
@@ -2214,7 +2221,7 @@ mod tests {
         assert_eq!(probes.get(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_wait_reprobes_an_owner_it_has_not_seen_before() {
         let store = Store::in_memory().unwrap();
         let context = detecting_context(&store, 4242);

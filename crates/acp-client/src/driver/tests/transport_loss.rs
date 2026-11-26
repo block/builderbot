@@ -56,7 +56,7 @@ fn transport_loss_wording_matches_closed_pipes_only() {
         // Sign-in, a refused prompt, a startup that never answered.
         "Authentication required to run the prompt. Sign in to Claude.",
         "Prompt failed: Error { code: -32602, message: \"Invalid params\" }",
-        "Timed out waiting for ACP protocol startup after 90s",
+        "Timed out waiting for ACP protocol startup: session/new did not answer within 90s",
         "Selected ACP model 'opus' is no longer available",
     ] {
         assert!(!is_transport_loss_error(error), "{error}");
@@ -654,6 +654,7 @@ mod fake_proxy {
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
     }

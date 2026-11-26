@@ -3,20 +3,16 @@
 //! `cancel_repo_session`, `continue_repo_session`) and `add_project_repo` to the agent.
 
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 
-use axum::Router;
 use base64::Engine;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerConfig};
 use rmcp::service::RequestContext;
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-};
 use rmcp::{schemars, tool, tool_handler, tool_router, RoleServer, ServerHandler};
 use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
+use crate::mcp_http_server::{run_blocking, serve_mcp, McpHttpServer};
 use crate::mcp_progress::send_progress_keepalives;
 use crate::session_commands::ContinueOutcome;
 use crate::session_runner::SessionRegistry;
@@ -29,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 mod wait;
 
 /// What outcome the caller expects from a `start_repo_session` call.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RepoSessionOutcome {
     /// The session should produce a "detached" note in the repository — a note that
@@ -210,7 +206,7 @@ enum RepoArtifactKind {
     Review,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RepoSessionHandle {
     session_id: String,
     artifact_kind: RepoArtifactKind,
@@ -258,6 +254,207 @@ fn inherited_acp_config_selection(
 }
 
 impl ProjectToolsHandler {
+    /// Run `f` against a clone of this handler on the blocking pool, so the
+    /// store calls in it never hold a shared-runtime worker while they wait
+    /// on the store lock.
+    async fn blocking<T, F>(&self, f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ProjectToolsHandler) -> T + Send + 'static,
+    {
+        let handler = self.clone();
+        run_blocking(move || f(&handler)).await
+    }
+
+    /// Create `start_repo_session`'s queued session row and the stub of the
+    /// artifact it is expected to produce. Synchronous store writes; run it
+    /// through [`Self::blocking`].
+    fn create_repo_session_rows(
+        &self,
+        instructions: &str,
+        expected_outcome: RepoSessionOutcome,
+        branch_id: &str,
+        session_provider: Option<&str>,
+    ) -> Result<(crate::store::Session, String, RepoArtifactKind), String> {
+        let session = build_repo_session_stub(
+            instructions,
+            branch_id,
+            &self.parent_session_id,
+            session_provider,
+            inherited_acp_config_selection(
+                self.provider.as_deref(),
+                session_provider,
+                self.acp_config_selection.as_ref(),
+            ),
+        );
+        self.store
+            .create_session(&session)
+            .map_err(|e| format!("Error creating queued session: {e}"))?;
+
+        let (artifact_id, artifact_kind) = match expected_outcome {
+            RepoSessionOutcome::NoteInRepo => {
+                let note = build_repo_note_stub(branch_id, instructions, &session.id, None);
+                let note_id = note.id.clone();
+                self.store
+                    .create_note(&note)
+                    .map_err(|e| format!("Error creating note stub: {e}"))?;
+                (note_id, RepoArtifactKind::Note)
+            }
+            RepoSessionOutcome::ChildNote => {
+                // Attach the note to the parent project note so it is aggregated
+                // under it and hidden from the repo timeline. With no parent in
+                // scope (e.g. a non-project session), fall back to a plain
+                // detached note rather than erroring.
+                let note = build_repo_note_stub(
+                    branch_id,
+                    instructions,
+                    &session.id,
+                    self.parent_project_note_id.as_deref(),
+                );
+                let note_id = note.id.clone();
+                self.store
+                    .create_note(&note)
+                    .map_err(|e| format!("Error creating child note stub: {e}"))?;
+                (note_id, RepoArtifactKind::Note)
+            }
+            RepoSessionOutcome::Commit => {
+                let commit = crate::store::Commit::new_pending(branch_id).with_session(&session.id);
+                let commit_id = commit.id.clone();
+                self.store
+                    .create_commit(&commit)
+                    .map_err(|e| format!("Error creating commit stub: {e}"))?;
+                (commit_id, RepoArtifactKind::Commit)
+            }
+            RepoSessionOutcome::CodeReview => {
+                // The commit_sha is filled in at drain time, when the workspace
+                // exists and the branch tip can be read (same as queued user
+                // review sessions).
+                let review =
+                    crate::store::Review::new(branch_id, "", crate::store::ReviewScope::Branch)
+                        .with_session(&session.id);
+                let review_id = review.id.clone();
+                self.store
+                    .create_review(&review)
+                    .map_err(|e| format!("Error creating review stub: {e}"))?;
+                (review_id, RepoArtifactKind::Review)
+            }
+        };
+
+        Ok((session, artifact_id, artifact_kind))
+    }
+
+    /// `cancel_repo_session`'s body: synchronous store and registry work, run
+    /// through [`Self::blocking`].
+    fn cancel_repo_session_now(&self, repo_session_id: &str, handle: &RepoSessionHandle) -> String {
+        // Atomically try to cancel from queued state first. If the session
+        // was already picked up by the drain loop (transitioned to running),
+        // this returns false and we fall through to the running-cancel path.
+        let was_queued = match self.store.transition_from_queued(
+            &handle.session_id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::ProjectSessionInterrupted),
+        ) {
+            Ok(updated) => updated,
+            Err(e) => return format!("Error cancelling repo session: {e}"),
+        };
+
+        if was_queued {
+            // Successfully cancelled from queued state. Drain the next
+            // queued session for this branch so it can start.
+            if let Ok(Some(branch_id)) = self.store.get_branch_id_for_session(&handle.session_id) {
+                crate::web_server::emit_to_all(
+                    &self.app_handle,
+                    "session-status-changed",
+                    crate::session_runner::SessionStatusEvent {
+                        session_id: handle.session_id.clone(),
+                        status: "cancelled".to_string(),
+                        error_message: None,
+                        completion_reason: Some(
+                            CompletionReason::ProjectSessionInterrupted
+                                .as_str()
+                                .to_string(),
+                        ),
+                        rate_limit_resets_at: None,
+                        rate_limit_kind: None,
+                        branch_id: Some(branch_id.clone()),
+                        project_id: Some(self.project_id.clone()),
+                        session_type: None,
+                        dependency_skipped: false,
+                    },
+                );
+                crate::session_queue::kick(
+                    &self.app_handle,
+                    &branch_id,
+                    crate::session_queue::KickSource::Mcp,
+                );
+            }
+        } else {
+            // Session is running (or already terminal). Ask the runner to cancel.
+            //
+            // There is a startup race: a queued session becomes `running` in the
+            // DB (so `transition_from_queued` returns false above) a moment before
+            // `start_session` registers its cancellation token. In that window the
+            // registry doesn't yet know about the session and the immediate cancel
+            // attempt returns false, which would silently drop the cancellation.
+            let cancelled = self.registry.cancel_with_completion_reason(
+                &handle.session_id,
+                CompletionReason::ProjectSessionInterrupted,
+            );
+            // If the immediate cancel found nothing but the DB still records the
+            // session as running, we're in that startup window. Defer the
+            // cancellation so `start_session` applies it the instant it registers
+            // its token, guaranteeing the cancellation lands however long startup
+            // takes instead of racing a fixed-delay retry that a slow remote
+            // startup could outlast. The DB gate keeps an already-terminal
+            // session from leaving a stale pending entry behind.
+            if !cancelled {
+                match self.store.get_session(&handle.session_id) {
+                    Ok(Some(session)) if session.status == SessionStatus::Running => {
+                        self.registry.cancel_or_defer(
+                            &handle.session_id,
+                            CompletionReason::ProjectSessionInterrupted,
+                        );
+                    }
+                    // A Blox session no runner owns: the reconcile service
+                    // cancels its remote turn and ends the row.
+                    Ok(Some(session)) if session.status == SessionStatus::Disconnected => {
+                        if let Some(reconciler) = crate::session_runner::reconcile::active() {
+                            reconciler.request_stop(
+                                &handle.session_id,
+                                CompletionReason::ProjectSessionInterrupted,
+                            );
+                        }
+                    }
+                    // A paused session is parked for automatic resume, on a
+                    // provider limit or, with `rate_limit_kind = "network"`,
+                    // on a prompt that failed on the network. Either kind has
+                    // no runner and no token: the store write is the whole
+                    // cancel. It drops `completion_reason = rate_limited`,
+                    // which both kinds carry, so the rate-limit scheduler
+                    // never resumes the child and a network pause never
+                    // probes with it, and settles the work queued behind it,
+                    // as a Stop in the UI does.
+                    Ok(Some(session)) if session.status == SessionStatus::Paused => {
+                        crate::session_commands::cancel_session_without_runner(
+                            &self.store,
+                            &self.app_handle,
+                            &handle.session_id,
+                            CompletionReason::ProjectSessionInterrupted,
+                            crate::session_queue::KickSource::Mcp,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        match Self::repo_session_payload(&self.store, repo_session_id, handle) {
+            Ok(payload) => payload.to_string(),
+            Err(e) => e,
+        }
+    }
+
     fn resolve_repo_target(
         &self,
         repo_slug: &str,
@@ -680,7 +877,12 @@ impl ProjectToolsHandler {
             self.provider,
             p.instructions,
         );
-        let target = match self.resolve_repo_target(&p.repo, p.subpath.as_deref()) {
+        let (repo, subpath) = (p.repo.clone(), p.subpath.clone());
+        let target = match self
+            .blocking(move |handler| handler.resolve_repo_target(&repo, subpath.as_deref()))
+            .await
+            .and_then(|target| target)
+        {
             Ok(target) => target,
             Err(e) => return e,
         };
@@ -707,73 +909,23 @@ impl ProjectToolsHandler {
             self.provider.clone()
         };
 
-        let session = build_repo_session_stub(
-            &p.instructions,
-            &target.branch.id,
-            &self.parent_session_id,
-            session_provider.as_deref(),
-            inherited_acp_config_selection(
-                self.provider.as_deref(),
-                session_provider.as_deref(),
-                self.acp_config_selection.as_ref(),
-            ),
-        );
-        if let Err(e) = self.store.create_session(&session) {
-            return format!("Error creating queued session: {e}");
-        }
-
-        let (artifact_id, artifact_kind) = match p.expected_outcome {
-            RepoSessionOutcome::NoteInRepo => {
-                let note =
-                    build_repo_note_stub(&target.branch.id, &p.instructions, &session.id, None);
-                let note_id = note.id.clone();
-                if let Err(e) = self.store.create_note(&note) {
-                    return format!("Error creating note stub: {e}");
-                }
-                (note_id, RepoArtifactKind::Note)
-            }
-            RepoSessionOutcome::ChildNote => {
-                // Attach the note to the parent project note so it is aggregated
-                // under it and hidden from the repo timeline. With no parent in
-                // scope (e.g. a non-project session), fall back to a plain
-                // detached note rather than erroring.
-                let note = build_repo_note_stub(
-                    &target.branch.id,
-                    &p.instructions,
-                    &session.id,
-                    self.parent_project_note_id.as_deref(),
-                );
-                let note_id = note.id.clone();
-                if let Err(e) = self.store.create_note(&note) {
-                    return format!("Error creating child note stub: {e}");
-                }
-                (note_id, RepoArtifactKind::Note)
-            }
-            RepoSessionOutcome::Commit => {
-                let commit =
-                    crate::store::Commit::new_pending(&target.branch.id).with_session(&session.id);
-                let commit_id = commit.id.clone();
-                if let Err(e) = self.store.create_commit(&commit) {
-                    return format!("Error creating commit stub: {e}");
-                }
-                (commit_id, RepoArtifactKind::Commit)
-            }
-            RepoSessionOutcome::CodeReview => {
-                // The commit_sha is filled in at drain time, when the workspace
-                // exists and the branch tip can be read (same as queued user
-                // review sessions).
-                let review = crate::store::Review::new(
-                    &target.branch.id,
-                    "",
-                    crate::store::ReviewScope::Branch,
+        let instructions = p.instructions.clone();
+        let expected_outcome = p.expected_outcome;
+        let branch_id = target.branch.id.clone();
+        let (session, artifact_id, artifact_kind) = match self
+            .blocking(move |handler| {
+                handler.create_repo_session_rows(
+                    &instructions,
+                    expected_outcome,
+                    &branch_id,
+                    session_provider.as_deref(),
                 )
-                .with_session(&session.id);
-                let review_id = review.id.clone();
-                if let Err(e) = self.store.create_review(&review) {
-                    return format!("Error creating review stub: {e}");
-                }
-                (review_id, RepoArtifactKind::Review)
-            }
+            })
+            .await
+            .and_then(|rows| rows)
+        {
+            Ok(rows) => rows,
+            Err(e) => return e,
         };
 
         let repo_session_id =
@@ -844,7 +996,17 @@ impl ProjectToolsHandler {
             wait::duration(p.wait_for_completion_seconds, progress_token.is_some()),
             &ctx.ct,
             &self.cancel_token,
-            || Self::repo_session_payload(&self.store, &p.repo_session_id, &handle),
+            || {
+                let repo_session_id = p.repo_session_id.clone();
+                let handle = handle.clone();
+                async move {
+                    self.blocking(move |handler| {
+                        Self::repo_session_payload(&handler.store, &repo_session_id, &handle)
+                    })
+                    .await
+                    .and_then(|payload| payload)
+                }
+            },
         );
         tokio::select! {
             result = wait => result,
@@ -866,113 +1028,11 @@ impl ProjectToolsHandler {
             Err(e) => return e,
         };
 
-        // Atomically try to cancel from queued state first. If the session
-        // was already picked up by the drain loop (transitioned to running),
-        // this returns false and we fall through to the running-cancel path.
-        let was_queued = match self.store.transition_from_queued(
-            &handle.session_id,
-            SessionStatus::Cancelled,
-            None,
-            Some(&CompletionReason::ProjectSessionInterrupted),
-        ) {
-            Ok(updated) => updated,
-            Err(e) => return format!("Error cancelling repo session: {e}"),
-        };
-
-        if was_queued {
-            // Successfully cancelled from queued state. Drain the next
-            // queued session for this branch so it can start.
-            if let Ok(Some(branch_id)) = self.store.get_branch_id_for_session(&handle.session_id) {
-                crate::web_server::emit_to_all(
-                    &self.app_handle,
-                    "session-status-changed",
-                    crate::session_runner::SessionStatusEvent {
-                        session_id: handle.session_id.clone(),
-                        status: "cancelled".to_string(),
-                        error_message: None,
-                        completion_reason: Some(
-                            CompletionReason::ProjectSessionInterrupted
-                                .as_str()
-                                .to_string(),
-                        ),
-                        rate_limit_resets_at: None,
-                        rate_limit_kind: None,
-                        branch_id: Some(branch_id.clone()),
-                        project_id: Some(self.project_id.clone()),
-                        session_type: None,
-                        dependency_skipped: false,
-                    },
-                );
-                crate::session_queue::kick(
-                    &self.app_handle,
-                    &branch_id,
-                    crate::session_queue::KickSource::Mcp,
-                );
-            }
-        } else {
-            // Session is running (or already terminal). Ask the runner to cancel.
-            //
-            // There is a startup race: a queued session becomes `running` in the
-            // DB (so `transition_from_queued` returns false above) a moment before
-            // `start_session` registers its cancellation token. In that window the
-            // registry doesn't yet know about the session and the immediate cancel
-            // attempt returns false, which would silently drop the cancellation.
-            let cancelled = self.registry.cancel_with_completion_reason(
-                &handle.session_id,
-                CompletionReason::ProjectSessionInterrupted,
-            );
-            // If the immediate cancel found nothing but the DB still records the
-            // session as running, we're in that startup window. Defer the
-            // cancellation so `start_session` applies it the instant it registers
-            // its token, guaranteeing the cancellation lands however long startup
-            // takes instead of racing a fixed-delay retry that a slow remote
-            // startup could outlast. The DB gate keeps an already-terminal
-            // session from leaving a stale pending entry behind.
-            if !cancelled {
-                match self.store.get_session(&handle.session_id) {
-                    Ok(Some(session)) if session.status == SessionStatus::Running => {
-                        self.registry.cancel_or_defer(
-                            &handle.session_id,
-                            CompletionReason::ProjectSessionInterrupted,
-                        );
-                    }
-                    // A Blox session no runner owns: the reconcile service
-                    // cancels its remote turn and ends the row.
-                    Ok(Some(session)) if session.status == SessionStatus::Disconnected => {
-                        if let Some(reconciler) = crate::session_runner::reconcile::active() {
-                            reconciler.request_stop(
-                                &handle.session_id,
-                                CompletionReason::ProjectSessionInterrupted,
-                            );
-                        }
-                    }
-                    // A paused session is parked for automatic resume, on a
-                    // provider limit or, with `rate_limit_kind = "network"`,
-                    // on a prompt that failed on the network. Either kind has
-                    // no runner and no token: the store write is the whole
-                    // cancel. It drops `completion_reason = rate_limited`,
-                    // which both kinds carry, so the rate-limit scheduler
-                    // never resumes the child and a network pause never
-                    // probes with it, and settles the work queued behind it,
-                    // as a Stop in the UI does.
-                    Ok(Some(session)) if session.status == SessionStatus::Paused => {
-                        crate::session_commands::cancel_session_without_runner(
-                            &self.store,
-                            &self.app_handle,
-                            &handle.session_id,
-                            CompletionReason::ProjectSessionInterrupted,
-                            crate::session_queue::KickSource::Mcp,
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        match Self::repo_session_payload(&self.store, &p.repo_session_id, &handle) {
-            Ok(payload) => payload.to_string(),
-            Err(e) => e,
-        }
+        // The cancel is all store writes and registry calls; none of it
+        // waits on anything async.
+        self.blocking(move |handler| handler.cancel_repo_session_now(&p.repo_session_id, &handle))
+            .await
+            .unwrap_or_else(|e| e)
     }
 
     #[tool(
@@ -1018,12 +1078,19 @@ impl ProjectToolsHandler {
             Err(e) => return format!("Error continuing repo session: {e}"),
         };
 
-        match Self::continue_repo_session_payload(
-            &self.store,
-            &p.repo_session_id,
-            &handle,
-            &outcome,
-        ) {
+        let repo_session_id = p.repo_session_id;
+        match self
+            .blocking(move |handler| {
+                Self::continue_repo_session_payload(
+                    &handler.store,
+                    &repo_session_id,
+                    &handle,
+                    &outcome,
+                )
+            })
+            .await
+            .and_then(|payload| payload)
+        {
             Ok(payload) => payload.to_string(),
             Err(e) => e,
         }
@@ -1136,11 +1203,15 @@ impl ProjectToolsHandler {
         );
 
         // Find the branch that was just created for this repo
-        let branch = match self.store.list_branches_for_project(&self.project_id) {
-            Ok(branches) => branches
+        let branches = self
+            .blocking(|handler| handler.store.list_branches_for_project(&handler.project_id))
+            .await;
+        let branch = match branches {
+            Ok(Ok(branches)) => branches
                 .into_iter()
                 .find(|b| b.project_repo_id.as_deref() == Some(repo.id.as_str())),
-            Err(e) => return format!("Error listing branches after adding repo: {e}"),
+            Ok(Err(e)) => return format!("Error listing branches after adding repo: {e}"),
+            Err(e) => return e,
         };
 
         let branch = match branch {
@@ -1278,12 +1349,12 @@ impl ServerHandler for ProjectToolsHandler {
     }
 }
 
-/// Start a local MCP SSE server for a project session.
+/// Start the local MCP HTTP server for a project session.
 ///
-/// Returns the bound port and a JoinHandle. The server runs until
-/// the handle (and its parent LocalSet) is dropped.
+/// The server runs on the shared runtime (see [`crate::mcp_http_server`])
+/// until the returned guard is dropped.
 #[allow(clippy::too_many_arguments)]
-pub async fn start_project_mcp_server(
+pub fn start_project_mcp_server(
     project_id: String,
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
@@ -1295,15 +1366,7 @@ pub async fn start_project_mcp_server(
     parent_project_note_id: Option<String>,
     parent_session_id: String,
     cancel_token: CancellationToken,
-) -> Result<(u16, JoinHandle<()>), String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("Failed to bind MCP listener: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to get local address: {e}"))?
-        .port();
-
+) -> Result<McpHttpServer, String> {
     let handler = ProjectToolsHandler::new(
         project_id,
         store,
@@ -1317,26 +1380,13 @@ pub async fn start_project_mcp_server(
         parent_session_id,
         cancel_token,
     );
+    let project_id = handler.project_id.clone();
+    let server = serve_mcp("project_mcp", move || handler.clone())?;
     log::debug!(
-        "[project_mcp] HTTP server bound on port {port} for project {}",
-        handler.project_id
+        "[project_mcp] serving project {project_id} on port {}",
+        server.port()
     );
-
-    let service = StreamableHttpService::new(
-        move || Ok(handler.clone()),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    );
-
-    let router = Router::new().route_service("/mcp", service);
-
-    let handle = tokio::task::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
-            log::error!("[project_mcp] HTTP server error: {e}");
-        }
-    });
-
-    Ok((port, handle))
+    Ok(server)
 }
 
 #[cfg(test)]
@@ -1792,14 +1842,15 @@ mod tests {
     /// scheduler to restart the child.
     /// The store write itself is covered by
     /// `session_commands::tests::cancelling_a_paused_session_without_a_runner_keeps_the_callers_reason_and_stops_auto_resume`;
-    /// that the tool reaches it is pinned by source text, because the handler
+    /// that the tool reaches it (through `cancel_repo_session_now`, its
+    /// blocking-pool body) is pinned by source text, because the handler
     /// holds a concrete app handle and cannot be driven under the mock runtime.
     #[test]
     fn cancel_repo_session_cancels_a_paused_session_through_the_store() {
         let source = include_str!("project_mcp.rs");
-        let start = "async fn cancel_repo_session(";
+        let start = "fn cancel_repo_session_now(";
         let body = &source[source.find(start).expect(start)..];
-        let end = "async fn continue_repo_session(";
+        let end = "fn resolve_repo_target(";
         let body = &body[..body.find(end).expect(end)];
         let paused = "if session.status == SessionStatus::Paused => {";
         let arm = &body[body.find(paused).expect(paused)..];
@@ -1947,9 +1998,14 @@ mod tests {
                 &self.session.id,
                 message,
                 &[],
-                crate::session_commands::ContinueWaits::uniform(std::time::Duration::from_millis(
-                    200,
-                )),
+                crate::session_commands::ContinueWaits {
+                    // Long enough for a delivered message's row to be
+                    // stored, as the tool's own budget is meant to be.
+                    stored: std::time::Duration::from_secs(30),
+                    ..crate::session_commands::ContinueWaits::uniform(
+                        std::time::Duration::from_millis(200),
+                    )
+                },
                 crate::session_commands::StoppedSessionPolicy::Resume,
             )
             .await
@@ -2027,6 +2083,48 @@ mod tests {
                 "steer:stop, different approach".to_string(),
                 "interrupt:stop, different approach".to_string(),
             ]
+        );
+    }
+
+    /// The reply's last user-message time is the delivered message's own. The
+    /// connection queues the message's row and answers, and the tool reads
+    /// the transcript for its reply right after. Here the row cannot be
+    /// stored until a held write connection is let go, after the connection
+    /// has answered: the reply must wait for it, not carry the time of an
+    /// earlier message (none, in this transcript).
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_reply_to_a_steered_message_carries_that_messages_time() {
+        let f = ContinueFixture::running_note_session();
+        let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(
+            crate::agent::writer::MessageWriter::new(f.session.id.clone(), Arc::clone(&f.store)),
+        );
+        let (turn_control, _served) =
+            TurnControlHandle::scripted_recording(Ok(SteerOutcome::Injected), Ok(()), writer);
+        f.registry
+            .set_turn_control_handle(&f.session.id, turn_control);
+
+        let held = f.store.hold_connection();
+        let let_go = async {
+            while f.store.writes_idle() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            drop(held);
+        };
+        let (payload, ()) = tokio::join!(f.continue_with("also check the tests"), let_go);
+
+        assert_eq!(payload["delivery"], "injected");
+        let user_rows: Vec<SessionMessage> = f
+            .store
+            .get_session_messages(&f.session.id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+        assert_eq!(user_rows.len(), 1, "{user_rows:#?}");
+        assert_eq!(
+            payload["activity"]["last_user_message_at"],
+            serde_json::json!(user_rows[0].created_at)
         );
     }
 

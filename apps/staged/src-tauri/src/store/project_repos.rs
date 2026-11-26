@@ -46,7 +46,7 @@ impl Store {
     }
 
     pub fn get_project_repo(&self, id: &str) -> Result<Option<ProjectRepo>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, head_repo, created_at, updated_at
              FROM project_repos WHERE id = ?1",
@@ -58,7 +58,7 @@ impl Store {
     }
 
     pub fn list_project_repos(&self, project_id: &str) -> Result<Vec<ProjectRepo>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, head_repo, created_at, updated_at
              FROM project_repos WHERE project_id = ?1
@@ -72,7 +72,7 @@ impl Store {
         &self,
         project_id: &str,
     ) -> Result<Option<ProjectRepo>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, head_repo, created_at, updated_at
              FROM project_repos WHERE project_id = ?1 AND is_primary = 1

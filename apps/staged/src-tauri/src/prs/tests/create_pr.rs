@@ -59,7 +59,7 @@ fn create_pr_pipeline_fetches_base_and_uses_origin_merge_base_for_context() {
     assert_eq!(label, "Push to remote");
     assert_eq!(
         command,
-        "if ! git push -u origin feature-branch-2:feature-branch; then git -c 'url.https://github.com/.insteadOf=git@github.com:' push -u origin feature-branch-2:feature-branch; fi"
+        "if ! git push -u origin feature-branch-2:feature-branch; then if git ls-remote --upload-pack=git-receive-pack origin HEAD >/dev/null 2>&1; then false; else git -c 'url.https://github.com/.insteadOf=git@github.com:' push -u origin feature-branch-2:feature-branch; fi; fi"
     );
 
     let (label, prompt) = ai_prompt_at(&steps, 5);

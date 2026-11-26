@@ -37,11 +37,13 @@
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
 pub(crate) mod attachments;
+mod connection_turn;
 mod disconnect;
 mod failed_run;
 mod late_stop;
 mod network_failure;
 pub(crate) mod reconcile;
+mod startup_restart;
 
 pub(crate) use disconnect::may_still_run_on_workstation;
 pub(crate) mod remote_note_watchdog;
@@ -349,6 +351,10 @@ struct RunningSession {
     /// way out of every hold, so this returns to "not holding" without needing
     /// its own reset.
     background_hold: std::sync::Mutex<acp_client::BackgroundHoldStatus>,
+    /// This entry's hold on the process activity that keeps macOS from
+    /// throttling Staged while any session runs (see [`crate::process_activity`]).
+    /// Released when the entry is dropped, on whatever path removes it.
+    _activity: crate::process_activity::SessionActivity,
 }
 
 impl RunningSession {
@@ -512,6 +518,9 @@ impl SessionRegistry {
     /// otherwise honour.
     fn register(&self, session_id: &str) -> (CancellationToken, RegistrationEpoch) {
         let token = CancellationToken::new();
+        // Taken before the registry lock: the first holder begins the
+        // activity, which is a call into Foundation.
+        let activity = crate::process_activity::hold_for_session();
         let mut inner = self.inner.lock().unwrap();
         let epoch = RegistrationEpoch(inner.next_epoch);
         inner.next_epoch += 1;
@@ -526,6 +535,7 @@ impl SessionRegistry {
             detach_reason: std::sync::Mutex::new(None),
             reattach_detach: std::sync::Mutex::new(None),
             background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
+            _activity: activity,
         });
         let pending = inner.pending_cancellations.remove(session_id);
         let carried = pending.or_else(|| {
@@ -560,7 +570,11 @@ impl SessionRegistry {
             .get(session_id)
             .is_some_and(|running| running.epoch == epoch)
         {
-            inner.running.remove(session_id);
+            let removed = inner.running.remove(session_id);
+            // Dropped after the lock: the last entry out ends the process
+            // activity, which is a call into Foundation.
+            drop(inner);
+            drop(removed);
         }
     }
 
@@ -586,10 +600,14 @@ impl SessionRegistry {
         {
             return None;
         }
-        inner
-            .running
-            .remove(session_id)
-            .and_then(|running| running.accepted_cancellation())
+        let removed = inner.running.remove(session_id);
+        let accepted = removed
+            .as_ref()
+            .and_then(|running| running.accepted_cancellation());
+        // Dropped after the lock, as in `deregister`.
+        drop(inner);
+        drop(removed);
+        accepted
     }
 
     /// Mark the entry `epoch` registered as having decided its terminal
@@ -629,7 +647,13 @@ impl SessionRegistry {
     fn deregister_reporting_cancellation(&self, session_id: &str) -> Option<CompletionReason> {
         let mut inner = self.inner.lock().unwrap();
         let removed = inner.running.remove(session_id);
-        removed.and_then(|running| running.accepted_cancellation())
+        let accepted = removed
+            .as_ref()
+            .and_then(|running| running.accepted_cancellation());
+        // Dropped after the lock, as in `deregister`.
+        drop(inner);
+        drop(removed);
+        accepted
     }
 
     /// Mark `session_id` as owned by a task that will write its terminal
@@ -2011,6 +2035,12 @@ pub fn start_session(
             // NewSessionRequest. This is a *required* server: project sessions
             // are restricted to MCP-capable providers, so a missing transport
             // is a hard error.
+            //
+            // These servers are served on the shared runtime, not on this
+            // session thread (see `mcp_http_server`), so the agent's MCP
+            // handshake during `session/new` is answered while this thread
+            // waits on the agent. Each guard stops its server when it drops
+            // with this scope, at the end of the run.
             let _mcp_handle = if let Some(ref proj_id) = config.mcp_project_id {
                 match crate::project_mcp::start_project_mcp_server(
                     proj_id.clone(),
@@ -2024,19 +2054,18 @@ pub fn start_session(
                     config.parent_project_note_id.clone(),
                     config.session_id.clone(),
                     cancel_token.clone(),
-                )
-                .await
-                {
-                    Ok((port, handle)) => {
+                ) {
+                    Ok(server) => {
                         log::info!(
-                            "Session {}: MCP server started on port {port}",
-                            config.session_id
+                            "Session {}: MCP server started on port {}",
+                            config.session_id,
+                            server.port()
                         );
                         required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
                             "builderbot",
-                            format!("http://127.0.0.1:{port}/mcp"),
+                            server.url(),
                         )));
-                        Some(handle)
+                        Some(server)
                     }
                     Err(e) => {
                         log::error!("Failed to start MCP server: {e}");
@@ -2069,19 +2098,18 @@ pub fn start_session(
                     app_handle.clone(),
                     Arc::clone(&store),
                     Arc::clone(&registry),
-                )
-                .await
-                {
-                    Ok((port, handle)) => {
+                ) {
+                    Ok(server) => {
                         log::info!(
-                            "Session {}: pikchr MCP server started on port {port}",
-                            config.session_id
+                            "Session {}: pikchr MCP server started on port {}",
+                            config.session_id,
+                            server.port()
                         );
                         required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
                             "pikchr",
-                            format!("http://127.0.0.1:{port}/mcp"),
+                            server.url(),
                         )));
-                        Some(handle)
+                        Some(server)
                     }
                     Err(e) => {
                         log::warn!(
@@ -2113,20 +2141,19 @@ pub fn start_session(
                     config.session_id.clone(),
                     Arc::clone(&note_slot),
                     draft_path.clone(),
-                )
-                .await
-                {
-                    Ok((port, handle)) => {
+                ) {
+                    Ok(server) => {
                         log::info!(
-                            "Session {}: note MCP server started on port {port}",
-                            config.session_id
+                            "Session {}: note MCP server started on port {}",
+                            config.session_id,
+                            server.port()
                         );
                         required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
                             NOTE_MCP_SERVER_NAME,
-                            format!("http://127.0.0.1:{port}/mcp"),
+                            server.url(),
                         )));
                         local_note_tool_attached.set(true);
-                        Some(handle)
+                        Some(server)
                     }
                     Err(e) => {
                         log::warn!(
@@ -2303,13 +2330,17 @@ pub fn start_session(
             let mut repair_attempts = 0;
             let mut note_followup_attempts = 0;
             let mut include_images = true;
+            let mut startup_restarts = startup_restart::StartupRestarts::default();
 
             loop {
                 remote_outbox_collected_for_turn.set(false);
                 remote_outbox_read_error.replace(None);
                 let activity = Arc::new(ActivityClock::new());
+                // Built by the restart state, so that a turn being started
+                // over does not repeat a config fallback notice.
                 let writer = Arc::new(
-                    MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
+                    startup_restarts
+                        .connection_writer(&config.session_id, &store)
                         .with_note_slot(Arc::clone(&note_slot))
                         .with_activity_clock(Arc::clone(&activity)),
                 );
@@ -2342,6 +2373,9 @@ pub fn start_session(
                 } else {
                     &[]
                 };
+                // A start over (see `startup_restart`) sends this attempt's
+                // prompt again, images included.
+                let images_this_attempt = include_images;
                 include_images = false;
 
                 // Last look before an agent process exists. Nothing between the
@@ -2370,16 +2404,8 @@ pub fn start_session(
                     return Ok(AgentRunOutcome::Cancelled);
                 }
 
-                // Open a session-scoped connection, then send this turn's
-                // prompt over it. Without a background hold the connection
-                // still tears the bridge process down as soon as the prompt
-                // resolves (so a connection serves exactly one turn); with
-                // one, the prompt resolves at hold entry while the bridge
-                // keeps serving background work, so wait for the settled
-                // event before doing anything downstream — Pikchr
-                // validation, post-completion hooks, and the terminal status
-                // must all fire on actual teardown, not on the prompt
-                // resolving.
+                // Open a session-scoped connection, send this turn's prompt
+                // over it, and wait for it to settle (see `connection_turn`).
                 //
                 // A Pikchr correction re-connects, so only the last
                 // connection's settle reason describes how the session ended.
@@ -2389,20 +2415,20 @@ pub fn start_session(
                 prompt_failed.set(false);
                 background_work_left.set(false);
                 reattached.set(false);
-                let turn_result = match driver
-                    .connect(
-                        &config.session_id,
-                        &config.working_dir,
-                        &store_trait,
-                        &writer_trait,
-                        &driver_cancel,
-                        agent_session_id.as_deref(),
-                        &selected_acp_config_options,
-                        None,
-                    )
-                    .await
-                {
-                    Ok(mut connection) => {
+                let turn = connection_turn::run_connection_turn(
+                    &driver,
+                    connection_turn::ConnectionTurnRequest {
+                        session_id: &config.session_id,
+                        working_dir: &config.working_dir,
+                        store: &store_trait,
+                        writer: &writer_trait,
+                        cancel: &driver_cancel,
+                        agent_session_id: agent_session_id.as_deref(),
+                        config_options: &selected_acp_config_options,
+                        prompt: &prompt,
+                        images,
+                    },
+                    |connection| {
                         // Expose the connection's per-task stop where the
                         // `stop_session_async_task` command (another thread)
                         // can reach it; requests are only served while the
@@ -2424,69 +2450,42 @@ pub fn start_session(
                                 connection.detach_handle(),
                             );
                         }
-                        let settled_rx = connection.take_settled_receiver();
-                        // The turn, raced against the inactivity watchdog: a
-                        // finished note behind a silent connection cancels the
-                        // turn on this side (the agent, if it is still there,
-                        // gets a `session/cancel`; a hung proxy never answers
-                        // and the driver gives up after its ack deadline) and
-                        // the result is then read as a lost connection with
-                        // the note delivered.
-                        let prompt_future = connection.prompt(&prompt, images);
-                        tokio::pin!(prompt_future);
-                        let turn_result = match watchdog.as_ref() {
-                            Some(watchdog) => tokio::select! {
-                                biased;
-                                result = &mut prompt_future => result,
-                                idle = watchdog.finished_note_found() => {
-                                    inactivity_probe_found_note.set(Some(idle));
-                                    remote_outbox_collected_for_turn.set(true);
-                                    remote_outbox_own_note_collected.set(true);
-                                    driver_cancel.cancel();
-                                    prompt_future.await
-                                }
-                            },
-                            None => prompt_future.await,
-                        };
-                        match settled_rx {
-                            Some(rx) => match rx.await {
-                                Ok(settled) => {
-                                    settle_reason.set(Some(settled.reason));
-                                    transport_loss.set(settled.transport_loss);
-                                    cancel_unacknowledged.set(settled.cancel_unacknowledged);
-                                    prompt_failed.set(settled.prompt_failed);
-                                    background_work_left.set(settled.background_work_left);
-                                    match settled.reason {
-                                        acp_client::SessionSettleReason::HeldUntilCap => {
-                                            log::warn!(
-                                                "Session {}: background hold cap expired before \
-                                                 quiescence; post-completion hooks run \
-                                                 best-effort",
-                                                config.session_id
-                                            );
-                                        }
-                                        acp_client::SessionSettleReason::HoldStopped => {
-                                            log::info!(
-                                                "Session {}: background hold stopped before \
-                                                 quiescence; the completed turn stands and \
-                                                 post-completion hooks run best-effort",
-                                                config.session_id
-                                            );
-                                        }
-                                        _ => {}
-                                    }
-                                    settled.fold_turn_result(turn_result)
-                                }
-                                // The connection task died without settling;
-                                // the turn result is the best information
-                                // available.
-                                Err(_) => turn_result,
-                            },
-                            None => turn_result,
-                        }
-                    }
-                    Err(e) => Err(e),
-                };
+                    },
+                    // The turn, raced against the inactivity watchdog: a
+                    // finished note behind a silent connection cancels the
+                    // turn, and the result is then read as a lost connection
+                    // with the note delivered.
+                    watchdog
+                        .as_ref()
+                        .map(|watchdog| watchdog.finished_note_found()),
+                    |idle| {
+                        inactivity_probe_found_note.set(Some(idle));
+                        remote_outbox_collected_for_turn.set(true);
+                        remote_outbox_own_note_collected.set(true);
+                        driver_cancel.cancel();
+                    },
+                )
+                .await;
+                // Why setup failed, when a start over can fix it (see
+                // `startup_restart`). Read off the settle: the error text
+                // reaches here wrapped by the SDK.
+                let setup_failure = turn.setup_failure();
+                if let Some(settled) = &turn.settled {
+                    settle_reason.set(Some(settled.reason));
+                    transport_loss.set(settled.transport_loss);
+                    cancel_unacknowledged.set(settled.cancel_unacknowledged);
+                    prompt_failed.set(settled.prompt_failed);
+                    background_work_left.set(settled.background_work_left);
+                }
+                let turn_result = turn.result;
+
+                // The turn's writes went on the store's write queue (see
+                // `store::write_queue`). Everything below reads the
+                // transcript back or writes to it directly, so it waits for
+                // them first. The connection already waited as it ended;
+                // this covers a connection that failed before it got that
+                // far.
+                store.flush_writes().await;
 
                 remote_agent_idle_at_settle.set(Some(activity.idle_for()));
 
@@ -2558,6 +2557,28 @@ pub fn start_session(
                     remote_outbox_collected_for_turn.set(false);
                 }
                 let turn_result = picked_up.result;
+
+                // A connection that failed before its prompt went out is
+                // started over once (see `startup_restart`): its turn's
+                // prompt row is already stored, and the agent never got it.
+                // A config fallback its setup announced is not announced
+                // again by the next connection.
+                if startup_restarts
+                    .after_turn(
+                        &config.session_id,
+                        &turn_result,
+                        setup_failure,
+                        cancel_token.is_cancelled()
+                            || reattached.get()
+                            || crate::app_lifecycle::is_quitting(&app_handle),
+                        &mut agent_session_id,
+                        &store,
+                    )
+                    .is_some()
+                {
+                    include_images = images_this_attempt;
+                    continue;
+                }
 
                 if !should_validate_pikchr_after_turn(&turn_result, cancel_token.is_cancelled()) {
                     return turn_result.map_err(AgentRunError::from);
@@ -10201,6 +10222,8 @@ mod tests {
     mod detached_turn_pickup;
     mod note_completion;
     mod note_draft;
+    #[cfg(unix)]
+    mod startup_restart_connection;
     mod swept_note_pikchr;
     mod taken_over_note;
     mod unread_run_end;
@@ -12281,6 +12304,7 @@ draft file (its path is in your instructions), counting from the first non-blank
             cancel_unacknowledged,
             background_work_left: false,
             prompt_failed: false,
+            setup_failure: None,
         }
     }
 

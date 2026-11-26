@@ -43,6 +43,7 @@ mod git_pipeline;
 mod pr_status;
 mod pull;
 mod push;
+mod push_fallback;
 
 fn command_at(steps: &[PipelineStep], index: usize) -> (&str, &str, &FailureStrategy) {
     match &steps[index] {

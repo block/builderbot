@@ -55,10 +55,9 @@ impl Store {
         session_id: &str,
         request: &SessionPollRequest,
     ) -> Result<SessionPoll, StoreError> {
-        let mut conn = self.conn.lock().unwrap();
-        // The lock already excludes this process's writers; the read
-        // transaction extends the snapshot to any other process on the file.
-        let tx = conn.transaction()?;
+        // One snapshot for the whole poll: the reader's transaction (see
+        // `connections`) keeps every writer's commits out until it ends.
+        let tx = self.read_conn();
         let poll = SessionPoll {
             session: Self::get_session_with_conn(&tx, session_id)?,
             queued_messages: Self::list_queued_session_messages_with_conn(&tx, session_id)?,
@@ -75,7 +74,6 @@ impl Store {
                 &request.metadata_refetch_ids,
             )?,
         };
-        tx.commit()?;
         Ok(poll)
     }
 }

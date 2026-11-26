@@ -768,6 +768,7 @@ where
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(agent.build(), async |connection| {
+            let setup_failure = std::cell::Cell::new(None);
             let (result, ()) = tokio::join!(
                 run_acp_session(
                     &connection,
@@ -792,6 +793,8 @@ where
                     &hold_active,
                     &pending_reply,
                     None,
+                    crate::driver::ACP_SETUP_STEP_TIMEOUT,
+                    &setup_failure,
                 ),
                 drive(
                     handle,

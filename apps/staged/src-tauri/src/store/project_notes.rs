@@ -66,7 +66,7 @@ impl Store {
     }
 
     pub fn get_project_note(&self, id: &str) -> Result<Option<ProjectNote>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes WHERE id = ?1",
@@ -78,7 +78,7 @@ impl Store {
     }
 
     pub fn list_project_notes(&self, project_id: &str) -> Result<Vec<ProjectNote>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes
@@ -94,7 +94,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Option<ProjectNote>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes WHERE session_id = ?1",
@@ -110,7 +110,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Option<ProjectNote>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes WHERE session_id = ?1 AND content = ''",

@@ -9,6 +9,7 @@ pub mod acp_tools_reconciler;
 pub mod actions;
 pub mod agent;
 pub mod app_lifecycle;
+mod app_log;
 pub mod background_sync;
 pub mod blox;
 mod branch_teardown;
@@ -24,6 +25,7 @@ pub mod image_commands;
 pub mod launch_resume;
 pub mod managed_acp_tools;
 pub mod managed_node;
+pub mod mcp_http_server;
 mod mcp_progress;
 pub mod migrations;
 pub mod note_commands;
@@ -42,6 +44,7 @@ pub(crate) mod pipeline_dependency;
 pub mod pr_detection;
 pub mod pr_poll_scheduler;
 mod preference_events;
+pub(crate) mod process_activity;
 pub mod project_activity;
 pub mod project_commands;
 pub mod project_mcp;
@@ -2343,13 +2346,7 @@ pub fn run() {
                 });
             }
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            app.handle().plugin(app_log::plugin())?;
             Ok(())
         })
         .on_menu_event(|app, event| {

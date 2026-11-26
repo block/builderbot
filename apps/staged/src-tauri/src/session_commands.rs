@@ -53,6 +53,8 @@ use crate::pipeline_dependency::DependencyGate;
 use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
 
+mod delivered_row;
+
 const PIKCHR_GRAMMAR_RESOURCE: &str = "resources/pikchr/grammar.md";
 const PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX: &str = "/tmp/staged-pikchr-grammar-";
 const PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX: &str = ".md";
@@ -2449,6 +2451,10 @@ pub(crate) struct ContinueWaits {
     /// how long to wait for the row to leave `running` (or a re-connect to
     /// hand out a new handle) before answering blocked.
     pub(crate) settle: Duration,
+    /// After a message was delivered over the live connection: how long to
+    /// wait for its user row to be stored before saying so (see
+    /// [`delivered_row`]). When it runs out the delivery is still reported.
+    pub(crate) stored: Duration,
 }
 
 impl ContinueWaits {
@@ -2457,6 +2463,7 @@ impl ContinueWaits {
         startup: Duration::from_secs(10),
         remote_startup: Duration::from_secs(30),
         settle: Duration::from_secs(10),
+        stored: Duration::from_secs(3),
     };
 
     /// Every budget the same — for tests that need the blocked cases to run
@@ -2467,6 +2474,7 @@ impl ContinueWaits {
             startup: wait,
             remote_startup: wait,
             settle: wait,
+            stored: wait,
         }
     }
 }
@@ -2828,7 +2836,9 @@ pub(crate) async fn route_continue_session(
                         )));
                     }
                 };
-                match deliver_to_running_session(store, &handle, message, image_ids).await {
+                match deliver_to_running_session(store, &handle, message, image_ids, waits.stored)
+                    .await
+                {
                     Ok(outcome) => return Ok(ContinueRoute::Delivered(outcome)),
                     Err(reason) if !handle.is_connection_alive() => {
                         // The connection settled under the request. The row
@@ -2919,7 +2929,27 @@ async fn wait_for_turn_control_handle(
 /// dead connection or a blocked delivery. The `image_ids` ride along as the
 /// row's attachment ids, like `start_session` records them, whether or not
 /// every file could be read.
+///
+/// A message that reached the agent is reported only once its user row is
+/// stored, or `stored_budget` has run out waiting for that (see
+/// [`delivered_row`]), so a caller that reads the transcript next finds it.
 async fn deliver_to_running_session(
+    store: &Arc<Store>,
+    handle: &acp_client::TurnControlHandle,
+    message: &str,
+    image_ids: &[String],
+    stored_budget: Duration,
+) -> Result<ContinueOutcome, String> {
+    let outcome = send_over_live_connection(store, handle, message, image_ids).await?;
+    if delivered_row::connection_wrote_user_row(&outcome) {
+        delivered_row::wait_until_stored(store, stored_budget).await;
+    }
+    Ok(outcome)
+}
+
+/// The delivery itself: steer, else interrupt and re-prompt. See
+/// [`deliver_to_running_session`].
+async fn send_over_live_connection(
     store: &Arc<Store>,
     handle: &acp_client::TurnControlHandle,
     message: &str,
@@ -11151,6 +11181,7 @@ mod tests {
                 startup: Duration::from_millis(100),
                 remote_startup: Duration::from_millis(500),
                 settle: Duration::from_millis(100),
+                stored: Duration::from_millis(100),
             },
             StoppedSessionPolicy::Resume,
         )
@@ -11193,12 +11224,12 @@ mod tests {
             let store = Arc::clone(&store);
             let session_id = session.id.clone();
             tokio::spawn(async move {
-                // Most of a 300 ms startup budget goes by before the connect.
-                tokio::time::sleep(Duration::from_millis(220)).await;
+                // Half of the 1.5 s startup budget goes by before the connect.
+                tokio::time::sleep(Duration::from_millis(750)).await;
                 registry.set_turn_control_handle(&session_id, handle);
-                // The row settles 250 ms later: past the startup budget,
+                // The row settles 1 s later: past the startup budget,
                 // inside the settle budget.
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 store
                     .update_session_status(
                         &session_id,
@@ -11211,7 +11242,26 @@ mod tests {
             })
         };
 
-        let route = continue_through_shared_body(&registry, &store, &session.id, "x").await;
+        // Budgets with room around the script's two moments. Each poll of
+        // the wait reads the session row, and the test store is a database
+        // file: with many tests running one read can take 100 ms, which the
+        // other tests' 300 ms budgets would leave no room for here.
+        let route = route_continue_session(
+            &store,
+            &registry,
+            &session.id,
+            "x",
+            &[],
+            ContinueWaits {
+                startup: Duration::from_millis(1500),
+                remote_startup: Duration::from_millis(1500),
+                settle: Duration::from_secs(10),
+                stored: Duration::from_secs(10),
+            },
+            StoppedSessionPolicy::Resume,
+        )
+        .await
+        .unwrap();
 
         script.await.unwrap();
         match route {

@@ -829,7 +829,10 @@ fn only_a_transport_loss_detaches_a_remote_note_session() {
         // transport, with nothing left running behind it (see
         // `acp_client::is_transport_loss_error`).
         (Some(SessionSettleReason::Failed), "child exited"),
-        (None, "Timed out waiting for ACP protocol startup after 90s"),
+        (
+            None,
+            "Timed out waiting for ACP protocol startup: session/new did not answer within 90s",
+        ),
         (None, "Failed to create ACP session: transport closed"),
         // A bridge relaying its own agent subprocess dying, over a live
         // transport: the agent is gone, not the connection to it.

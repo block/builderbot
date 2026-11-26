@@ -90,7 +90,7 @@ impl Store {
         session_id: &str,
         max_depth: usize,
     ) -> Result<Option<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut starter =
             conn.prepare("SELECT started_by, parent_session_id FROM sessions WHERE id = ?1")?;
         let mut current = session_id.to_string();
@@ -162,7 +162,7 @@ impl Store {
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::get_session_with_conn(&conn, id)
     }
 
@@ -728,7 +728,7 @@ impl Store {
         &self,
         updated_after: i64,
     ) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions
@@ -774,7 +774,7 @@ impl Store {
     }
 
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE status = 'running'"
@@ -793,7 +793,7 @@ impl Store {
     /// predicate is the claimed state alone; the caller applies the window
     /// from `updated_at`, which every write into this state restamps.
     pub fn get_detached_sessions(&self) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE status = 'error' AND completion_reason = ?1
@@ -832,7 +832,7 @@ impl Store {
         &self,
         storing_claim_suffix: &str,
     ) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let columns = qualified_session_columns("s");
         let mut stmt = conn.prepare(&format!(
             "SELECT {columns}
@@ -923,7 +923,7 @@ impl Store {
     /// records one fixed message on every row it ends, so its count is the
     /// number of times the queue needed rescuing.
     pub fn count_sessions_with_error_message(&self, message: &str) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sessions WHERE error_message = ?1",
             [message],
@@ -936,7 +936,7 @@ impl Store {
     /// running on a workstation with no Staged process attached. The
     /// reconcile service's work list.
     pub fn get_disconnected_sessions(&self) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE status = 'disconnected'
@@ -956,7 +956,7 @@ impl Store {
     /// in it because it still holds its branch: its remote turn may be
     /// running, and no client can tell that from a terminal row.
     pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE status IN ('running', 'queued', 'disconnected')
@@ -1000,7 +1000,7 @@ impl Store {
         &self,
         parent_session_id: &str,
     ) -> Result<Vec<ChildSessionInfo>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT s.id,
                     CASE WHEN c.session_id IS NOT NULL THEN 'commit'
@@ -1059,7 +1059,7 @@ impl Store {
     ///
     /// Backs the auto-recovery scheduler's scan.
     pub fn get_rate_limited_paused_sessions(&self) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions
@@ -1075,13 +1075,34 @@ impl Store {
     /// Store the ACP session ID returned by the agent after `new_session`.
     /// This is used by `load_session` to resume the conversation on follow-up turns.
     pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> Result<(), StoreError> {
+        self.set_agent_session_id_if(id, agent_session_id, || true)
+            .map(|_stored| ())
+    }
+
+    /// [`Self::set_agent_session_id`] for a caller that may stop wanting the
+    /// id stored while this waits for the write connection. `still_wanted`
+    /// is asked once, with the connection held and before the write, and the
+    /// id is stored only if it says so. Whether the id was stored.
+    ///
+    /// A stored id makes the next run resume with `session/load`, so one
+    /// stored for a setup that was given up poisons the session: the agent
+    /// was released without a prompt and keeps no such conversation.
+    pub fn set_agent_session_id_if(
+        &self,
+        id: &str,
+        agent_session_id: &str,
+        still_wanted: impl FnOnce() -> bool,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
+        if !still_wanted() {
+            return Ok(false);
+        }
         let rows = conn.execute(
             "UPDATE sessions SET agent_id = ?1, updated_at = ?2 WHERE id = ?3",
             params![agent_session_id, now_timestamp(), id],
         )?;
         self.mark_session_written(id, rows);
-        Ok(())
+        Ok(true)
     }
 
     /// Record the worktree HEAD a run started from (`None` when the run has no
@@ -1129,7 +1150,7 @@ impl Store {
 
     /// Look up just the provider for a session (lightweight single-column query).
     pub fn get_session_provider(&self, id: &str) -> Result<Option<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT provider FROM sessions WHERE id = ?1",
             params![id],
@@ -1241,7 +1262,7 @@ impl Store {
     /// running, or has run. Only such a branch can have had an agent commit
     /// in its checkout.
     pub fn has_started_session_for_branch(&self, branch_id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sessions WHERE status != 'queued' AND branch_id = ?1",
             params![branch_id],
@@ -1255,7 +1276,7 @@ impl Store {
         branch_id: &str,
         status_clause: &'static str,
     ) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions
@@ -1274,7 +1295,7 @@ impl Store {
     /// previous run, or by a client that never got to its own drain — is
     /// moved along without anyone connected.
     pub fn branch_ids_with_queued_sessions(&self) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT branch_id FROM sessions
              WHERE status = 'queued' AND branch_id IS NOT NULL
@@ -1293,7 +1314,7 @@ impl Store {
     /// as running: its remote turn may still be working in the branch's
     /// checkout, so new work must not start under it.
     pub fn has_running_session_for_branch(&self, branch_id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sessions
              WHERE status IN ('running', 'disconnected') AND branch_id = ?1",
@@ -1315,7 +1336,7 @@ impl Store {
         &self,
         project_id: &str,
     ) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT s.id FROM sessions s
              INNER JOIN project_notes pn ON pn.session_id = s.id
@@ -1345,7 +1366,7 @@ impl Store {
         branch_id: &str,
         since: i64,
     ) -> Result<Vec<Session>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions
@@ -1378,7 +1399,7 @@ impl Store {
         since: i64,
         except_session_id: &str,
     ) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id FROM sessions
              WHERE branch_id = ?1
@@ -1403,7 +1424,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Option<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let branch_id: Option<Option<String>> = conn
             .query_row(
                 "SELECT branch_id FROM sessions WHERE id = ?1",
@@ -1424,7 +1445,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Option<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let direct: Option<String> = conn
             .query_row(
                 "SELECT project_id FROM project_notes WHERE session_id = ?1 LIMIT 1",

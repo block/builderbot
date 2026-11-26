@@ -15,9 +15,8 @@ async fn rpc_result(response: reqwest::Response) -> Value {
 #[tokio::test]
 async fn preview_serves_sessionless_and_legacy_tools() {
     let slot = Arc::new(LastRenderSlot::new());
-    let (port, server) = start_pikchr_preview_mcp_server(DEFAULT_SCALE, Arc::clone(&slot))
-        .await
-        .unwrap();
+    let server = start_pikchr_preview_mcp_server(DEFAULT_SCALE, Arc::clone(&slot)).unwrap();
+    let port = server.port();
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -160,6 +159,5 @@ async fn preview_serves_sessionless_and_legacy_tools() {
         .await
         .unwrap();
     assert_eq!(deleted.status(), reqwest::StatusCode::ACCEPTED);
-    server.abort();
-    let _ = server.await;
+    drop(server);
 }

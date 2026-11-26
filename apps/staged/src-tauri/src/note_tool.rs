@@ -34,15 +34,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use axum::Router;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-};
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::{Deserialize, Serialize};
-use tokio::task::JoinHandle;
+
+use crate::mcp_http_server::{run_blocking, serve_mcp, McpHttpServer};
 
 use crate::note_draft::DraftError;
 
@@ -444,12 +441,19 @@ work done. If the user asked you a question, answer it before making this call."
         &self,
         Parameters(params): Parameters<WriteNoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        Ok(handle_write_note(
-            &self.session_id,
-            &self.slot,
-            &self.draft_path,
-            params,
-        ))
+        // The draft read is file I/O; keep it off the shared runtime's
+        // workers.
+        let handler = self.clone();
+        run_blocking(move || {
+            handle_write_note(
+                &handler.session_id,
+                &handler.slot,
+                &handler.draft_path,
+                params,
+            )
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(e, None))
     }
 }
 
@@ -517,43 +521,16 @@ impl ServerHandler for NoteToolsHandler {
 /// Start the local MCP HTTP server exposing `write_note` for one session,
 /// publishing the draft at `draft_path`.
 ///
-/// Returns the bound port and a `JoinHandle`. The server runs until the handle
-/// (and its parent `LocalSet`) is dropped. Submissions land in `slot`.
-pub async fn start_note_mcp_server(
+/// The server runs on the shared runtime (see [`crate::mcp_http_server`])
+/// until the returned guard is dropped. Submissions land in `slot`.
+pub fn start_note_mcp_server(
     session_id: String,
     slot: NoteSubmissionSlot,
     draft_path: PathBuf,
-) -> Result<(u16, JoinHandle<()>), String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("Failed to bind note MCP listener: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to get local address: {e}"))?
-        .port();
-
-    let service = StreamableHttpService::new(
-        move || {
-            Ok(NoteToolsHandler::new(
-                session_id.clone(),
-                Arc::clone(&slot),
-                draft_path.clone(),
-            ))
-        },
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    );
-    let router = Router::new().route_service("/mcp", service);
-
-    log::debug!("[note_tool] HTTP server bound on port {port}");
-
-    let handle = tokio::task::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
-            log::error!("[note_tool] HTTP server error: {e}");
-        }
-    });
-
-    Ok((port, handle))
+) -> Result<McpHttpServer, String> {
+    serve_mcp("note_tool", move || {
+        NoteToolsHandler::new(session_id.clone(), Arc::clone(&slot), draft_path.clone())
+    })
 }
 
 /// The JSON schema of `write_note`'s arguments, as rmcp advertises it.

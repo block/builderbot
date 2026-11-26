@@ -99,7 +99,7 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Vec<QueuedSessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         Self::list_queued_session_messages_with_conn(&conn, session_id)
     }
 
@@ -127,7 +127,7 @@ impl Store {
         &self,
         branch_id: &str,
     ) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT q.session_id
              FROM queued_session_messages q
@@ -150,7 +150,7 @@ impl Store {
         &self,
         branch_id: &str,
     ) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*)
              FROM queued_session_messages q
@@ -165,7 +165,7 @@ impl Store {
     pub fn list_sending_queued_session_messages(
         &self,
     ) -> Result<Vec<QueuedSessionMessage>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, branch_id, content, image_ids, status, last_error,
                     created_at, updated_at, claimed_at, owner_pid, sent_message_id

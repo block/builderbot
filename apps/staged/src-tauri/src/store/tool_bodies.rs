@@ -237,7 +237,7 @@ impl Store {
             Option<String>,
             Option<String>,
         );
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let row: Option<BodyRow> = conn
             .query_row(
                 "SELECT acp_raw_input, acp_raw_output, acp_content, acp_tool_status

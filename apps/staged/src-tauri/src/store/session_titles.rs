@@ -119,13 +119,14 @@ impl Store {
     /// row). Hidden ACP rows that replay a user message have no content and
     /// are passed over.
     ///
-    /// `matches` runs with the store locked, so it must not use the store.
+    /// `matches` runs with a store connection held, so it must not use the
+    /// store.
     pub fn any_session_input(
         &self,
         session_id: &str,
         mut matches: impl FnMut(&str) -> bool,
     ) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT content FROM session_messages
              WHERE session_id = ?1 AND role = 'user' AND acp_event_kind IS NULL

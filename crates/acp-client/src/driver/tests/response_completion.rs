@@ -425,6 +425,7 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     }
                 }, agent_client_protocol::on_receive_notification!())
                 .connect_with(agent, async |connection| {
+                let setup_failure = std::cell::Cell::new(None);
                 let run = super::super::run_acp_session(
                     &connection,
                     Path::new("/tmp"),
@@ -449,6 +450,8 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     &active,
                     &pending_reply,
                     None,
+                    crate::driver::ACP_SETUP_STEP_TIMEOUT,
+                    &setup_failure,
                 );
                 let complete_background = async {
                     if continuation {

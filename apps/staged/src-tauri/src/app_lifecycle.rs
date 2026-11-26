@@ -109,6 +109,11 @@ pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 /// gives us limited time before killing the process outright.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 
+/// How long a quit waits for the store's queued session writes (see
+/// [`flush_queued_writes`]). They normally drain in milliseconds; the budget
+/// is for a store lock held by something slow.
+const WRITE_QUEUE_DRAIN_BUDGET: Duration = Duration::from_secs(2);
+
 /// Grace period before an action's process group is escalated to `SIGKILL`.
 const ACTION_FORCE_KILL_AFTER: Duration = Duration::from_secs(1);
 
@@ -698,6 +703,11 @@ pub fn shutdown_cleanup(app: &AppHandle) {
             );
         }
 
+        // What the session threads queued for the store's writer thread
+        // (see `store::write_queue`) is stored before the process exits,
+        // and before the sweep reads the rows.
+        flush_queued_writes(app);
+
         // Last, so the rows reflect whatever the session threads managed to
         // write for themselves first.
         sweep_active_sessions(app, &detached);
@@ -780,6 +790,21 @@ fn wait_for_actions(app: &AppHandle, execution_ids: &[String], deadline: Instant
 
 fn remaining_until(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
+}
+
+/// Wait, up to [`WRITE_QUEUE_DRAIN_BUDGET`], for the store's queued
+/// session writes to land. Separate from [`SHUTDOWN_BUDGET`], which the
+/// sessions may have spent: these are transcript rows the user will want.
+fn flush_queued_writes(app: &AppHandle) {
+    let Some(store) = app_store(app) else {
+        return;
+    };
+    if !store.flush_writes_blocking(WRITE_QUEUE_DRAIN_BUDGET) {
+        log::warn!(
+            "Timed out after {}s storing queued session writes during app shutdown",
+            WRITE_QUEUE_DRAIN_BUDGET.as_secs()
+        );
+    }
 }
 
 /// Mark whatever is still active in the DB as cancelled by the quit, or as

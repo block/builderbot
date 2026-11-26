@@ -66,6 +66,34 @@ fn set_agent_session_id_marks_the_session() {
     assert_marked(&feed, &session, session_row());
 }
 
+/// The conditional form asks once, with the write connection held, and a
+/// "no" leaves the id as it was and the session unmarked.
+#[test]
+fn an_agent_session_id_no_longer_wanted_is_not_stored() {
+    let (store, feed) = store_with_feed();
+    let session = running_session(&store, &feed);
+    let agent_id = || store.get_session(&session.id).unwrap().unwrap().agent_id;
+
+    let asked_with_the_connection_held = std::cell::Cell::new(None);
+    let stored = store
+        .set_agent_session_id_if(&session.id, "acp-1", || {
+            asked_with_the_connection_held.set(Some(store.conn.try_lock().is_none()));
+            false
+        })
+        .unwrap();
+
+    assert!(!stored);
+    assert_eq!(asked_with_the_connection_held.get(), Some(true));
+    assert_eq!(agent_id(), None);
+    assert_unmarked(&feed);
+
+    assert!(store
+        .set_agent_session_id_if(&session.id, "acp-1", || true)
+        .unwrap());
+    assert_eq!(agent_id().as_deref(), Some("acp-1"));
+    assert_marked(&feed, &session, session_row());
+}
+
 #[test]
 fn set_session_provider_marks_the_session() {
     let (store, feed) = store_with_feed();

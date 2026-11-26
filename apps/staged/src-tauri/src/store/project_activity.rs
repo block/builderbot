@@ -114,7 +114,7 @@ impl Store {
     /// which includes one whose only items are sessions still running. Read
     /// in one statement, so the sources agree.
     pub fn list_project_activity(&self) -> Result<Vec<ProjectActivity>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(ACTIVITY_QUERY)?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectActivity {

@@ -240,6 +240,7 @@ impl AcpDriver {
             unattended_session_mode: self.unattended_session_mode.clone(),
             blox: self.blox_process.clone(),
             timing,
+            setup_step_timeout: self.setup_step_timeout,
         };
         let writer = Arc::clone(writer);
         let task_transport = Arc::clone(&transport);
@@ -257,6 +258,7 @@ impl AcpDriver {
             handler.cancel_pending_permissions();
             writer.finalize().await;
             stop_proxy(&mut child, &transport).await;
+            writer.wait_until_stored().await;
             match protocol_result {
                 Ok(outcome) => Ok(outcome),
                 // The SDK ended the connection under the attach.
@@ -428,6 +430,7 @@ impl AcpDriver {
                             session_id,
                             &self.agent_label,
                             &[],
+                            None,
                         )
                         .await?,
                     );
@@ -499,6 +502,7 @@ impl AcpDriver {
                             agent_label: &self.agent_label,
                             auth_selection: None,
                             unattended_session_mode: self.unattended_session_mode.as_deref(),
+                            timeline: None,
                         };
                         latest_prompt = catch_up_after_cancel(
                             &context,
@@ -517,6 +521,7 @@ impl AcpDriver {
         handler.cancel_pending_permissions();
         writer.finalize().await;
         stop_proxy(&mut child, &transport).await;
+        writer.wait_until_stored().await;
         match protocol_result {
             Ok(caught_up) => Ok(caught_up),
             Err(_) if transport.first_signal().is_some() => {
@@ -704,6 +709,9 @@ struct AttachContext {
     unattended_session_mode: Option<String>,
     blox: Option<BloxProcess>,
     timing: AttachTiming,
+    /// Each setup step's deadline: the driver's, as a session start uses
+    /// (see `AcpDriver::with_setup_step_timeout`).
+    setup_step_timeout: Duration,
 }
 
 async fn run_attach(
@@ -720,22 +728,26 @@ async fn run_attach(
         .lock()
         .await
         .start_prompt(context.agent_session_id.clone());
-    let setup = tokio::time::timeout(
-        ACP_SETUP_TIMEOUT,
-        setup_acp_session(AcpSessionSetupContext {
-            connection,
-            working_dir: &context.working_dir,
-            store: &context.store,
-            handler,
-            our_session_id: &context.our_session_id,
-            acp_session_id: Some(&context.agent_session_id),
-            config_options: &[],
-            mcp_servers: &context.mcp_servers,
-            agent_label: &context.agent_label,
-            auth_selection: context.auth_selection.as_ref(),
-            unattended_session_mode: context.unattended_session_mode.as_deref(),
-        }),
+    let timeline = SetupTimeline::start(
+        &context.our_session_id,
+        "Timed out attaching to the ACP session",
+        context.setup_step_timeout,
     );
+    // Each step has its own deadline; a step's timeout is its error.
+    let setup = setup_acp_session(AcpSessionSetupContext {
+        connection,
+        working_dir: &context.working_dir,
+        store: &context.store,
+        handler,
+        our_session_id: &context.our_session_id,
+        acp_session_id: Some(&context.agent_session_id),
+        config_options: &[],
+        mcp_servers: &context.mcp_servers,
+        agent_label: &context.agent_label,
+        auth_selection: context.auth_selection.as_ref(),
+        unattended_session_mode: context.unattended_session_mode.as_deref(),
+        timeline: Some(&timeline),
+    });
     tokio::pin!(setup);
     let setup_result = tokio::select! {
         result = &mut setup => result,
@@ -744,27 +756,26 @@ async fn run_attach(
         _ = transport.lost().cancelled() => {
             match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut setup).await {
                 Ok(result) => result,
-                Err(_) => return Ok(lost_outcome(transport)),
+                Err(_) => {
+                    timeline.failed("transport lost");
+                    return Ok(lost_outcome(transport));
+                }
             }
         }
     };
     match setup_result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e))
-            if transport.first_signal().is_some() || formatted_error_is_transport_closed(&e) =>
-        {
+        Ok(_) => timeline.completed(),
+        Err(e) if transport.first_signal().is_some() || formatted_error_is_transport_closed(&e) => {
+            timeline.failed(&e);
             log::info!(
                 "ACP session {}: attach lost its transport during setup: {e}",
                 context.agent_session_id
             );
             return Ok(lost_outcome(transport));
         }
-        Ok(Err(e)) => return Err(e),
-        Err(_) => {
-            return Err(format!(
-                "Timed out attaching to the ACP session after {}s",
-                ACP_SETUP_TIMEOUT.as_secs()
-            ))
+        Err(e) => {
+            timeline.failed(&e);
+            return Err(e);
         }
     }
     handler.finish_catch_up().await;

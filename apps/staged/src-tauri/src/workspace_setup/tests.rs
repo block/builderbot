@@ -457,6 +457,13 @@ async fn set_up_under(
 
 // ── The setup routine ───────────────────────────────────────────────────────
 
+/// The ready wait for a workstation the test expects to arrive. The wait
+/// returns as soon as the fake reports it running, so this is only how long
+/// the polls before that may take: each reads the branch from the store,
+/// and under a loaded test run one read can outlast most of [`FakeHost`]'s
+/// default 200 ms, which is sized for the tests that wait it out.
+const ARRIVES: Duration = Duration::from_secs(30);
+
 /// The run that left a workstation on `main`: `sq blox ws start` fails after
 /// Blox created the workstation, which goes on to boot. Setup used to return
 /// success there and leave the checkout undone. It now waits for the
@@ -466,7 +473,7 @@ async fn a_failed_ws_start_still_ends_in_a_checked_out_branch() {
     let (_origin, clone) = origin_and_workstation_clone();
     let (store, project) = store_with_project();
     let branch = starting_branch(&store, &project, "feature-new");
-    let host = Arc::new(FakeHost::new(
+    let mut host = FakeHost::new(
         clone.path(),
         &[
             Info::Unreachable,
@@ -475,7 +482,9 @@ async fn a_failed_ws_start_still_ends_in_a_checked_out_branch() {
             Info::Status("running"),
         ],
         Start::Fails("sq blox command timed out after 120s"),
-    ));
+    );
+    host.ready_wait.timeout = ARRIVES;
+    let host = Arc::new(host);
 
     set_up(&store, &host, &branch, SetupTrigger::Requested)
         .await
@@ -546,7 +555,7 @@ async fn a_booting_workstation_is_waited_for_not_started_again() {
     let (_origin, clone) = origin_and_workstation_clone();
     let (store, project) = store_with_project();
     let branch = starting_branch(&store, &project, "feature-new");
-    let host = Arc::new(FakeHost::new(
+    let mut host = FakeHost::new(
         clone.path(),
         &[
             Info::Status("starting"),
@@ -554,7 +563,9 @@ async fn a_booting_workstation_is_waited_for_not_started_again() {
             Info::Status("running"),
         ],
         Start::Fails("workspace already exists"),
-    ));
+    );
+    host.ready_wait.timeout = ARRIVES;
+    let host = Arc::new(host);
 
     set_up(&store, &host, &branch, SetupTrigger::Observed)
         .await

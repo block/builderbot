@@ -7,7 +7,7 @@
 //! - Remote workspace support via Blox
 //! - Cancellation support
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,8 @@ mod remote_liveness;
 mod remote_process;
 mod remote_routing;
 mod response_completion;
+mod sched_state;
+mod setup_timing;
 mod transport_loss;
 
 pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, TurnResult};
@@ -79,6 +81,7 @@ pub use transport_loss::{
 };
 
 use remote_routing::RemoteLoss;
+use setup_timing::{timed, SetupStep, SetupTimeline};
 
 static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -90,6 +93,13 @@ static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// This trait allows different storage backends (database, in-memory, etc.)
 /// to receive streaming agent output without coupling to the ACP protocol.
+///
+/// A call returning means the write is recorded, not that it is stored: a
+/// writer may store in the background, and a reader that needs what was
+/// recorded waits with [`wait_until_stored`](Self::wait_until_stored) first.
+/// The connection waits once, as it ends, and not before it answers a
+/// [`TurnControlHandle`] request: a caller told there that its message was
+/// delivered waits on its own store before it reads the message's row.
 #[async_trait]
 pub trait MessageWriter: Send + Sync {
     /// Append a text chunk to the current assistant message.
@@ -97,6 +107,12 @@ pub trait MessageWriter: Send + Sync {
 
     /// Flush all buffered text and close the current message block.
     async fn finalize(&self);
+
+    /// Wait until everything recorded so far has been stored, for a writer
+    /// that stores in the background. Called as a connection ends, after the
+    /// last [`finalize`](Self::finalize), so whoever sees the connection end
+    /// can read the whole transcript. The default has nothing to wait for.
+    async fn wait_until_stored(&self) {}
 
     /// Whether the caller's current response is a finished artifact that should
     /// release a background hold. Called only at a successful response boundary;
@@ -1075,6 +1091,28 @@ pub struct SessionSettled {
     /// This is the structured form of "the run failed on the prompt": a
     /// caller that needs to know it reads this instead of the error text.
     pub prompt_failed: bool,
+    /// Why the connection's session setup failed, for the failures a caller
+    /// can start over from (see [`SetupFailure`]). `None` for a connection
+    /// that got through setup, failed in it for another reason, or settled
+    /// any way but [`SessionSettleReason::Failed`].
+    ///
+    /// The structured form of "setup timed out" and "no such session": the
+    /// error text reaches the caller wrapped by the SDK ("ACP protocol
+    /// failed: Error { … }"), so it is not something to match on.
+    pub setup_failure: Option<SetupFailure>,
+}
+
+/// A session setup failure a caller can start over from. Recorded on
+/// [`SessionSettled::setup_failure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupFailure {
+    /// A setup step ran past its deadline (see
+    /// [`AcpDriver::with_setup_step_timeout`]). Setup comes before the
+    /// prompt, so the agent never got the connection's turn.
+    TimedOut,
+    /// The agent said it has no session by the id it was asked to load (see
+    /// [`agent_output_recorded`] for when starting fresh loses nothing).
+    SessionNotFound,
 }
 
 impl SessionSettled {
@@ -1120,7 +1158,17 @@ fn serialize_value<T: serde::Serialize>(value: &T) -> Option<serde_json::Value> 
 #[async_trait]
 pub trait Store: Send + Sync {
     /// Save the agent's session ID for resumption.
-    fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String>;
+    ///
+    /// Async so an implementation can hand the write to another thread and
+    /// await its answer, leaving the session's runtime (its agent reader
+    /// and setup timers) running meanwhile. Dropping the future before it
+    /// resolves (a setup step that timed out) should leave the id unsaved
+    /// where the implementation can still tell.
+    async fn set_agent_session_id(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), String>;
 
     /// Retrieve existing visible session messages as `(role, content)` pairs.
     ///
@@ -1239,13 +1287,23 @@ pub struct AcpDriver {
     /// when the agent advertises it; see
     /// [`AcpDriver::with_unattended_session_mode`].
     unattended_session_mode: Option<String>,
+    /// Each session setup step's deadline (see [`ACP_SETUP_STEP_TIMEOUT`]
+    /// and [`AcpDriver::with_setup_step_timeout`]).
+    setup_step_timeout: Duration,
     /// The workstation process a Blox driver's session runs on; `None` for
     /// local drivers. See [`AcpDriver::for_workspace`].
     blox_process: Option<BloxProcess>,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
-const ACP_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
+/// Each session setup step's own deadline: `initialize`, `session/new` or
+/// `session/load`, `session/set_mode`, each `session/set_config_option`, and
+/// the store writes between them (see [`setup_timing`]). Setup as a whole has
+/// no deadline, so an answer that arrived late is never thrown away because
+/// the steps before it used up a shared budget.
+const ACP_SETUP_STEP_TIMEOUT: Duration = Duration::from_secs(90);
+/// What a session setup step's timeout error starts with.
+const ACP_SETUP_TIMEOUT_HEADLINE: &str = "Timed out waiting for ACP protocol startup";
 
 impl AcpDriver {
     /// Create a driver for the given provider ID (e.g. "goose", "claude").
@@ -1269,6 +1327,7 @@ impl AcpDriver {
                 agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
+                setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
                 blox_process: None,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
@@ -1292,6 +1351,7 @@ impl AcpDriver {
                 agent_process_observer: None,
                 steering_disabled: false,
                 unattended_session_mode: None,
+                setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
                 blox_process: None,
             })
             .ok_or_else(|| {
@@ -1300,7 +1360,9 @@ impl AcpDriver {
             })
     }
 
-    pub(crate) fn from_agent(agent: &crate::types::AcpAgent) -> Self {
+    /// A local driver for `agent`'s command, without looking it up among the
+    /// known agents.
+    pub fn from_agent(agent: &crate::types::AcpAgent) -> Self {
         Self {
             binary_path: agent.binary_path.clone(),
             acp_args: agent.acp_args.clone(),
@@ -1316,6 +1378,7 @@ impl AcpDriver {
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
     }
@@ -1378,6 +1441,7 @@ impl AcpDriver {
             unattended_session_mode: agent_id
                 .and_then(blox_unattended_session_mode)
                 .map(str::to_string),
+            setup_step_timeout: ACP_SETUP_STEP_TIMEOUT,
             blox_process: Some(BloxProcess::new(workspace_name, command)),
         }
     }
@@ -1495,6 +1559,14 @@ impl AcpDriver {
     /// it is and the omission is logged. `None` clears the request.
     pub fn with_unattended_session_mode(mut self, mode_id: Option<String>) -> Self {
         self.unattended_session_mode = mode_id;
+        self
+    }
+
+    /// Give each session setup step `timeout` instead of
+    /// [`ACP_SETUP_STEP_TIMEOUT`]'s 90s. For tests and harnesses that need a
+    /// setup to time out without waiting a minute and a half.
+    pub fn with_setup_step_timeout(mut self, timeout: Duration) -> Self {
+        self.setup_step_timeout = timeout;
         self
     }
 
@@ -2294,7 +2366,7 @@ impl TurnControlHandle {
         steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
-        Self::scripted_connection(steer, interrupt, false)
+        Self::scripted_connection(steer, interrupt, false, None)
     }
 
     /// [`Self::scripted`] whose connection reports itself gone right after it
@@ -2307,13 +2379,29 @@ impl TurnControlHandle {
         steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
-        Self::scripted_connection(steer, interrupt, true)
+        Self::scripted_connection(steer, interrupt, true, None)
+    }
+
+    /// [`Self::scripted`] whose connection persists the message through
+    /// `writer` before it answers `Ok`, in the order a real connection keeps
+    /// (see [`MessageWriter::record_user_message`]): a steer answered `Ok`,
+    /// or an interrupt answered `Ok`, records the user message and only then
+    /// answers. A request answered `Err` records nothing. For tests of what
+    /// a caller may read once it is told a message was delivered.
+    #[doc(hidden)]
+    pub fn scripted_recording(
+        steer: Result<SteerOutcome, SteerError>,
+        interrupt: Result<(), String>,
+        writer: Arc<dyn MessageWriter>,
+    ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+        Self::scripted_connection(steer, interrupt, false, Some(writer))
     }
 
     fn scripted_connection(
         steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
         gone_after_first_answer: bool,
+        writer: Option<Arc<dyn MessageWriter>>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
         let (turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2344,11 +2432,42 @@ impl TurnControlHandle {
                 if gone_after_first_answer {
                     alive.store(false, Ordering::Relaxed);
                 }
-                match request {
-                    TurnControlRequest::Steer { reply, .. } => {
+                let (prompt, images, attachment_ids, answered_ok, answer) = match request {
+                    TurnControlRequest::Steer {
+                        prompt,
+                        images,
+                        attachment_ids,
+                        reply,
+                    } => (
+                        prompt,
+                        images,
+                        attachment_ids,
+                        steer.is_ok(),
+                        TurnControlReply::Steer(reply),
+                    ),
+                    TurnControlRequest::Interrupt {
+                        prompt,
+                        images,
+                        attachment_ids,
+                        reply,
+                    } => (
+                        prompt,
+                        images,
+                        attachment_ids,
+                        interrupt.is_ok(),
+                        TurnControlReply::Interrupt(reply),
+                    ),
+                };
+                if let Some(writer) = writer.as_ref().filter(|_| answered_ok) {
+                    writer
+                        .record_user_message(&prompt, &images, &attachment_ids)
+                        .await;
+                }
+                match answer {
+                    TurnControlReply::Steer(reply) => {
                         let _ = reply.send(steer.clone());
                     }
-                    TurnControlRequest::Interrupt { reply, .. } => {
+                    TurnControlReply::Interrupt(reply) => {
                         let _ = reply.send(interrupt.clone());
                     }
                 }
@@ -3030,6 +3149,7 @@ impl AcpDriver {
         let unattended_session_mode = self.unattended_session_mode.clone();
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
+        let setup_step_timeout = self.setup_step_timeout;
         let connection_transport = Arc::clone(&transport);
 
         let connection_task = tokio::task::spawn_local(async move {
@@ -3044,6 +3164,9 @@ impl AcpDriver {
             // with the child already stopped — the old per-turn ordering.
             let pending_reply: RefCell<Option<oneshot::Sender<SessionTurnResult>>> =
                 RefCell::new(None);
+            // Set by `run_acp_session` when setup fails in a way the caller
+            // can start over from, while it still holds the error unwrapped.
+            let setup_failure: Cell<Option<SetupFailure>> = Cell::new(None);
             let protocol_result: Result<_, String> = staged_client(&handler)
                 .connect_with(byte_streams, async |connection| {
                     let result = run_acp_session(
@@ -3069,6 +3192,8 @@ impl AcpDriver {
                         &hold_active_for_task,
                         &pending_reply,
                         reattached_turn,
+                        setup_step_timeout,
+                        &setup_failure,
                     )
                     .await;
                     session_returned.set(true);
@@ -3133,6 +3258,10 @@ impl AcpDriver {
             // detached connection's, or a shared process's, proxy is stopped
             // without SIGINT, so remote turns keep running.
             agent_process.release(&transport).await;
+            // After the agent is let go of, so a slow store does not keep it
+            // running; before the settle, so whoever sees the connection end
+            // reads the whole transcript.
+            writer.wait_until_stored().await;
 
             let transport_loss = transport.verdict(
                 session_returned.get(),
@@ -3179,6 +3308,10 @@ impl AcpDriver {
                 cancel_unacknowledged: transport.cancel_unacknowledged(),
                 background_work_left: transport.background_work_left(),
                 prompt_failed: transport.answered_error(),
+                setup_failure: match settle_reason {
+                    SessionSettleReason::Failed => setup_failure.get(),
+                    _ => None,
+                },
             });
 
             if let Some(reply) = pending_reply.borrow_mut().take() {
@@ -6951,23 +7084,30 @@ async fn run_acp_session(
     hold_active: &AtomicBool,
     pending_reply: &RefCell<Option<oneshot::Sender<SessionTurnResult>>>,
     reattached_turn: Option<remote_process::ReattachedTurn>,
+    setup_step_timeout: Duration,
+    setup_failure: &Cell<Option<SetupFailure>>,
 ) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
-    let setup_task = tokio::time::timeout(
-        ACP_SETUP_TIMEOUT,
-        setup_acp_session(AcpSessionSetupContext {
-            connection,
-            working_dir,
-            store,
-            handler,
-            our_session_id,
-            acp_session_id,
-            config_options,
-            mcp_servers,
-            agent_label,
-            auth_selection,
-            unattended_session_mode,
-        }),
+    let timeline = SetupTimeline::start(
+        our_session_id,
+        ACP_SETUP_TIMEOUT_HEADLINE,
+        setup_step_timeout,
     );
+    // No deadline over the whole: each step has its own (see
+    // `ACP_SETUP_STEP_TIMEOUT`), and a step's timeout is its error.
+    let setup_task = setup_acp_session(AcpSessionSetupContext {
+        connection,
+        working_dir,
+        store,
+        handler,
+        our_session_id,
+        acp_session_id,
+        config_options,
+        mcp_servers,
+        agent_label,
+        auth_selection,
+        unattended_session_mode,
+        timeline: Some(&timeline),
+    });
     let transport = &handler.transport;
     tokio::pin!(setup_task);
     let setup_result = tokio::select! {
@@ -6989,23 +7129,21 @@ async fn run_acp_session(
                 Ok(result) => result,
                 Err(_) => {
                     transport.confirm(TransportLossPhase::Setup);
-                    return Err(transport.lost_error("during session setup"));
+                    let error = transport.lost_error("during session setup");
+                    timeline.failed(&error);
+                    return Err(error);
                 }
             }
         }
     };
-    let mut setup = setup_result
-        .map_err(|_| {
-            format!(
-                "Timed out waiting for ACP protocol startup after {}s",
-                ACP_SETUP_TIMEOUT.as_secs()
-            )
-        })?
-        .inspect_err(|error| {
-            if formatted_error_is_transport_closed(error) {
-                transport.confirm(TransportLossPhase::Setup);
-            }
-        })?;
+    let mut setup = setup_result.inspect_err(|error| {
+        timeline.failed(error);
+        if formatted_error_is_transport_closed(error) {
+            transport.confirm(TransportLossPhase::Setup);
+        }
+        setup_failure.set(classify_setup_failure(&timeline, error));
+    })?;
+    timeline.completed();
     if steering_disabled && setup.steering_supported {
         log::info!(
             "ACP session {our_session_id}: steering disabled by the driver; steers will be refused"
@@ -7983,6 +8121,45 @@ pub fn is_missing_mcp_transport_error(error: &str) -> bool {
     error.contains(MISSING_MCP_TRANSPORT_PREFIX)
 }
 
+/// Starts the error a session setup ends with when the agent said it has no
+/// session by the id it was asked for, typically on `session/load` of an id
+/// that was stored for a session the agent never kept (it never got a
+/// prompt).
+const SESSION_NOT_FOUND_PREFIX: &str = "The agent has no session by that id";
+
+/// What a failed setup can be started over from, if anything. `error` is
+/// setup's own error, before the SDK wraps it in "ACP protocol failed: …" on
+/// its way to the caller: matching the text after that is what kept a
+/// timed-out setup from ever being retried. A step's timeout is told by the
+/// timeline itself; a refused load by the prefix its producer
+/// (`send_session_setup_request`) put on the error.
+fn classify_setup_failure(timeline: &SetupTimeline, error: &str) -> Option<SetupFailure> {
+    if timeline.timed_out() {
+        Some(SetupFailure::TimedOut)
+    } else if error.starts_with(SESSION_NOT_FOUND_PREFIX) {
+        Some(SetupFailure::SessionNotFound)
+    } else {
+        None
+    }
+}
+
+/// Whether `store` holds anything the agent said in `session_id`: a replay
+/// boundary that is not a user row. Without one, no prompt of the session's
+/// is known to have reached the agent (or it never answered one), so a
+/// `session/load` the agent refuses as not found has nothing to restore, and
+/// a fresh `session/new` loses no conversation.
+pub fn agent_output_recorded(store: &dyn Store, session_id: &str) -> Result<bool, String> {
+    Ok(store
+        .get_session_replay_boundaries(session_id)?
+        .iter()
+        .any(|boundary| boundary.role != "user"))
+}
+
+/// Apply each selection with `session/set_config_option`, then store the
+/// options the agent ends up with; with no selections, store the options the
+/// agent opened with. Under a setup `timeline`, each request is a step with
+/// its own deadline, so a late `session/new` leaves the model and effort
+/// their full time.
 async fn apply_or_record_session_config_options(
     connection: &ConnectionTo<Agent>,
     agent_session_id: &str,
@@ -7990,10 +8167,16 @@ async fn apply_or_record_session_config_options(
     selections: &[AcpSessionConfigOptionSelection],
     writer: &Arc<dyn MessageWriter>,
     resuming: bool,
+    timeline: Option<&SetupTimeline>,
 ) -> Result<(), String> {
     if selections.is_empty() {
         if let Some(options) = initial_options {
-            writer.on_config_option_update(options).await;
+            timed(
+                timeline,
+                SetupStep::RecordConfigOptions,
+                writer.on_config_option_update(options),
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -8035,24 +8218,29 @@ async fn apply_or_record_session_config_options(
             }
             Err(e) => return Err(e),
         };
-        let response = connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                agent_session_id.to_string(),
-                resolved.config_id,
-                resolved.value.value_id.as_str(),
-            ))
-            .block_task()
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to set selected ACP {} config option: {e:?}",
-                    config_selection_label(&selection.category)
-                )
-            })?;
+        let label = config_selection_label(&selection.category);
+        let response = timed(
+            timeline,
+            SetupStep::SetConfigOption(label),
+            connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    agent_session_id.to_string(),
+                    resolved.config_id,
+                    resolved.value.value_id.as_str(),
+                ))
+                .block_task(),
+        )
+        .await?
+        .map_err(|e| format!("Failed to set selected ACP {label} config option: {e:?}"))?;
         // Announced only once the agent has accepted the substitute, so the
         // transcript never claims a fallback that did not take effect.
         if let Some(notice) = resolved.value.fallback_notice {
-            writer.on_config_option_fallback(&notice).await;
+            timed(
+                timeline,
+                SetupStep::RecordConfigOptions,
+                writer.on_config_option_fallback(&notice),
+            )
+            .await?;
         }
         latest_options = response.config_options;
         if selection.category == SessionConfigOptionCategory::Model {
@@ -8060,8 +8248,12 @@ async fn apply_or_record_session_config_options(
         }
     }
 
-    writer.on_config_option_update(&latest_options).await;
-    Ok(())
+    timed(
+        timeline,
+        SetupStep::RecordConfigOptions,
+        writer.on_config_option_update(&latest_options),
+    )
+    .await
 }
 
 /// A stored selection matched against the agent's live config options: the
@@ -8427,6 +8619,10 @@ struct AcpSessionSetupContext<'a> {
     auth_selection: Option<&'a AcpAuthenticationSelection>,
     /// See [`AcpDriver::with_unattended_session_mode`].
     unattended_session_mode: Option<&'a str>,
+    /// Records each setup step for the log and a timeout's error; `None`
+    /// where setup is not under the setup budget (an attach-cancel's
+    /// catch-up, tests).
+    timeline: Option<&'a SetupTimeline>,
 }
 
 /// `_meta` for `session/new` and `session/load` asking the Claude bridge to
@@ -8487,20 +8683,26 @@ async fn initialize_connection(
     our_session_id: &str,
     agent_label: &str,
     mcp_servers: &[McpServer],
+    timeline: Option<&SetupTimeline>,
 ) -> Result<(InitializeResponse, TaskTrackingMode), String> {
     let writer = &handler.writer;
     let init_request = build_initialize_request();
 
-    let init_response = connection
-        .send_request(init_request)
-        .block_task()
-        .await
-        .map_err(|e| format!("ACP init failed: {e:?}"))?;
+    let init_response = timed(
+        timeline,
+        SetupStep::Initialize,
+        connection.send_request(init_request).block_task(),
+    )
+    .await?
+    .map_err(|e| format!("ACP init failed: {e:?}"))?;
 
     log_initialize_response(agent_label, &init_response);
-    writer
-        .on_initialize(&initialize_metadata(&init_response))
-        .await;
+    timed(
+        timeline,
+        SetupStep::RecordInitialize,
+        writer.on_initialize(&initialize_metadata(&init_response)),
+    )
+    .await?;
 
     if init_response.protocol_version != ProtocolVersion::V1 {
         return Err(format!(
@@ -8570,6 +8772,7 @@ async fn load_acp_session(
         agent_label,
         auth_selection,
         unattended_session_mode,
+        timeline,
         ..
     } = *context;
     let writer = &handler.writer;
@@ -8586,26 +8789,37 @@ async fn load_acp_session(
             // sessions keep the raw background-task frames flowing.
             .meta(background_task_tracking_meta(task_tracking_mode))
     };
-    let load_response = send_session_setup_request(
-        connection,
-        load_request,
-        &init_response.auth_methods,
-        auth_selection,
-        "load ACP session",
+    let load_response = timed(
+        timeline,
+        SetupStep::LoadSession,
+        send_session_setup_request(
+            connection,
+            load_request,
+            &init_response.auth_methods,
+            auth_selection,
+            "load ACP session",
+            Some(existing_id),
+        ),
     )
-    .await?;
+    .await??;
 
     if let Some(ref modes) = load_response.modes {
-        writer.on_model_state_update(modes).await;
+        timed(
+            timeline,
+            SetupStep::RecordModes,
+            writer.on_model_state_update(modes),
+        )
+        .await?;
     }
-    apply_unattended_session_mode(
+    apply_unattended_session_mode_timed(
+        timeline,
         connection,
         existing_id,
         load_response.modes.as_ref(),
         unattended_session_mode,
         agent_label,
     )
-    .await;
+    .await?;
     apply_or_record_session_config_options(
         connection,
         existing_id,
@@ -8613,8 +8827,36 @@ async fn load_acp_session(
         config_options,
         writer,
         true,
+        timeline,
     )
     .await
+}
+
+/// [`apply_unattended_session_mode`], timed as a setup step with its own
+/// deadline only when there is a mode to apply, so the log shows no empty
+/// step. The error is the step's timeout; the agent refusing the mode is
+/// logged and setup goes on.
+async fn apply_unattended_session_mode_timed(
+    timeline: Option<&SetupTimeline>,
+    connection: &ConnectionTo<Agent>,
+    agent_session_id: &str,
+    modes: Option<&SessionModeState>,
+    unattended_session_mode: Option<&str>,
+    agent_label: &str,
+) -> Result<(), String> {
+    let apply = apply_unattended_session_mode(
+        connection,
+        agent_session_id,
+        modes,
+        unattended_session_mode,
+        agent_label,
+    );
+    if unattended_session_mode.is_some() {
+        timed(timeline, SetupStep::SetMode, apply).await
+    } else {
+        apply.await;
+        Ok(())
+    }
 }
 
 async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSessionSetup, String> {
@@ -8630,6 +8872,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         agent_label,
         auth_selection,
         unattended_session_mode,
+        timeline,
     } = context;
     let writer = &handler.writer;
     let (init_response, task_tracking_mode) = initialize_connection(
@@ -8638,6 +8881,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         our_session_id,
         agent_label,
         mcp_servers,
+        timeline,
     )
     .await?;
     let agent_capabilities = init_response.agent_capabilities.clone();
@@ -8648,7 +8892,12 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         Some(existing_id) => {
             // Before the load goes out: its replay streams `session/update`s
             // ahead of the response, and they must pass the own-session gate.
-            handler.name_session(existing_id).await;
+            timed(
+                timeline,
+                SetupStep::NameSession,
+                handler.name_session(existing_id),
+            )
+            .await?;
             load_acp_session(&context, existing_id, &init_response, task_tracking_mode).await?;
             Ok(AcpSessionSetup {
                 agent_session_id: existing_id.to_string(),
@@ -8664,32 +8913,45 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                     .mcp_servers(mcp_servers.to_vec())
                     .meta(background_task_tracking_meta(task_tracking_mode))
             };
-            let session_response = send_session_setup_request(
-                connection,
-                new_session_request,
-                &init_response.auth_methods,
-                auth_selection,
-                "create ACP session",
+            let session_response = timed(
+                timeline,
+                SetupStep::NewSession,
+                send_session_setup_request(
+                    connection,
+                    new_session_request,
+                    &init_response.auth_methods,
+                    auth_selection,
+                    "create ACP session",
+                    None,
+                ),
+            )
+            .await??;
+
+            let new_id = session_response.session_id.to_string();
+            timed(
+                timeline,
+                SetupStep::NameSession,
+                handler.name_session(&new_id),
             )
             .await?;
 
-            let new_id = session_response.session_id.to_string();
-            handler.name_session(&new_id).await;
-            store
-                .set_agent_session_id(our_session_id, &new_id)
-                .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
-
             if let Some(ref modes) = session_response.modes {
-                writer.on_model_state_update(modes).await;
+                timed(
+                    timeline,
+                    SetupStep::RecordModes,
+                    writer.on_model_state_update(modes),
+                )
+                .await?;
             }
-            apply_unattended_session_mode(
+            apply_unattended_session_mode_timed(
+                timeline,
                 connection,
                 &new_id,
                 session_response.modes.as_ref(),
                 unattended_session_mode,
                 agent_label,
             )
-            .await;
+            .await?;
             apply_or_record_session_config_options(
                 connection,
                 &new_id,
@@ -8697,8 +8959,21 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 config_options,
                 writer,
                 false,
+                timeline,
             )
             .await?;
+            // Stored last, once nothing in setup can fail any more: a stored
+            // id is what makes the next run resume with `session/load`, and
+            // the agent keeps no conversation for a session that never got a
+            // prompt, so a setup that failed after `session/new` answered
+            // must leave the next run to start fresh.
+            timed(
+                timeline,
+                SetupStep::SaveAgentSessionId,
+                store.set_agent_session_id(our_session_id, &new_id),
+            )
+            .await?
+            .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
 
             Ok(AcpSessionSetup {
                 agent_session_id: new_id,
@@ -8838,6 +9113,7 @@ async fn send_session_setup_request<Req, MakeRequest>(
     auth_methods: &[AuthMethod],
     auth_selection: Option<&AcpAuthenticationSelection>,
     operation: &str,
+    loading_session: Option<&str>,
 ) -> Result<Req::Response, String>
 where
     Req: JsonRpcRequest,
@@ -8873,8 +9149,59 @@ where
                 )),
             }
         }
+        Err(error)
+            if loading_session
+                .is_some_and(|session_id| is_session_not_found_answer(&error, session_id)) =>
+        {
+            Err(format!(
+                "{SESSION_NOT_FOUND_PREFIX} (failed to {operation}): {error:?}"
+            ))
+        }
         Err(error) => Err(format!("Failed to {operation}: {error:?}")),
     }
+}
+
+/// Whether the agent answered a `session/load` of `session_id` by saying it
+/// has no such session: `-32002` (resource not found), which the Claude
+/// bridge answers a load of an unknown session with, or an error whose
+/// message says "session not found" or "session <that id> not found".
+///
+/// The error's `data` is read the same way when it is a string. An agent
+/// that follows the SDK convention keeps the standard message ("Internal
+/// error") and puts what went wrong there: goose's reads "Failed to load
+/// session: Session not found: <id>". Structured `data` is not searched.
+///
+/// Only asked about a load (`loading_session` in
+/// [`send_session_setup_request`]): `session/new` asks for no session, so
+/// nothing it is refused with means one is missing. And only those two
+/// phrasings, so that an error which merely mentions a session and
+/// something not found ("MCP session config not found", "session file not
+/// found") stays the plain failure it is.
+fn is_session_not_found_answer(error: &agent_client_protocol::Error, session_id: &str) -> bool {
+    if error.code == ErrorCode::ResourceNotFound {
+        return true;
+    }
+    let detail = error.data.as_ref().and_then(|data| data.as_str());
+    says_session_not_found(&error.message, session_id)
+        || detail.is_some_and(|detail| says_session_not_found(detail, session_id))
+}
+
+/// Whether `text` says "session not found" or "session <session_id> not
+/// found", ignoring case and the punctuation around each word.
+fn says_session_not_found(text: &str, session_id: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let session_id = session_id.to_ascii_lowercase();
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .collect();
+    let not_found = |rest: &[&str]| rest.starts_with(&["not", "found"]);
+    words.iter().enumerate().any(|(index, word)| {
+        *word == "session"
+            && (not_found(&words[index + 1..])
+                || (words.get(index + 1) == Some(&session_id.as_str())
+                    && not_found(&words[index + 2..])))
+    })
 }
 
 async fn authenticate_with_explicit_method(
@@ -9129,6 +9456,8 @@ mod tests {
     mod response_completion;
     mod session_isolation;
     mod settlement;
+    #[cfg(unix)]
+    mod setup_failure;
     mod transport_loss;
     mod turn_control;
 
@@ -9195,7 +9524,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Store for RecordingStore {
-        fn set_agent_session_id(
+        async fn set_agent_session_id(
             &self,
             session_id: &str,
             agent_session_id: &str,
@@ -9264,6 +9593,7 @@ mod tests {
                     &methods,
                     None,
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -9457,6 +9787,7 @@ mod tests {
                     &methods,
                     None,
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ()))
@@ -9593,6 +9924,7 @@ mod tests {
                     &methods,
                     Some(&selection),
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -9644,6 +9976,7 @@ mod tests {
                     &methods,
                     Some(&selection),
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -9718,6 +10051,7 @@ mod tests {
                     &methods,
                     Some(&selection),
                     "create ACP session",
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -9789,6 +10123,7 @@ mod tests {
                     agent_label: "Codex",
                     auth_selection: None,
                     unattended_session_mode: None,
+                    timeline: None,
                 })
                 .await
                 .map(|_| ())
@@ -9858,6 +10193,7 @@ mod tests {
                     agent_label: "Claude",
                     auth_selection: None,
                     unattended_session_mode: None,
+                    timeline: None,
                 })
                 .await
                 .map(|_| ())
@@ -9873,6 +10209,521 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &["session/load:session-1"]
+        );
+    }
+
+    /// An id stored for a session the agent never kept (setup failed after
+    /// `session/new` answered, before this fix stored ids only at the end)
+    /// is refused at `session/load` as not found. The error says so in a
+    /// form the runner can match, to start fresh instead.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_session_load_the_agent_does_not_know_reads_as_not_found() {
+        use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::default().load_session(true)),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: LoadSessionRequest, responder, _cx| {
+                    responder
+                        .respond_with_error(agent_client_protocol::Error::resource_not_found(None))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+
+        let error = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(setup_acp_session(AcpSessionSetupContext {
+                    connection: &connection,
+                    working_dir: Path::new("/tmp"),
+                    store: &store,
+                    handler: &handler,
+                    our_session_id: "local-session",
+                    acp_session_id: Some("never-prompted"),
+                    config_options: &[],
+                    mcp_servers: &[],
+                    agent_label: "Claude",
+                    auth_selection: None,
+                    unattended_session_mode: None,
+                    timeline: None,
+                })
+                .await
+                .map(|_| ()))
+            })
+            .await
+            .expect("protocol should succeed")
+            .expect_err("an unknown session should fail the load");
+
+        assert!(
+            error.starts_with("The agent has no session by that id (failed to load ACP session): "),
+            "{error}"
+        );
+        // What the runner starts fresh from (see `SessionSettled::setup_failure`).
+        let timeline = super::SetupTimeline::start(
+            "local-session",
+            super::ACP_SETUP_TIMEOUT_HEADLINE,
+            super::ACP_SETUP_STEP_TIMEOUT,
+        );
+        assert_eq!(
+            super::classify_setup_failure(&timeline, &error),
+            Some(super::SetupFailure::SessionNotFound)
+        );
+    }
+
+    #[test]
+    fn a_not_found_answer_is_recognised_by_code_or_by_message() {
+        use super::ErrorCode;
+        use agent_client_protocol::Error;
+
+        let not_found = |error: &Error| super::is_session_not_found_answer(error, "abc-123");
+        let internal = |message: &str| Error::new(ErrorCode::InternalError.into(), message);
+
+        assert!(not_found(&Error::resource_not_found(None)));
+        // An agent that says so in an internal error instead.
+        assert!(not_found(&internal("Session not found: abc-123")));
+        assert!(not_found(&internal("session not found")));
+        assert!(not_found(&internal("Session abc-123 not found")));
+        assert!(not_found(&internal(
+            "No session: session 'ABC-123' not found."
+        )));
+
+        assert!(!not_found(&Error::internal_error()));
+        assert!(!not_found(&internal("model not found")));
+        // A session and something not found, but not the session.
+        assert!(!not_found(&internal("MCP session config not found")));
+        assert!(!not_found(&internal("session file not found")));
+        assert!(!not_found(&internal("Session other-id not found")));
+        assert!(!not_found(&internal(
+            "session abc-123: working directory not found"
+        )));
+    }
+
+    /// An agent that keeps the standard message and puts the detail in the
+    /// error's `data`, as the SDK's helpers do. Goose's `session/load`
+    /// failure has this shape. The match on `data` is as tight as the one
+    /// on the message.
+    #[test]
+    fn a_not_found_answer_is_recognised_in_string_data() {
+        use agent_client_protocol::Error;
+
+        let not_found = |error: &Error| super::is_session_not_found_answer(error, "abc-123");
+        let with_data = |data: serde_json::Value| Error::internal_error().data(data);
+
+        let goose = with_data("Failed to load session: Session not found: abc-123".into());
+        assert_eq!(goose.message, "Internal error");
+        assert!(not_found(&goose));
+        assert!(not_found(&with_data("Session abc-123 not found".into())));
+
+        // A session and something not found, but not the session.
+        assert!(!not_found(&with_data(
+            "Failed to load session: session file not found".into()
+        )));
+        assert!(!not_found(&with_data(
+            "Failed to load session abc-123: model not found".into()
+        )));
+        assert!(!not_found(&with_data("Session other-id not found".into())));
+        // Only a string is read: structured data is the agent's own shape.
+        assert!(!not_found(&with_data(serde_json::json!({
+            "details": "Session not found: abc-123"
+        }))));
+        assert!(!not_found(&with_data(serde_json::Value::Null)));
+    }
+
+    /// `session/new` asks for no session, so a refusal that reads like one
+    /// being missing is an ordinary failure, not something to start fresh
+    /// from: neither by code nor by message.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refused_session_new_never_reads_as_session_not_found() {
+        use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+        use agent_client_protocol::Error;
+
+        for refusal in [
+            Error::resource_not_found(None),
+            Error::new(super::ErrorCode::InternalError.into(), "Session not found"),
+        ] {
+            let agent = agent_client_protocol::Agent
+                .builder()
+                .on_receive_request(
+                    async |request: InitializeRequest, responder, _cx| {
+                        responder.respond(InitializeResponse::new(request.protocol_version))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let refusal = refusal.clone();
+                        async move |_request: NewSessionRequest, responder, _cx| {
+                            responder.respond_with_error(refusal.clone())
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                );
+            let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+            let handler = Arc::new(AcpNotificationHandler::new(
+                Arc::new(BasicMessageWriter::new()),
+                false,
+                vec![],
+                CancellationToken::new(),
+            ));
+
+            let error = agent_client_protocol::Client
+                .connect_with(agent, async |connection| {
+                    Ok(setup_acp_session(AcpSessionSetupContext {
+                        connection: &connection,
+                        working_dir: Path::new("/tmp"),
+                        store: &store,
+                        handler: &handler,
+                        our_session_id: "local-session",
+                        acp_session_id: None,
+                        config_options: &[],
+                        mcp_servers: &[],
+                        agent_label: "Claude",
+                        auth_selection: None,
+                        unattended_session_mode: None,
+                        timeline: None,
+                    })
+                    .await
+                    .map(|_| ()))
+                })
+                .await
+                .expect("protocol should succeed")
+                .expect_err("a refused session/new fails setup");
+
+            assert!(
+                error.starts_with("Failed to create ACP session: "),
+                "{error}"
+            );
+            let timeline = super::SetupTimeline::start(
+                "local-session",
+                super::ACP_SETUP_TIMEOUT_HEADLINE,
+                super::ACP_SETUP_STEP_TIMEOUT,
+            );
+            assert_eq!(super::classify_setup_failure(&timeline, &error), None);
+        }
+    }
+
+    /// A store holding `boundaries` as its replay boundaries.
+    struct BoundaryStore(Vec<ReplayBoundary>);
+
+    #[async_trait::async_trait]
+    impl Store for BoundaryStore {
+        async fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn get_session_replay_boundaries(&self, _: &str) -> Result<Vec<ReplayBoundary>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn agent_output_is_recorded_only_once_the_agent_has_said_something() {
+        let user = ReplayBoundary::legacy("user".to_string(), "do the thing".to_string());
+        let assistant = ReplayBoundary::legacy("assistant".to_string(), "on it".to_string());
+        let tool = ReplayBoundary::legacy("tool_call".to_string(), "Read".to_string());
+
+        let recorded = |boundaries: Vec<ReplayBoundary>| {
+            super::agent_output_recorded(&BoundaryStore(boundaries), "local-session")
+                .expect("boundaries should load")
+        };
+        assert!(!recorded(vec![]));
+        // The prompt rows of runs whose setup never finished.
+        assert!(!recorded(vec![user.clone(), user.clone()]));
+        assert!(recorded(vec![user.clone(), assistant]));
+        assert!(recorded(vec![user, tool]));
+    }
+
+    /// `setup_acp_session` as `run_acp_session` runs it: a fresh session,
+    /// each step under its own deadline. Returns the agent session id.
+    async fn run_timed_setup(
+        connection: &super::ConnectionTo<super::Agent>,
+        store: &Arc<dyn Store>,
+        handler: &Arc<AcpNotificationHandler>,
+        config_options: &[AcpSessionConfigOptionSelection],
+    ) -> Result<String, String> {
+        let timeline = super::SetupTimeline::start(
+            "local-session",
+            super::ACP_SETUP_TIMEOUT_HEADLINE,
+            super::ACP_SETUP_STEP_TIMEOUT,
+        );
+        let setup = setup_acp_session(AcpSessionSetupContext {
+            connection,
+            working_dir: Path::new("/tmp"),
+            store,
+            handler,
+            our_session_id: "local-session",
+            acp_session_id: None,
+            config_options,
+            mcp_servers: &[],
+            agent_label: "Claude",
+            auth_selection: None,
+            unattended_session_mode: None,
+            timeline: Some(&timeline),
+        })
+        .await
+        .inspect_err(|error| timeline.failed(error))?;
+        timeline.completed();
+        Ok(setup.agent_session_id)
+    }
+
+    /// The model and effort options a fake agent offers, with `model` and
+    /// `effort` current.
+    fn model_and_effort_options(model: &str, effort: &str) -> Vec<SessionConfigOption> {
+        vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                model.to_string(),
+                vec![
+                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                    SessionConfigSelectOption::new("opus", "Opus"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "reasoning",
+                "Reasoning",
+                effort.to_string(),
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ]
+    }
+
+    fn opus_high_selections() -> Vec<AcpSessionConfigOptionSelection> {
+        vec![
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::Model,
+                config_id: "model".to_string(),
+                value_id: "opus".to_string(),
+            },
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::ThoughtLevel,
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+            },
+        ]
+    }
+
+    /// The failure the shared setup budget caused: `session/new` answered
+    /// late but inside the budget, and the model selection that followed
+    /// then failed the start for the time `session/new` had used. Each step
+    /// now has its own deadline, so setup completes, well past 90s in all.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_late_session_new_still_leaves_model_and_effort_their_own_deadline() {
+        use agent_client_protocol::schema::v1::{
+            InitializeRequest, InitializeResponse, NewSessionResponse,
+        };
+
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(InitializeResponse::new(request.protocol_version))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    // Just inside `session/new`'s own deadline.
+                    tokio::time::sleep(Duration::from_secs(89)).await;
+                    responder.respond(
+                        NewSessionResponse::new("agent-1")
+                            .config_options(model_and_effort_options("sonnet", "low")),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                    let value = request
+                        .value
+                        .as_value_id()
+                        .expect("selected config value should be a value ID")
+                        .to_string();
+                    calls_for_handler
+                        .lock()
+                        .unwrap()
+                        .push((request.config_id.to_string(), value));
+                    // Slow too, each inside its own deadline.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    responder.respond(SetSessionConfigOptionResponse::new(
+                        model_and_effort_options("opus", "high"),
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let recording_store = Arc::new(RecordingStore::default());
+        let store: Arc<dyn Store> = recording_store.clone();
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            writer.clone(),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+        let selections = opus_high_selections();
+        let started = tokio::time::Instant::now();
+
+        let agent_session_id = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(run_timed_setup(&connection, &store, &handler, &selections).await)
+            })
+            .await
+            .expect("protocol should succeed")
+            .expect("a late session/new should not fail the start");
+
+        assert_eq!(agent_session_id, "agent-1");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[
+                ("model".to_string(), "opus".to_string()),
+                ("reasoning".to_string(), "high".to_string()),
+            ]
+        );
+        assert_eq!(
+            recording_store.agent_session_ids.lock().unwrap().as_slice(),
+            &[("local-session".to_string(), "agent-1".to_string())]
+        );
+        assert_eq!(
+            writer.config_option_updates.lock().unwrap().as_slice(),
+            &[model_and_effort_options("opus", "high")]
+        );
+        assert!(started.elapsed() >= Duration::from_secs(89 + 60 + 60));
+    }
+
+    /// A setup that stalls waiting on `session/new` times out on that step's
+    /// deadline, naming it, the steps that finished before it, and the
+    /// timer's lateness.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_setup_timeout_names_the_step_it_was_waiting_on() {
+        use agent_client_protocol::schema::v1::{
+            InitializeRequest, InitializeResponse, NewSessionResponse,
+        };
+
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(InitializeResponse::new(request.protocol_version))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    // Never answers, as a stalled session thread never reads
+                    // the answer.
+                    std::future::pending::<()>().await;
+                    responder.respond(NewSessionResponse::new("never"))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+
+        let error = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(run_timed_setup(&connection, &store, &handler, &[]).await)
+            })
+            .await
+            .expect("protocol should succeed")
+            .expect_err("the setup should time out");
+
+        let expected = "Timed out waiting for ACP protocol startup: session/new did not answer \
+                        within 90s; completed: initialize 0.00s, storing initialize 0.00s; \
+                        setup ran 90.0s; timer fired 0.00s late; scheduling at start: ";
+        assert!(error.starts_with(expected), "{error}");
+        assert!(error.contains("; at timeout: "), "{error}");
+        assert!(!is_transport_loss_error(&error), "{error}");
+    }
+
+    /// A config step that stalls after a late `session/new` times out on its
+    /// own deadline, and the error counts the whole setup, not one budget.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_stalled_model_selection_times_out_on_its_own_deadline() {
+        use agent_client_protocol::schema::v1::{
+            InitializeRequest, InitializeResponse, NewSessionResponse,
+        };
+
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(InitializeResponse::new(request.protocol_version))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    tokio::time::sleep(Duration::from_secs(89)).await;
+                    responder.respond(
+                        NewSessionResponse::new("agent-1")
+                            .config_options(model_and_effort_options("sonnet", "low")),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: SetSessionConfigOptionRequest, responder, _cx| {
+                    std::future::pending::<()>().await;
+                    responder.respond(SetSessionConfigOptionResponse::new(vec![]))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let recording_store = Arc::new(RecordingStore::default());
+        let store: Arc<dyn Store> = recording_store.clone();
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+        let selections = opus_high_selections();
+
+        let error = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(run_timed_setup(&connection, &store, &handler, &selections).await)
+            })
+            .await
+            .expect("protocol should succeed")
+            .expect_err("the stalled model selection should time out");
+
+        let expected = "Timed out waiting for ACP protocol startup: session/set_config_option \
+                        (model) did not answer within 90s; completed: initialize 0.00s, storing \
+                        initialize 0.00s, session/new 89.0s, storing held frames 0.00s; setup \
+                        ran 179.0s; timer fired 0.00s late; scheduling at start: ";
+        assert!(error.starts_with(expected), "{error}");
+        // The agent answered `session/new`, but setup never finished: no id
+        // is stored, so the next run starts fresh instead of loading a
+        // session the agent kept nothing for.
+        assert!(
+            recording_store.agent_session_ids.lock().unwrap().is_empty(),
+            "a failed setup must not store the agent session id"
         );
     }
 
@@ -10304,6 +11155,7 @@ mod tests {
                     &selections,
                     &message_writer,
                     false,
+                    None,
                 )
                 .await
                 .map_err(agent_client_protocol::util::internal_error)
@@ -10355,7 +11207,7 @@ mod tests {
             "ACP authentication is required to run the prompt. Sign this agent in, then retry."
         ));
         assert!(!is_transport_loss_error(
-            "Timed out waiting for ACP protocol startup after 90s"
+            "Timed out waiting for ACP protocol startup: session/new did not answer within 90s"
         ));
         assert!(!is_transport_loss_error(
             r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#
@@ -10409,6 +11261,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     &selections,
                     &message_writer,
                     true,
+                    None,
                 )
                 .await
                 .map_err(agent_client_protocol::util::internal_error)?;
@@ -10420,6 +11273,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     &selections,
                     &message_writer,
                     false,
+                    None,
                 )
                 .await
                 .expect_err("missing config options must fail new sessions");
@@ -10495,6 +11349,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     &selections,
                     &message_writer,
                     true,
+                    None,
                 )
                 .await
                 .map_err(agent_client_protocol::util::internal_error)
@@ -10564,6 +11419,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     &selections,
                     &message_writer,
                     true,
+                    None,
                 )
                 .await
                 .map_err(agent_client_protocol::util::internal_error)
@@ -10636,6 +11492,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     &selections,
                     &message_writer,
                     false,
+                    None,
                 )
                 .await
                 .map_err(agent_client_protocol::util::internal_error)
@@ -11043,6 +11900,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_env_snapshot(snapshot.clone());
@@ -11061,6 +11919,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_env_snapshot(snapshot);
@@ -11090,6 +11949,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_interpreter_env_snapshot(snapshot.clone());
@@ -11108,6 +11968,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             agent_process_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            setup_step_timeout: crate::driver::ACP_SETUP_STEP_TIMEOUT,
             blox_process: None,
         }
         .with_interpreter_env_snapshot(snapshot);
@@ -14151,6 +15012,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             cancel_unacknowledged: false,
             background_work_left: false,
             prompt_failed: false,
+            setup_failure: None,
         };
 
         // A hold that was cancelled or failed after the turn completed is the

@@ -1,0 +1,5 @@
+# The stagedctl sidecar is copied here by scripts/prepare-stagedctl-sidecar.sh
+# before every lint, test and dev build, including in the pre-push hook. Without
+# this, each copy makes `tauri dev` rebuild and restart the app, ending its
+# running sessions.
+/binaries/

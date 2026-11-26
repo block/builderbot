@@ -28,8 +28,8 @@ pub use agent_client_protocol::schema::v1::{
     SessionModeState as SessionModelState, StopReason,
 };
 pub use driver::{
-    autoapprove_permission_decision, background_continuation_origin, carry_config_value_hint,
-    is_config_selection_unavailable_error, is_missing_mcp_transport_error,
+    agent_output_recorded, autoapprove_permission_decision, background_continuation_origin,
+    carry_config_value_hint, is_config_selection_unavailable_error, is_missing_mcp_transport_error,
     is_remote_agent_detached_error, is_remote_agent_lost_error, is_remote_session_cut_off_error,
     is_transport_loss_error, labeled_background_continuation_origin, recording_shows_held_work,
     sole_config_value_family_match_in, strip_code_fences, strip_config_value_hint,
@@ -41,8 +41,9 @@ pub use driver::{
     BasicMessageWriter, CancelOutcome, DetachHandle, LatestPrompt, MessageWriter,
     OutOfTurnPermissionPolicy, PromptImage, ReattachTurn, RecordedTurn, RemoteProcess,
     RemoteProcessStatus, ReplayBoundary, SessionConnection, SessionLifetime, SessionSettleReason,
-    SessionSettled, SteerError, SteerOutcome, Store, TransportLoss, TransportLossPhase,
-    TurnControlHandle, TurnResult, BACKGROUND_CONTINUATION_ORIGIN, INTERRUPT_ACK_TIMEOUT,
+    SessionSettled, SetupFailure, SteerError, SteerOutcome, Store, TransportLoss,
+    TransportLossPhase, TurnControlHandle, TurnResult, BACKGROUND_CONTINUATION_ORIGIN,
+    INTERRUPT_ACK_TIMEOUT,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

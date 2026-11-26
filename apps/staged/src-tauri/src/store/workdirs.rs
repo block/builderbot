@@ -31,7 +31,7 @@ impl Store {
     }
 
     pub fn get_workdir(&self, id: &str) -> Result<Option<Workdir>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, path, branch_id, created_at, updated_at
              FROM workdirs WHERE id = ?1",
@@ -44,7 +44,7 @@ impl Store {
 
     /// Get the workdir currently assigned to a branch (if any).
     pub fn get_workdir_for_branch(&self, branch_id: &str) -> Result<Option<Workdir>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, path, branch_id, created_at, updated_at
              FROM workdirs WHERE branch_id = ?1",
@@ -57,7 +57,7 @@ impl Store {
 
     /// Find an available (unoccupied) workdir for a project.
     pub fn find_available_workdir(&self, project_id: &str) -> Result<Option<Workdir>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, project_id, path, branch_id, created_at, updated_at
              FROM workdirs WHERE project_id = ?1 AND branch_id IS NULL
@@ -71,7 +71,7 @@ impl Store {
 
     /// List all workdirs for a project.
     pub fn list_workdirs_for_project(&self, project_id: &str) -> Result<Vec<Workdir>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, project_id, path, branch_id, created_at, updated_at
              FROM workdirs WHERE project_id = ?1 ORDER BY created_at ASC",

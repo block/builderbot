@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/loganj/penpal/internal/activity"
+	"github.com/loganj/penpal/internal/agents"
 	"github.com/loganj/penpal/internal/cache"
 	"github.com/loganj/penpal/internal/comments"
 	"github.com/loganj/penpal/internal/config"
@@ -32,6 +33,20 @@ func testServer(t *testing.T) (*Server, *cache.Cache, *comments.Store) {
 	// Trigger ensureLoaded so it doesn't interfere with tests
 	s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	return s, c, cs
+}
+
+// attachSession creates an agent manager on the server and attaches a session
+// for the given project, returning the session token. Use this when tests need
+// to post role="agent" comments via the REST API.
+func attachSession(t *testing.T, s *Server, c *cache.Cache, cs *comments.Store, projectName string) string {
+	t.Helper()
+	mgr := agents.New(c, cs, 0)
+	s.agents = mgr
+	sess, err := mgr.Attach(projectName, "", "claude", false)
+	if err != nil {
+		t.Fatalf("attach session: %v", err)
+	}
+	return sess.Token
 }
 
 // seedProject adds a project with files to the cache for testing.

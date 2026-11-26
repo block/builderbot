@@ -1,6 +1,7 @@
 package comments
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -62,10 +63,31 @@ func (s *Store) AddComment(projectName, filePath, threadID string, comment Comme
 }
 
 // AddCommentForWorktree appends a comment scoped to a specific worktree.
+// For agent-role comments, automatically sets InReplyTo and WorkingStartedAt
+// from the stored working entry, then clears the working indicator after writing.
+// This consolidates working indicator logic so MCP tools and REST handlers
+// don't need to manage it themselves.
 // E-PENPAL-THREAD-MUTEX: serializes comment addition via per-project sync.Mutex.
+// E-PENPAL-WORKING: auto-handles working indicators for agent replies.
 func (s *Store) AddCommentForWorktree(projectName, filePath, worktree, threadID string, comment Comment) (*Thread, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// For agent replies, populate InReplyTo and WorkingStartedAt from stored
+	// working entry. Reads are inside mu.Lock() to prevent two concurrent
+	// agent replies from reading the same working state.
+	if comment.Role == "agent" {
+		if comment.InReplyTo == "" {
+			if afterID := s.WorkingAfterCommentID(projectName, filePath, threadID); afterID != "" {
+				comment.InReplyTo = afterID
+			}
+		}
+		if comment.WorkingStartedAt == nil {
+			if startedAt := s.WorkingStartedAt(projectName, filePath, threadID); !startedAt.IsZero() {
+				comment.WorkingStartedAt = &startedAt
+			}
+		}
+	}
 
 	fc, err := s.LoadForWorktree(projectName, filePath, worktree)
 	if err != nil {
@@ -88,11 +110,53 @@ func (s *Store) AddCommentForWorktree(projectName, filePath, worktree, threadID 
 				s.activity.Record(activity.Comment, projectName, filePath)
 			}
 			t := fc.Threads[i]
+
+			// Clear working AFTER writing so SSE broadcasts trigger a
+			// fetchThreads that reads the updated file.
+			if comment.Role == "agent" {
+				s.ClearWorking(projectName, filePath, threadID)
+			}
+
 			return &t, nil
 		}
 	}
 
 	return nil, fmt.Errorf("thread not found: %s", threadID)
+}
+
+// markThreadWorking updates the working indicator for a single thread if it is
+// open and the last comment is from a human. If a working entry already exists
+// for the same comment, only the expiry timer is refreshed.
+// E-PENPAL-WORKING: shared helper for MarkThreadsRead and MarkFileThreadsRead.
+func (s *Store) markThreadWorking(project, filePath string, t Thread) {
+	if t.Status != "open" || len(t.Comments) == 0 || t.Comments[len(t.Comments)-1].Role != "human" {
+		return
+	}
+	lastCommentID := t.Comments[len(t.Comments)-1].ID
+	if s.WorkingAfterCommentID(project, filePath, t.ID) == lastCommentID {
+		s.RefreshWorkingTimestamp(project, filePath, t.ID)
+	} else {
+		s.SetWorking(project, filePath, t.ID, lastCommentID)
+	}
+}
+
+// MarkThreadsRead sets working indicators for all open threads where the last
+// comment is from a human. Call this when an agent reads thread listings so
+// the UI shows the "working" pulsing dot.
+// E-PENPAL-WORKING: consolidates set-working-on-read logic from MCP and REST layers.
+func (s *Store) MarkThreadsRead(project string, threads []ThreadWithFile) {
+	for _, t := range threads {
+		s.markThreadWorking(project, t.FilePath, t.Thread)
+	}
+}
+
+// MarkFileThreadsRead sets working indicators for open threads on a specific file
+// where the last comment is from a human.
+// E-PENPAL-WORKING: consolidates set-working-on-read logic for single-file operations.
+func (s *Store) MarkFileThreadsRead(project, filePath string, threads []Thread) {
+	for _, t := range threads {
+		s.markThreadWorking(project, filePath, t)
+	}
 }
 
 // ResolveThread marks a thread as resolved.
@@ -236,6 +300,71 @@ func (s *Store) ListThreadsByStatusForWorktree(projectName, status, worktree str
 	}
 
 	return results, nil
+}
+
+// WaitResult holds the outcome of a wait-for-changes operation.
+// E-PENPAL-CHANGE-SEQ: result of WaitAndEnrich combining wait + enrich + refresh.
+type WaitResult struct {
+	Changed bool             `json:"changed"`
+	Seq     uint64           `json:"seq"`
+	Files   []WaitResultFile `json:"files"`
+}
+
+// WaitResultFile describes a file in review with optional pending thread detail.
+type WaitResultFile struct {
+	FilePath    string   `json:"filePath"`
+	OpenThreads int      `json:"openThreads"`
+	Threads     []Thread `json:"threads,omitempty"`
+}
+
+// WaitAndEnrich blocks until comments change (or context cancels), then returns
+// enriched files with pending threads and refreshed working indicators.
+// This consolidates the duplicated wait-enrich-refresh logic from the MCP
+// penpal_wait_for_changes tool and the REST handleAgentWait handler.
+// E-PENPAL-CHANGE-SEQ: uses WaitForChangeSince to block until changeSeq advances.
+// E-PENPAL-MCP-WORKING: refreshes working timestamps during wait cycles to prevent expiry.
+func (s *Store) WaitAndEnrich(ctx context.Context, project, worktree string, sinceSeq uint64) (*WaitResult, error) {
+	seq, waitErr := s.WaitForChangeSince(ctx, sinceSeq)
+	changed := waitErr == nil
+
+	files, err := s.ListFilesInReviewForWorktree(project, worktree)
+	if err != nil {
+		return nil, err
+	}
+
+	// Single loop: refresh working indicators for all files, and collect
+	// pending threads when changes were detected.
+	var pendingByFile map[string][]Thread
+	if changed {
+		pendingByFile = make(map[string][]Thread)
+	}
+	for _, f := range files {
+		fc, loadErr := s.LoadForWorktree(project, f.FilePath, worktree)
+		if loadErr != nil {
+			continue
+		}
+		s.MarkFileThreadsRead(project, f.FilePath, fc.Threads)
+		if changed {
+			for _, t := range fc.Threads {
+				if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+					pendingByFile[f.FilePath] = append(pendingByFile[f.FilePath], t)
+				}
+			}
+		}
+	}
+
+	resultFiles := make([]WaitResultFile, len(files))
+	for i, f := range files {
+		resultFiles[i] = WaitResultFile{
+			FilePath:    f.FilePath,
+			OpenThreads: f.OpenThreads,
+		}
+		if changed {
+			resultFiles[i].Threads = pendingByFile[f.FilePath]
+		}
+	}
+
+	return &WaitResult{Changed: changed, Seq: seq, Files: resultFiles}, nil
 }
 
 // HasPendingHumanComments returns true if any open thread in the project

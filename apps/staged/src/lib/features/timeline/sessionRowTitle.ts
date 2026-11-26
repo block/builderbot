@@ -4,7 +4,7 @@
  * The backend already resolves each kind's stored title the branch timeline's
  * way (a commit's ACP title else its prompt, a note's title, a review's title
  * else — while running — its ACP title). This is the frontend half of that
- * rule: the live ACP title the hint poller fetches overrides the stored one
+ * rule: the live ACP title the session stream brings overrides the stored one
  * for commits and reviews, never for notes, and commit and note titles are
  * stripped of XML tags because a session label can be the raw prompt.
  *

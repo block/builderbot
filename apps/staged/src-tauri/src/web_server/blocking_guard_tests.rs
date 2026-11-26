@@ -215,7 +215,6 @@ const OFFLOADED_COMMANDS: &[(&str, &str)] = &[
     ("session_commands.rs", "poll_session"),
     ("session_commands.rs", "get_session"),
     ("session_commands.rs", "get_session_messages"),
-    ("session_commands.rs", "get_session_messages_since"),
     ("session_commands.rs", "get_active_sessions"),
     ("note_commands.rs", "list_project_notes"),
     ("project_search.rs", "get_project_search_index"),
@@ -514,6 +513,10 @@ const SYNCHRONOUS_COMMANDS: &[(&str, &str)] = &[
         "session_runner/reconcile.rs",
         "get_session_reconcile_states",
     ),
+    // The session stream's interest and sequence numbers, held in memory.
+    // The hub task does the store reads, on the blocking pool.
+    ("session_stream/commands.rs", "set_session_stream_interest"),
+    ("session_stream/commands.rs", "check_session_stream"),
     // The reasons failed branch setups left behind, held in memory.
     ("workspace_setup/failures.rs", "get_workspace_setup_errors"),
     // Per-window seeds and the updater claim.

@@ -79,9 +79,7 @@ vi.mock('../../commands', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../commands')>()),
   getSession: async () => sessionRow.current,
   getLatestSessionMessages: async () => ({ data: transcript.current }),
-  getSessionMessages: async () => ({ data: [] }),
   getFreshSessionMessages: async () => [],
-  getSessionMessagesSince: async () => [],
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],
@@ -89,6 +87,18 @@ vi.mock('../../commands', async (importOriginal) => ({
   cancelSession: cancelSessionMock,
   resumeSession: resumeSessionMock,
   pollSession: pollSessionMock,
+}));
+
+// The session stream as it is while it is being established: it feeds the
+// pane nothing, and the pane's fallback poll has not started. So the only
+// `poll_session` fetches here are the re-fetches these tests are about. With
+// the stream established the same re-fetches are asked of it instead
+// (`SessionChatPane.stream.component.test.ts`).
+vi.mock('../../stores/sessionStream.svelte', () => ({
+  sessionStream: {
+    availability: 'connecting',
+    onAvailability: () => () => {},
+  },
 }));
 
 import SessionChatPane from './SessionChatPane.svelte';
@@ -290,6 +300,9 @@ describe('SessionChatPane with a disconnected Blox session', () => {
         status: 'completed',
         completionReason: 'turn_complete',
       });
+      // Reconcile goes idle once it has settled the row, which is what has
+      // the pane read the rows it backfilled.
+      emit('session-reconcile-changed', reconcileEvent('idle'));
       await settle();
     }
 

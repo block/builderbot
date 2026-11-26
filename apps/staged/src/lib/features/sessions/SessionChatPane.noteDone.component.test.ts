@@ -75,14 +75,13 @@ vi.mock('../../commands', async (importOriginal) => ({
   pollSession: pollSessionMock,
   getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
   getLatestSessionMessages: async () => ({ data: transcript.current }),
-  getSessionMessages: async () => ({ data: [] }),
-  getSessionMessagesSince: async () => [],
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],
 }));
 
 import SessionChatPane from './SessionChatPane.svelte';
+import { FALLBACK_POLL_MS } from './messagePoll';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
 
 function row(id: number, role: SessionMessage['role'], content: string): SessionMessage {
@@ -309,7 +308,8 @@ describe('SessionChatPane after a saved note', () => {
   });
 
   it('brings the message back when more text streams in after the word', async () => {
-    // Only the poll's interval: Svelte's own scheduling stays real.
+    // Only the poll's interval: Svelte's own scheduling stays real. No session
+    // stream is started here, so the pane is on its fallback poll.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     sessionStatus.current = 'running';
     transcript.current = [
@@ -326,7 +326,7 @@ describe('SessionChatPane after a saved note', () => {
       ...transcript.current.slice(0, 2),
       row(3, 'assistant', 'Done. The bug is in `src/login.ts`.'),
     ];
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(FALLBACK_POLL_MS);
     expect(pollSessionMock).toHaveBeenCalledTimes(1);
     await settle();
 
@@ -354,7 +354,7 @@ describe('SessionChatPane after a saved note', () => {
         acpToolStatus: 'in_progress',
       },
     ];
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(FALLBACK_POLL_MS);
     expect(pollSessionMock).toHaveBeenCalledTimes(1);
     await settle();
 

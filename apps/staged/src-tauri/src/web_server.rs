@@ -62,6 +62,7 @@ use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::pr_poll_scheduler::PrPollScheduler;
 use crate::session_commands;
 use crate::session_runner::{self, SessionConfig, SessionRegistry};
+use crate::session_stream::SessionStreamHub;
 use crate::store::{self, Store};
 
 // =============================================================================
@@ -92,7 +93,7 @@ pub struct WebEvent {
 
 const EVENT_GAP_EVENT: &str = "transport:event-gap";
 
-fn serialize_web_event<S: serde::Serialize>(
+pub(crate) fn serialize_web_event<S: serde::Serialize>(
     event_name: &str,
     payload: S,
 ) -> Result<String, serde_json::Error> {
@@ -199,9 +200,8 @@ fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
     .with_single_cert(certs, key)
     .map_err(|e| format!("failed to configure TLS certificate/key pair: {e}"))?;
     // Browsers only speak HTTP/2 when the server offers it over ALPN; without
-    // this they stay on HTTP/1.1 and its six-connection cap, which the 500 ms
-    // session poll (four requests per tick) shares with multi-MB transcript
-    // bodies. `axum::serve` already runs hyper's auto h1/h2 builder.
+    // this they stay on HTTP/1.1 and its six-connection cap, which every
+    // command request shares with multi-MB transcript bodies. `axum::serve` already runs hyper's auto h1/h2 builder.
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(TlsAcceptor::from(Arc::new(config)))
@@ -689,10 +689,31 @@ async fn handle_ws(mut socket: WebSocket, state: WebAppState, client_id: Option<
         scheduler.touch(client_id.clone());
         scheduler
     });
+    // The client's session stream: a queue of its own, since the broadcast
+    // channel below reaches every client and frames carry message text.
+    // Opened with the socket; the client declares its interest over HTTP
+    // once the socket is established.
+    let session_stream = client_id.as_ref().map(|client_id| {
+        use tauri::Manager;
+        let hub = Arc::clone(&state.app_handle.state::<Arc<SessionStreamHub>>());
+        let (sink, frames) = crate::session_stream::web_queue();
+        let connection = hub.connect(client_id, sink);
+        (hub, connection, frames)
+    });
+    let (session_stream, mut stream_frames) = match session_stream {
+        Some((hub, connection, frames)) => (Some((hub, connection)), Some(frames)),
+        None => (None, None),
+    };
 
     let mut rx = state.event_tx.subscribe();
     loop {
         tokio::select! {
+            // Forward this client's session stream frames.
+            frame = next_stream_frame(&mut stream_frames) => {
+                if socket.send(Message::Text(frame.into())).await.is_err() {
+                    break;
+                }
+            }
             // Forward broadcast events to the WebSocket client
             msg = rx.recv() => {
                 match msg {
@@ -747,9 +768,27 @@ async fn handle_ws(mut socket: WebSocket, state: WebAppState, client_id: Option<
         }
     }
 
+    // By its token: if the client has reconnected, the stream is the new
+    // socket's and stays.
+    if let (Some((hub, connection)), Some(client_id)) = (session_stream, &client_id) {
+        hub.disconnect(client_id, Some(connection));
+    }
     if let (Some(scheduler), Some(client_id)) = (pr_scheduler, client_id) {
         scheduler.disconnect_client(client_id);
     }
+}
+
+/// The next frame queued for this socket's session stream. Never resolves
+/// for a socket that has none: one with no client id, or one whose client
+/// has since opened its stream on another socket.
+async fn next_stream_frame(frames: &mut Option<tokio::sync::mpsc::Receiver<String>>) -> String {
+    if let Some(queue) = frames {
+        if let Some(frame) = queue.recv().await {
+            return frame;
+        }
+        *frames = None;
+    }
+    std::future::pending().await
 }
 
 fn is_heartbeat_message(text: &str) -> bool {
@@ -3263,18 +3302,6 @@ pub(crate) async fn dispatch(
             blocking_store_json(move || store.get_session_messages_window(&session_id, window))
                 .await
         }
-        "get_session_messages_since" => {
-            let store = get_store(store_mutex)?;
-            let session_id: String = arg(&args, "sessionId")?;
-            let since_id: i64 = arg(&args, "sinceId")?;
-            // Optional so an older frontend bundle keeps working against a
-            // newer server.
-            let refetch_ids: Vec<i64> = opt_arg(&args, "refetchIds")?.unwrap_or_default();
-            blocking_store_json(move || {
-                store.get_session_messages_since(&session_id, since_id, &refetch_ids)
-            })
-            .await
-        }
         "count_assistant_messages_after" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
@@ -3308,8 +3335,8 @@ pub(crate) async fn dispatch(
             })
             .await
         }
-        // The session pane's whole tick in one request. The standalone arms
-        // above stay for the timeline's live hints and other callers.
+        // Everything the session pane shows in one request. The standalone
+        // arms above stay for their other callers.
         "poll_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
@@ -4017,6 +4044,28 @@ pub(crate) async fn dispatch(
             let client_id = web_client_id(&args)?;
             pr_scheduler.disconnect_client(client_id);
             Ok(Value::Null)
+        }
+
+        // =====================================================================
+        // Session stream
+        // =====================================================================
+        // Both touch the hub's in-memory state only. The frames go out on
+        // the client's events socket, which opened its stream; a client with
+        // no socket is refused. The reserved-prefix check keeps a web caller
+        // off a native window's stream.
+        "set_session_stream_interest" => {
+            let client_id = web_client_id(&args)?;
+            let interest: crate::session_stream::SessionStreamInterest = arg(&args, "interest")?;
+            let hub = app_handle.state::<Arc<SessionStreamHub>>();
+            hub.set_interest(&client_id, interest)?;
+            Ok(Value::Null)
+        }
+        "check_session_stream" => {
+            let client_id = web_client_id(&args)?;
+            let generation: u64 = arg(&args, "generation")?;
+            let last_seq: u64 = arg(&args, "lastSeq")?;
+            let hub = app_handle.state::<Arc<SessionStreamHub>>();
+            Ok(Value::Bool(hub.check(&client_id, generation, last_seq)))
         }
 
         // =====================================================================
@@ -5217,9 +5266,9 @@ mod tests {
         }
     }
 
-    /// The poll runs twice a second per open running pane and carries the
-    /// transcript tail; keep it off the runtime thread like the reads it
-    /// replaced.
+    /// The read carries the transcript tail, and a pane without the session
+    /// stream repeats it once a second; keep it off the runtime thread like
+    /// the reads it replaced.
     #[test]
     fn web_poll_session_reads_under_spawn_blocking() {
         let arm = dispatch_arm_body(include_str!("web_server.rs"), "poll_session");

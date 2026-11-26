@@ -470,10 +470,15 @@ impl MessageWriter {
             return;
         }
 
-        match self
-            .store
-            .add_session_message(&self.session_id, MessageRole::ToolCall, &content)
-        {
+        // The call's id goes in with the row: the rest of its ACP metadata
+        // is a second write (`record_tool_call_metadata`), and a row read
+        // between the two must already be tied to its call.
+        match self.store.add_tool_session_message(
+            &self.session_id,
+            MessageRole::ToolCall,
+            &content,
+            tool_call_id,
+        ) {
             Ok(id) => {
                 rows.insert(tool_call_id.to_string(), (id, title));
             }
@@ -527,19 +532,16 @@ impl MessageWriter {
             return;
         }
 
-        match self
-            .store
-            .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
-        {
+        // One statement, so the result is never readable without the id of
+        // the call it answers.
+        match self.store.add_tool_session_message(
+            &self.session_id,
+            MessageRole::ToolResult,
+            &content,
+            tool_call_id,
+        ) {
             Ok(id) => {
                 result_rows.insert(tool_call_id.to_string(), id);
-                let metadata = AcpMessageMetadata {
-                    acp_tool_call_id: Some(tool_call_id.to_string()),
-                    ..Default::default()
-                };
-                if let Err(e) = self.store.update_message_acp_metadata(id, &metadata) {
-                    log::error!("Failed to persist ACP tool-result metadata: {e}");
-                }
             }
             Err(e) => log::error!("Failed to insert tool_result message: {e}"),
         }
@@ -1301,6 +1303,28 @@ mod tests {
             serde_json::from_str(&messages[0].content).expect("content should be valid JSON");
         assert_eq!(parsed["name"], "Read file");
         assert_eq!(parsed["input"]["path"], "bar.rs");
+    }
+
+    /// The call's id is written with the row, and the result's with its
+    /// row: a read between the writer's writes (the session stream makes
+    /// them) never finds a tool row it cannot tie to its call.
+    #[tokio::test]
+    async fn tool_rows_carry_their_call_id_from_the_insert() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.record_tool_call("tc-1", "Read file", None).await;
+        let messages = store.get_session_messages(&session_id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::ToolCall);
+        assert_eq!(messages[0].acp.acp_tool_call_id.as_deref(), Some("tc-1"));
+        assert_eq!(messages[0].acp.acp_event_kind, None);
+
+        writer.record_tool_result("tc-1", "contents").await;
+        let messages = store.get_session_messages(&session_id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, MessageRole::ToolResult);
+        assert_eq!(messages[1].content, "contents");
+        assert_eq!(messages[1].acp.acp_tool_call_id.as_deref(), Some("tc-1"));
     }
 
     #[tokio::test]

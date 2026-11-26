@@ -37,7 +37,10 @@ mod recent_repos;
 pub mod repo_affinities;
 pub mod repo_badges;
 mod reviews;
+mod session_feed;
+mod session_full;
 mod session_poll;
+mod session_summary;
 mod session_titles;
 mod sessions;
 mod tag_import;
@@ -52,6 +55,14 @@ mod images_tests;
 mod migration_tests;
 #[cfg(test)]
 mod note_versions_tests;
+#[cfg(test)]
+mod session_feed_tests;
+#[cfg(test)]
+mod session_feed_writer_tests;
+#[cfg(test)]
+mod session_full_tests;
+#[cfg(test)]
+mod session_summary_tests;
 #[cfg(test)]
 mod tags_tests;
 #[cfg(test)]
@@ -68,7 +79,10 @@ pub use project_notes::DeletedProjectNoteSessions;
 pub use project_search::{ProjectSearchItem, ProjectSearchItemKind};
 pub use project_transfer::{BranchLanding, BranchTransfer, ProjectTransfer};
 pub use repo_badges::{fallback_short_name, next_hue};
+pub use session_feed::{SessionDirty, SessionFeed};
+pub use session_full::SessionFull;
 pub use session_poll::{SessionPoll, SessionPollRequest};
+pub use session_summary::{SessionSummary, SummaryRow, SummaryRowsQuery};
 pub use session_titles::{
     non_empty_acp_title, opens_with_staged_instructions, pending_commit_subject, review_title,
     title_echoes_input,
@@ -79,12 +93,14 @@ pub use tag_import::{
     LEGACY_DEFAULT_STATUSES, LEGACY_STATUS_GROUP_ID, LEGACY_STATUS_OPTIONS_KEY,
 };
 pub use tags::{DeleteTagGroupMode, NewTag, ProjectTag, Tag, TagColor, TagGroup, TagState};
-pub use tool_bodies::{ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES};
+pub use tool_bodies::{
+    in_flight_tool_row_len, ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES,
+};
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 // =============================================================================
@@ -98,9 +114,10 @@ use tokio::sync::broadcast;
 /// mutation already had in scope; secondary ids are filled best-effort and
 /// may be `None`, in which case consumers fall back to a broader refetch.
 ///
-/// Sessions are deliberately absent: chat polls at 500ms and session
-/// lifecycle already flows through `session-status-changed` & friends, so
-/// session-family writes (sessions, messages, queued messages, session-scoped
+/// Sessions are deliberately absent: what a session's rows hold reaches the
+/// frontend over the session stream (`session_stream.rs`), which has its own
+/// record of session writes, and session lifecycle already flows through
+/// `session-status-changed` & friends, so session-family writes (sessions, messages, queued messages, session-scoped
 /// images, repo actions) publish nothing here. The exception is
 /// [`Store::mark_session_chat_read`], which publishes [`StoreChange::Notes`]
 /// because note rows show whether their chat has unread replies.
@@ -302,13 +319,23 @@ pub struct ResolvedSession {
 // Store
 // =============================================================================
 
+/// The connection's lock. The load-test harness build times it.
+#[cfg(not(feature = "perf-harness"))]
+type ConnMutex = std::sync::Mutex<Connection>;
+#[cfg(feature = "perf-harness")]
+type ConnMutex = crate::perf_harness::store_lock::TimedMutex<Connection>;
+
 pub struct Store {
-    conn: Mutex<Connection>,
+    conn: ConnMutex,
     /// Change feed for mutating methods. `None` (the default, and what unit
     /// tests get) makes every publish a no-op; the app wires a sender in at
     /// construction so a task above the Tauri boundary can forward changes
     /// to all windows and web clients.
     change_tx: Option<broadcast::Sender<StoreChange>>,
+    /// Feed of session-family writes, which the change feed leaves out.
+    /// `None` (the default) makes every mark a no-op, and an attached feed
+    /// records nothing until its consumer activates it.
+    session_feed: Option<Arc<SessionFeed>>,
 }
 
 impl Store {
@@ -320,8 +347,9 @@ impl Store {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: ConnMutex::new(conn),
             change_tx: None,
+            session_feed: None,
         };
         store.init_schema()?;
         Ok(store)
@@ -334,13 +362,20 @@ impl Store {
         self
     }
 
+    /// Attach the session feed. The caller keeps its own handle to drain it.
+    pub fn with_session_feed(mut self, feed: Arc<SessionFeed>) -> Self {
+        self.session_feed = Some(feed);
+        self
+    }
+
     /// In-memory database for testing.
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: ConnMutex::new(conn),
             change_tx: None,
+            session_feed: None,
         };
         store.init_schema()?;
         Ok(store)
@@ -349,7 +384,7 @@ impl Store {
     /// Holds the connection as a long write does, for tests of what must not
     /// wait on it.
     #[cfg(test)]
-    pub(crate) fn hold_connection(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn hold_connection(&self) -> impl std::ops::Deref<Target = Connection> + '_ {
         self.conn.lock().unwrap()
     }
 

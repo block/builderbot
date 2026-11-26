@@ -209,7 +209,8 @@ export function transcriptGroupKey(group: AcpTranscriptGroup): string {
  * Reuse group (and tool item) object identities from a previous build for
  * entries whose underlying data is unchanged. buildAcpTranscriptGroups creates
  * every object from scratch, which would make a keyed each re-evaluate the
- * whole transcript on every poll tick; with reused identities only groups that
+ * whole transcript on every update of the session (a stream frame, several
+ * times a second while it streams); with reused identities only groups that
  * actually changed re-render. Returns `previous` itself when nothing changed
  * at all, so downstream deriveds short-circuit too.
  */

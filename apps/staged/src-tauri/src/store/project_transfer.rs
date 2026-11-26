@@ -13,6 +13,7 @@ use rusqlite::params;
 
 use super::branch_move::{duplicate_branch_error, duplicate_workdir_error};
 use super::models::{BranchType, ProjectLocation, Workdir, WorkspaceStatus};
+use super::session_feed::updated_session_ids;
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
 /// Where one transferred branch now lives.
@@ -75,6 +76,9 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let now = now_timestamp();
+        // Sessions whose `working_dir` the transfer rewrites, for the session
+        // feed.
+        let mut moved_sessions = Vec::new();
 
         let updated = tx.execute(
             "UPDATE projects SET location = ?1, updated_at = ?2 WHERE id = ?3",
@@ -199,11 +203,13 @@ impl Store {
             // Selected by `branch_id`, not by path: a remote session's
             // `working_dir` is a placeholder shared by every branch on the
             // same repo, so a prefix would catch other branches' sessions.
-            tx.execute(
+            moved_sessions.extend(updated_session_ids(
+                &tx,
                 "UPDATE sessions SET working_dir = ?1, agent_id = NULL, updated_at = ?2
-                  WHERE branch_id = ?3",
+                  WHERE branch_id = ?3
+                  RETURNING id",
                 params![branch.session_working_dir, now, branch.branch_id],
-            )?;
+            )?);
         }
 
         // All or nothing: a branch the transfer didn't cover (one added while
@@ -228,6 +234,7 @@ impl Store {
         }
 
         tx.commit()?;
+        self.mark_sessions_written(&moved_sessions);
         for branch in &transfer.branches {
             self.publish(StoreChange::Branch {
                 branch_id: branch.branch_id.clone(),
@@ -612,5 +619,38 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(rx.try_recv().is_err());
+    }
+
+    /// The transfer rewrites `sessions.working_dir` for every session on a
+    /// branch it lands, which a frame of the session stream carries: exactly
+    /// those sessions are marked on the session feed, and none when the
+    /// transfer fails.
+    #[test]
+    fn marks_the_sessions_it_rewrites_once_it_commits() {
+        let feed = std::sync::Arc::new(crate::store::SessionFeed::default());
+        feed.set_active(true);
+        let f = local_fixture(Store::in_memory().unwrap().with_session_feed(feed.clone()));
+        let session = finished_session(&f, "earlier work", "acp-session-1");
+        let unrelated = Session::new_running("elsewhere", Path::new("/wt/other"));
+        f.store.create_session(&unrelated).unwrap();
+        feed.drain();
+
+        // A branch the transfer does not name fails it: nothing is marked.
+        let stray =
+            Branch::new(&f.project.id, "stray", "origin/main").with_project_repo(&f.repo.id);
+        f.store.create_branch(&stray).unwrap();
+        f.store
+            .apply_project_transfer(&to_remote(&f, "ws-feature"))
+            .unwrap_err();
+        assert!(feed.drain().is_empty());
+        f.store.delete_branch(&stray.id).unwrap();
+
+        f.store
+            .apply_project_transfer(&to_remote(&f, "ws-feature"))
+            .unwrap();
+
+        let marks = feed.drain();
+        assert_eq!(marks.keys().collect::<Vec<_>>(), vec![&session.id]);
+        assert!(marks[&session.id].session);
     }
 }

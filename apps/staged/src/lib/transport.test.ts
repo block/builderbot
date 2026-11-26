@@ -490,6 +490,331 @@ describe('web transport', () => {
     expect(sockets[0].closed).toBe(true);
     consoleError.mockRestore();
   });
+
+  describe('session stream', () => {
+    const INTEREST = { generation: 1, paused: false, summaryWindow: 40, sessions: [] };
+
+    function stubFetch() {
+      const fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(null),
+      });
+      vi.stubGlobal('fetch', fetch);
+      return fetch;
+    }
+
+    it('opens with every socket that opens, since the backend forgets a client with its socket', async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      const { openSessionStream } = await import('./transport');
+      const onOpen = vi.fn();
+      const onClose = vi.fn();
+      const link = openSessionStream({ onFrame: vi.fn(), onOpen, onClose });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+      // Refused until the socket is open, so not announced before.
+      expect(onOpen).not.toHaveBeenCalled();
+      sockets[0].open();
+      expect(onOpen).toHaveBeenCalledTimes(1);
+
+      sockets[0].close();
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onOpen).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      sockets[1].open();
+      expect(onOpen).toHaveBeenCalledTimes(2);
+      expect(onClose).toHaveBeenCalledTimes(1);
+
+      link.close();
+    });
+
+    it('does not reopen for a gap in the broadcast events, which leaves the socket and the stream as they were', async () => {
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      const { listenToEvent, openSessionStream } = await import('./transport');
+      const onEstablished = vi.fn();
+      const unlisten = listenToEvent('pr-refresh-state', vi.fn(), { onEstablished });
+      const onOpen = vi.fn();
+      const link = openSessionStream({ onFrame: vi.fn(), onOpen, onClose: vi.fn() });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+      expect(onOpen).toHaveBeenCalledTimes(1);
+      expect(onEstablished).toHaveBeenCalledTimes(1);
+      // The open's busy-state import has to land before the gap asks for the
+      // same module — see the establishment test for a gap above.
+      await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(1));
+
+      sockets[0].emit({ event: 'transport:event-gap', payload: { dropped: 3 } });
+
+      expect(onEstablished).toHaveBeenCalledTimes(2);
+      expect(onOpen).toHaveBeenCalledTimes(1);
+
+      link.close();
+      unlisten();
+    });
+
+    it('opens on a socket that is already open, asynchronously', async () => {
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      const { listenToEvent, openSessionStream } = await import('./transport');
+      const unlisten = listenToEvent('pr-refresh-state', vi.fn());
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+
+      const onOpen = vi.fn();
+      const link = openSessionStream({ onFrame: vi.fn(), onOpen, onClose: vi.fn() });
+      expect(onOpen).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+
+      link.close();
+      unlisten();
+    });
+
+    it('delivers the frames the socket carries for this client', async () => {
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      const { openSessionStream } = await import('./transport');
+      const onFrame = vi.fn();
+      const link = openSessionStream({ onFrame, onOpen: vi.fn(), onClose: vi.fn() });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+
+      const frame = { generation: 1, seq: 1, sessionId: 's1', kind: 'snapshot' };
+      sockets[0].emit({ event: 'session-stream', payload: frame });
+      sockets[0].emit({ event: 'session-status-changed', payload: { sessionId: 's1' } });
+
+      expect(onFrame).toHaveBeenCalledTimes(1);
+      expect(onFrame).toHaveBeenCalledWith(frame);
+
+      link.close();
+      sockets[0].emit({ event: 'session-stream', payload: { ...frame, seq: 2 } });
+      expect(onFrame).toHaveBeenCalledTimes(1);
+    });
+
+    it('declares the interest for the client id its socket connected with', async () => {
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      const fetch = stubFetch();
+      const { openSessionStream } = await import('./transport');
+      const link = openSessionStream({ onFrame: vi.fn(), onOpen: vi.fn(), onClose: vi.fn() });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+
+      await link.setInterest(INTEREST);
+      await link.setInterest({ ...INTEREST, paused: true });
+
+      expect(new URL(sockets[0].url).searchParams.get('clientId')).toBe('web-client-1');
+      expect(fetch.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)])).toEqual([
+        [
+          '/api/invoke/set_session_stream_interest',
+          { clientId: 'web-client-1', interest: INTEREST },
+        ],
+        [
+          '/api/invoke/set_session_stream_interest',
+          { clientId: 'web-client-1', interest: { ...INTEREST, paused: true } },
+        ],
+      ]);
+
+      link.close();
+    });
+
+    it('asks the backend about its frames for the client id its socket connected with', async () => {
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      const fetch = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue(false) });
+      vi.stubGlobal('fetch', fetch);
+      const { openSessionStream } = await import('./transport');
+      const link = openSessionStream({ onFrame: vi.fn(), onOpen: vi.fn(), onClose: vi.fn() });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+
+      await expect(link.check(3, 17)).resolves.toBe(false);
+
+      expect(fetch.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)])).toEqual([
+        [
+          '/api/invoke/check_session_stream',
+          { clientId: 'web-client-1', generation: 3, lastSeq: 17 },
+        ],
+      ]);
+
+      link.close();
+    });
+
+    it('rejects an interest the backend refuses', async () => {
+      vi.stubGlobal('WebSocket', MockWebSocket);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: false,
+          text: vi
+            .fn()
+            .mockResolvedValue(
+              JSON.stringify({ error: 'No session stream is open for client web-client-1' })
+            ),
+        })
+      );
+      const { openSessionStream } = await import('./transport');
+      const link = openSessionStream({ onFrame: vi.fn(), onOpen: vi.fn(), onClose: vi.fn() });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+
+      await expect(link.setInterest(INTEREST)).rejects.toThrow(
+        'No session stream is open for client web-client-1'
+      );
+
+      link.close();
+    });
+  });
+});
+
+describe('tauri session stream', () => {
+  const INTEREST = { generation: 1, paused: false, summaryWindow: 40, sessions: [] };
+
+  /** Stands in for Tauri's `Channel`: serializes to an id, as the real one does. */
+  class FakeChannel {
+    static next = 1;
+    readonly id = FakeChannel.next++;
+    constructor(readonly onmessage: (message: unknown) => void) {
+      channels.push(this);
+    }
+    toJSON(): string {
+      return `__CHANNEL__:${this.id}`;
+    }
+  }
+
+  let channels: FakeChannel[];
+  let invoke: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubGlobal('__TAURI__', {});
+    channels = [];
+    FakeChannel.next = 1;
+    invoke = vi.fn().mockResolvedValue(null);
+    vi.doMock('@tauri-apps/api/core', () => ({ invoke, Channel: FakeChannel }));
+  });
+
+  afterEach(() => {
+    vi.doUnmock('@tauri-apps/api/core');
+    vi.unstubAllGlobals();
+  });
+
+  /** The `channel` argument of each interest call, as it goes over IPC. */
+  function sentChannels(): (string | undefined)[] {
+    return invoke.mock.calls.map(([, args]) => JSON.parse(JSON.stringify(args)).channel);
+  }
+
+  it('opens once, asynchronously', async () => {
+    const { openSessionStream } = await import('./transport');
+    const onOpen = vi.fn();
+    const link = openSessionStream({ onFrame: vi.fn(), onOpen, onClose: vi.fn() });
+
+    expect(onOpen).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+
+    link.close();
+  });
+
+  it('stays silent when it is closed before it opens', async () => {
+    const { openSessionStream } = await import('./transport');
+    const onOpen = vi.fn();
+    openSessionStream({ onFrame: vi.fn(), onOpen, onClose: vi.fn() }).close();
+
+    await Promise.resolve();
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('hands the backend a channel with the first interest and none afterwards', async () => {
+    const { openSessionStream } = await import('./transport');
+    const onFrame = vi.fn();
+    const link = openSessionStream({ onFrame, onOpen: vi.fn(), onClose: vi.fn() });
+
+    await link.setInterest(INTEREST);
+    await link.setInterest({ ...INTEREST, paused: true });
+    await link.setInterest(INTEREST);
+
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+      'set_session_stream_interest',
+      'set_session_stream_interest',
+      'set_session_stream_interest',
+    ]);
+    // One passed again would open a new stream and drop the interest.
+    expect(sentChannels()).toEqual(['__CHANNEL__:1', undefined, undefined]);
+    expect(invoke.mock.calls[1][1]).toEqual({ interest: { ...INTEREST, paused: true } });
+
+    const frame = { generation: 1, seq: 1, sessionId: 's1', kind: 'snapshot' };
+    channels[0].onmessage(frame);
+    expect(onFrame).toHaveBeenCalledWith(frame);
+
+    link.close();
+  });
+
+  it('asks the backend about its frames without touching the channel', async () => {
+    const { openSessionStream } = await import('./transport');
+    const link = openSessionStream({ onFrame: vi.fn(), onOpen: vi.fn(), onClose: vi.fn() });
+    await link.setInterest(INTEREST);
+    invoke.mockResolvedValueOnce(true);
+
+    await expect(link.check(3, 17)).resolves.toBe(true);
+
+    // The window is the client: the backend takes its id from the window.
+    expect(invoke.mock.calls[1]).toEqual(['check_session_stream', { generation: 3, lastSeq: 17 }]);
+    // A check is not an interest call, so the next one still passes no channel.
+    await link.setInterest({ ...INTEREST, paused: true });
+    expect(sentChannels()).toEqual(['__CHANNEL__:1', undefined, undefined]);
+
+    link.close();
+  });
+
+  it('opens a new stream on a new channel after an interest call fails', async () => {
+    const { openSessionStream } = await import('./transport');
+    const onFrame = vi.fn();
+    const link = openSessionStream({ onFrame, onOpen: vi.fn(), onClose: vi.fn() });
+    await link.setInterest(INTEREST);
+
+    invoke.mockRejectedValueOnce('No session stream is open for client tauri-main');
+    await expect(link.setInterest(INTEREST)).rejects.toBe(
+      'No session stream is open for client tauri-main'
+    );
+    await link.setInterest({ ...INTEREST, generation: 2 });
+    await link.setInterest({ ...INTEREST, generation: 2, paused: true });
+
+    // A new `Channel`, not the first one again: the backend numbers a new
+    // stream's messages from zero, which the first would hold back.
+    expect(sentChannels()).toEqual(['__CHANNEL__:1', undefined, '__CHANNEL__:2', undefined]);
+
+    // The channel that was given up on can still deliver, and is not heard.
+    channels[0].onmessage({ generation: 1, seq: 2, sessionId: 's1', kind: 'delta' });
+    expect(onFrame).not.toHaveBeenCalled();
+    const frame = { generation: 2, seq: 1, sessionId: 's1', kind: 'snapshot' };
+    channels[1].onmessage(frame);
+    expect(onFrame).toHaveBeenCalledWith(frame);
+
+    link.close();
+  });
+
+  it('tries a new channel when the call that carried one fails', async () => {
+    const { openSessionStream } = await import('./transport');
+    const link = openSessionStream({ onFrame: vi.fn(), onOpen: vi.fn(), onClose: vi.fn() });
+
+    invoke.mockRejectedValueOnce(new Error('ipc down'));
+    await expect(link.setInterest(INTEREST)).rejects.toThrow('ipc down');
+    await link.setInterest({ ...INTEREST, generation: 2 });
+
+    expect(sentChannels()).toEqual(['__CHANNEL__:1', '__CHANNEL__:2']);
+
+    link.close();
+  });
+
+  it('delivers nothing and declares nothing once closed', async () => {
+    const { openSessionStream } = await import('./transport');
+    const onFrame = vi.fn();
+    const link = openSessionStream({ onFrame, onOpen: vi.fn(), onClose: vi.fn() });
+    await link.setInterest(INTEREST);
+
+    link.close();
+    channels[0].onmessage({ generation: 1, seq: 1, sessionId: 's1', kind: 'snapshot' });
+    expect(onFrame).not.toHaveBeenCalled();
+    await expect(link.setInterest(INTEREST)).rejects.toThrow('closed');
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('tauri listener establishment', () => {

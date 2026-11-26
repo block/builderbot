@@ -91,6 +91,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        self.mark_session_queue(session_id);
         Ok(message)
     }
 
@@ -207,6 +208,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        self.mark_session_queue(&message.session_id);
         Ok(true)
     }
 
@@ -243,6 +245,9 @@ impl Store {
         }
         let message = select_queued_session_message(&tx, id)?;
         tx.commit()?;
+        if let Some(message) = &message {
+            self.mark_session_queue(&message.session_id);
+        }
         Ok(message)
     }
 
@@ -290,6 +295,7 @@ impl Store {
         }
         let message = select_queued_session_message(&tx, &id)?;
         tx.commit()?;
+        self.mark_session_queue(session_id);
         Ok(message)
     }
 
@@ -299,18 +305,22 @@ impl Store {
         sent_message_id: i64,
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let rows = conn.execute(
-            "UPDATE queued_session_messages
-             SET status = 'sent',
-                 sent_message_id = ?1,
-                 last_error = NULL,
-                 updated_at = ?2
-             WHERE id = ?3
-               AND status = 'sending'
-               AND sent_message_id IS NULL",
-            params![sent_message_id, now_timestamp(), id],
-        )?;
-        Ok(rows > 0)
+        let session_id: Option<String> = conn
+            .query_row(
+                "UPDATE queued_session_messages
+                 SET status = 'sent',
+                     sent_message_id = ?1,
+                     last_error = NULL,
+                     updated_at = ?2
+                 WHERE id = ?3
+                   AND status = 'sending'
+                   AND sent_message_id IS NULL
+                 RETURNING session_id",
+                params![sent_message_id, now_timestamp(), id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(self.mark_queue_written(session_id))
     }
 
     pub fn release_queued_session_message(
@@ -319,19 +329,37 @@ impl Store {
         error: Option<&str>,
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let rows = conn.execute(
-            "UPDATE queued_session_messages
-             SET status = 'queued',
-                 last_error = ?1,
-                 claimed_at = NULL,
-                 owner_pid = NULL,
-                 updated_at = ?2
-             WHERE id = ?3
-               AND status = 'sending'
-               AND sent_message_id IS NULL",
-            params![error, now_timestamp(), id],
-        )?;
-        Ok(rows > 0)
+        let session_id: Option<String> = conn
+            .query_row(
+                "UPDATE queued_session_messages
+                 SET status = 'queued',
+                     last_error = ?1,
+                     claimed_at = NULL,
+                     owner_pid = NULL,
+                     updated_at = ?2
+                 WHERE id = ?3
+                   AND status = 'sending'
+                   AND sent_message_id IS NULL
+                 RETURNING session_id",
+                params![error, now_timestamp(), id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(self.mark_queue_written(session_id))
+    }
+
+    /// Mark the queue of the session a guarded `UPDATE ... RETURNING
+    /// session_id` reported, and return whether the update matched a row.
+    /// These writers are given the queued message's id only, so the statement
+    /// itself names the session.
+    fn mark_queue_written(&self, session_id: Option<String>) -> bool {
+        match session_id {
+            Some(session_id) => {
+                self.mark_session_queue(&session_id);
+                true
+            }
+            None => false,
+        }
     }
 
     fn row_to_queued_session_message(

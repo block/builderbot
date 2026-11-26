@@ -85,9 +85,16 @@
   import { initUpdater, initUpdaterMirror } from './lib/services/updater.svelte';
   import { isUpdaterAvailable, logUpdaterMessage } from './lib/services/updater';
   import { revealWindow } from './lib/services/windowReveal';
+  import { startSessionStream } from './lib/stores/sessionStream.svelte';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
+  // The session stream: running sessions' titles and subtitles, and what an
+  // open chat shows, are pushed to this window over it (see
+  // sessionStream.svelte.ts). Started here and not in onMount, which runs
+  // after every child has mounted: a chat pane that mounts before the stream
+  // is started takes it for unavailable and starts its fallback poll.
+  const stopSessionStream = startSessionStream();
   let unlistenMenu: UnlistenFn | undefined;
   let unlistenReferenceCopy: (() => void) | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
@@ -679,6 +686,7 @@
     unlistenMenu?.();
     unlistenReferenceCopy?.();
     unlistenSessionStatus?.();
+    stopSessionStream();
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();

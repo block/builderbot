@@ -1018,12 +1018,126 @@ export interface SessionPollRequest {
   metadataRefetchIds: number[];
 }
 
-/** One poll tick, read from a single backend snapshot. */
+/** What one `poll_session` call returns, read from a single backend snapshot. */
 export interface SessionPoll {
   session: Session | null;
   queuedMessages: QueuedSessionMessage[];
   messages: SessionMessage[];
   acpMetadataMessages: SessionMessage[];
+}
+
+// ── Session stream ──────────────────────────────────────────────────────
+// What the backend pushes instead of being polled for it. These mirror
+// `session_stream/frames.rs`, `store/session_summary.rs` and
+// `store/session_full.rs`.
+
+/**
+ * How much of a session a client asks the stream for: its status and title;
+ * what its one-line subtitle is derived from as well; or `full`, everything
+ * an open chat shows (`SessionFull`). A session can be asked for at `full`
+ * and at one of the other two together, when it is both an open chat and a
+ * row: the two are served side by side, each with its own snapshot and
+ * deltas.
+ */
+export type SessionStreamLevel = 'title' | 'summary' | 'full';
+
+/** One session a client wants, and at which level. */
+export interface SessionStreamSessionInterest {
+  sessionId: string;
+  level: SessionStreamLevel;
+  /**
+   * At the `full` level: what the client holds of the session, as the cursors
+   * of a poll. Giving one asks for a snapshot read from it, whether or not
+   * the session was already held; leaving it out lets a session already held
+   * carry on with deltas.
+   */
+  cursor?: SessionPollRequest;
+}
+
+/** A client's whole interest. Each one sent replaces the one before. */
+export interface SessionStreamInterest {
+  /**
+   * Chosen by the client and echoed on every frame. A new value starts the
+   * stream over: the sequence restarts at 1 and every session gets a snapshot.
+   */
+  generation: number;
+  /** Nothing is showing (a hidden window): the interest is kept, nothing is sent. */
+  paused: boolean;
+  /** How many of a session's newest visible rows a summary snapshot carries. */
+  summaryWindow: number;
+  sessions: SessionStreamSessionInterest[];
+}
+
+/**
+ * One visible transcript row, as far as a subtitle reads it. `deriveHint`
+ * takes these as they arrive: `sessionHint.ts` holds this type to its
+ * `HintRow`, and the type check fails if the two drift apart.
+ */
+export interface SessionSummaryRow {
+  id: number;
+  role: MessageRole;
+  /** Left out for a `tool_result` row and for the opening prompt. */
+  content?: string;
+  /** Attachment ids of a `user` row. Left out when there are none. */
+  imageIds?: string[];
+}
+
+/** What a row showing a session needs of it. */
+export interface SessionSummary {
+  status: SessionStatus;
+  acpTitle: string | null;
+  /** Left out at the title level, as are the next three. */
+  workingDir?: string;
+  pipeline?: PipelineExecution;
+  /** The id of the prompt that opened the session, once it has one. */
+  openingPromptId: number | null;
+  /** In id order. Empty at the title level. */
+  rows: SessionSummaryRow[];
+}
+
+/**
+ * What an open chat needs of a session: the parts of a `SessionPoll`, sent
+ * when they change. A snapshot holds all four, read from the cursor the
+ * client gave, and is merged as the poll with that cursor would be. A delta
+ * holds the parts that were written.
+ */
+export interface SessionFull {
+  /** Left out of a delta unless the session row changed. */
+  session?: Session;
+  /** The whole queue. Left out of a delta unless the queue was written. */
+  queuedMessages?: QueuedSessionMessage[];
+  /** Visible rows, in id order, to upsert by id. */
+  messages: SessionMessage[];
+  /**
+   * Metadata rows, in id order, to upsert by id. A delta includes the update
+   * that settles a tool call, which the poll's cursor would have filtered.
+   */
+  acpMetadataMessages: SessionMessage[];
+}
+
+/** One session's update for this client. */
+export interface SessionStreamFrame {
+  generation: number;
+  /** Counts this client's frames within the generation, from 1. */
+  seq: number;
+  sessionId: string;
+  /**
+   * `snapshot`: the session's state, which replaces what the client holds
+   * (at the full level it is merged; see `SessionFull`).
+   * `delta`: the current session fields and the current version of each
+   * changed row, to upsert by id.
+   * `resync`: another Staged process wrote the database and the backend
+   * cannot say which rows changed, so the client declares the session again
+   * with the cursor of what it holds and gets a snapshot from it. Only a
+   * session held at the full level is sent one.
+   */
+  kind: 'snapshot' | 'delta' | 'resync';
+  /**
+   * A frame is about one level: a snapshot or a delta carries `summary` (the
+   * title and summary levels) or `full`, never both, and a `resync` neither.
+   */
+  summary?: SessionSummary;
+  full?: SessionFull;
 }
 
 /**

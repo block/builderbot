@@ -2,8 +2,8 @@
  * How ProjectSection's active-session-id set responds to a
  * `session-status-changed` event.
  *
- * The set holds the *project* sessions whose live hints are polled and whose
- * children are queried for badges. Two rules, both load-bearing:
+ * The set holds the *project* sessions whose live hints are taken from the
+ * session stream and whose children are queried for badges. Two rules, both load-bearing:
  *
  * - Every event returns a **fresh Set**, even when the contents don't change.
  *   Reference identity is what re-runs the badge-refresh `$effect`: a window

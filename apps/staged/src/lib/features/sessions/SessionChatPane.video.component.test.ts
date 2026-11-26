@@ -76,14 +76,13 @@ vi.mock('../../commands', async (importOriginal) => ({
   pollSession: pollSessionMock,
   getSessionLiveDelivery: async () => ({ supported: false, retryable: false }),
   getLatestSessionMessages: async () => ({ data: transcript.current }),
-  getSessionMessages: async () => ({ data: [] }),
-  getSessionMessagesSince: async () => [],
   getSessionAcpMetadataMessages: async () => [],
   getSessionAcpMetadataMessagesSince: async () => [],
   listQueuedSessionMessages: async () => [],
 }));
 
 import SessionChatPane from './SessionChatPane.svelte';
+import { FALLBACK_POLL_MS } from './messagePoll';
 import { reactiveProps } from './testStubs/reactiveProps.svelte';
 
 function row(id: number, role: SessionMessage['role'], content: string) {
@@ -162,7 +161,8 @@ describe('SessionChatPane video in an assistant message', () => {
   });
 
   it('shows one again when the message is rendered again as it streams', async () => {
-    // Only the poll's interval: Svelte's own scheduling stays real.
+    // Only the poll's interval: Svelte's own scheduling stays real. No session
+    // stream is started here, so the pane is on its fallback poll.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     sessionStatus.current = 'running';
     transcript.current = [row(1, 'user', 'Show me the recording'), row(2, 'assistant', ANSWER)];
@@ -176,7 +176,7 @@ describe('SessionChatPane video in an assistant message', () => {
     // The next chunk: the same row, longer. The poll brings it in, and the
     // message's `{@html}` is given the whole markup again.
     transcript.current = [transcript.current[0], row(2, 'assistant', `${ANSWER}\n\nThat is all.`)];
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(FALLBACK_POLL_MS);
     // One tick of the interval, so the poll was armed and it ran. Without this
     // a load that had not finished would fail below, as if rendering had.
     expect(pollSessionMock).toHaveBeenCalledTimes(1);

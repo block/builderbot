@@ -1589,16 +1589,11 @@ export function listChildSessions(parentSessionId: string): Promise<ChildSession
 
 const SESSION_MESSAGES_CACHE_TTL = 5 * 60_000;
 
-/** The whole visible transcript. */
-export function getSessionMessages(sessionId: string): Promise<SwrResult<SessionMessage[]>> {
-  return cachedCommand('get_session_messages', { sessionId }, { ttl: SESSION_MESSAGES_CACHE_TTL });
-}
-
 /**
  * The newest `limit` visible rows, oldest first — what the session pane opens
- * with. Cached under its own key (the args include `limit`), so a window is
- * never served in place of the full transcript or vice versa. `bypassCache`
- * reads from the server and refreshes the entry.
+ * with. Cached under a key that includes `limit`, so a window of one size
+ * is never served for another. `bypassCache` reads from the server and
+ * refreshes the entry.
  */
 export function getLatestSessionMessages(
   sessionId: string,
@@ -1630,18 +1625,6 @@ export function getFreshSessionMessages(sessionId: string): Promise<SessionMessa
   return invokeCommand('get_session_messages', { sessionId });
 }
 
-/**
- * Visible messages with id >= sinceId plus fresh copies of refetchIds — an
- * assistant row the writer may still be extending behind later tool rows.
- */
-export function getSessionMessagesSince(
-  sessionId: string,
-  sinceId: number,
-  refetchIds: number[] = []
-): Promise<SessionMessage[]> {
-  return invokeCommand('get_session_messages_since', { sessionId, sinceId, refetchIds });
-}
-
 export function getSessionAcpMetadataMessages(sessionId: string): Promise<SessionMessage[]> {
   return invokeCommand('get_session_acp_metadata_messages', { sessionId });
 }
@@ -1664,10 +1647,16 @@ export function getSessionAcpMetadataMessagesSince(
 }
 
 /**
- * One tick of the session pane's poll: the session row, its follow-up queue
- * and both transcript increments (as getSessionMessagesSince and
- * getSessionAcpMetadataMessagesSince return them) from one backend snapshot.
- * Never cached — every tick must see the server.
+ * One read of a session for the pane that shows it: the session row, its
+ * follow-up queue and both transcript increments (the visible rows with id >=
+ * `sinceId` plus fresh copies of `refetchIds`, and the metadata rows as
+ * getSessionAcpMetadataMessagesSince returns them) from one backend snapshot.
+ * Never cached — every read must see the server.
+ *
+ * The session stream pushes the same content to an open pane, so this is not
+ * called on a timer while the stream is established: a reopened pane calls
+ * it once to catch up, and an open one falls back to it while the stream is
+ * unavailable (`SessionChatPane.svelte`).
  */
 export function pollSession(sessionId: string, request: SessionPollRequest): Promise<SessionPoll> {
   return invokeCommand('poll_session', { sessionId, request });

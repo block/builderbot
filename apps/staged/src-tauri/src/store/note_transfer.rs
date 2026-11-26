@@ -209,10 +209,16 @@ impl Store {
         // with the note; otherwise the destination branch would never see the
         // session as queued or running work, and its completion would drain
         // the branch it left.
-        if let Some(session_id) = existing.session_id.as_deref() {
-            move_settled_session(&tx, session_id, target_branch_id, &existing.title)?;
-        }
+        let session_moved = match existing.session_id.as_deref() {
+            Some(session_id) => {
+                move_settled_session(&tx, session_id, target_branch_id, &existing.title)?
+            }
+            None => false,
+        };
         tx.commit()?;
+        if let (true, Some(session_id)) = (session_moved, existing.session_id.as_deref()) {
+            self.mark_session_written(session_id, 1);
+        }
 
         // Both timelines changed: the note left one and arrived on the other.
         self.publish(StoreChange::Notes {
@@ -304,6 +310,8 @@ impl Store {
         Self::rehome_note_media(&tx, note_id, &existing.title, rehomed)?;
         let now = now_timestamp();
         let mut touched_branches: Vec<String> = Vec::new();
+        // Children's sessions re-homed with them, for the session feed.
+        let mut moved_sessions: Vec<String> = Vec::new();
         for child in children {
             for image in &child.media {
                 Self::insert_image(&tx, image)?;
@@ -372,8 +380,10 @@ impl Store {
             )?;
             // Same as `move_note_to_branch`: the session is scheduled by
             // `sessions.branch_id` and has to arrive with its note.
-            if let Some(session_id) = session_id.as_deref() {
-                move_settled_session(&tx, session_id, &child.target_branch_id, &child_title)?;
+            if let Some(session_id) = session_id {
+                if move_settled_session(&tx, &session_id, &child.target_branch_id, &child_title)? {
+                    moved_sessions.push(session_id);
+                }
             }
             for branch_id in [&child.expected_branch_id, &child.target_branch_id] {
                 if !touched_branches.contains(branch_id) {
@@ -445,6 +455,7 @@ impl Store {
             retarget,
         )?;
         tx.commit()?;
+        self.mark_sessions_written(&moved_sessions);
 
         self.publish(StoreChange::Notes {
             branch_id: None,
@@ -578,19 +589,22 @@ fn media_changed_during_transfer(title: &str) -> StoreError {
 /// session fails the whole move. A session row that no longer exists is not
 /// a live one: the planner reads a missing session as settled, and so does
 /// this, or a retry could never clear the error.
+///
+/// Returns whether a row was moved, which the caller marks on the session
+/// feed once its transaction has committed.
 fn move_settled_session(
     tx: &Transaction<'_>,
     session_id: &str,
     target_branch_id: &str,
     note_title: &str,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let changed = tx.execute(
         "UPDATE sessions SET branch_id = ?1
          WHERE id = ?2 AND status NOT IN ('queued', 'running')",
         params![target_branch_id, session_id],
     )?;
     if changed == 1 {
-        return Ok(());
+        return Ok(true);
     }
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
@@ -598,7 +612,7 @@ fn move_settled_session(
         |row| row.get(0),
     )?;
     if !exists {
-        return Ok(());
+        return Ok(false);
     }
     Err(session_resumed_during_transfer(note_title))
 }
@@ -2033,5 +2047,78 @@ mod tests {
             "The session of 'Plan' started again during the transfer; wait for it to finish before moving the note."
         );
         family.assert_rolled_back(&f);
+    }
+
+    fn store_with_feed() -> (Store, std::sync::Arc<crate::store::SessionFeed>) {
+        let feed = std::sync::Arc::new(crate::store::SessionFeed::default());
+        feed.set_active(true);
+        let store = Store::in_memory().unwrap().with_session_feed(feed.clone());
+        (store, feed)
+    }
+
+    /// A note move takes the note's session to the destination branch, and
+    /// `branch_id` is a field of the session the UI holds: the session is
+    /// marked on the session feed.
+    #[test]
+    fn move_marks_the_session_it_takes_along() {
+        let (store, feed) = store_with_feed();
+        let f = fixture_in(store);
+        let session = completed_session(&f);
+        let note = Note::new(&f.source_branch.id, "Findings", "body").with_session(&session.id);
+        f.store.create_note(&note).unwrap();
+        // A note whose session row is gone moves without one.
+        let orphan = Note::new(&f.source_branch.id, "Orphan", "body").with_session("ghost");
+        f.store.create_note(&orphan).unwrap();
+        feed.drain();
+
+        for note in [&orphan, &note] {
+            f.store
+                .move_note_to_branch(
+                    &note.id,
+                    &f.source_branch.id,
+                    &f.target_branch.id,
+                    "body",
+                    &[],
+                    &[],
+                    &no_media_retargeted,
+                )
+                .unwrap();
+        }
+
+        let marks = feed.drain();
+        assert_eq!(marks.keys().collect::<Vec<_>>(), vec![&session.id]);
+        assert!(marks[&session.id].session);
+    }
+
+    #[test]
+    fn project_note_move_marks_the_child_sessions_it_takes_along() {
+        let (store, feed) = store_with_feed();
+        let f = fixture_in(store);
+        let parent = ProjectNote::new(&f.source.id, "Parent", "body");
+        f.store.create_project_note(&parent).unwrap();
+        let session = completed_session(&f);
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&parent.id)
+            .with_session(&session.id);
+        f.store.create_note(&child).unwrap();
+        feed.drain();
+
+        f.store
+            .move_project_note_to_project(
+                &parent.id,
+                &f.source.id,
+                &parent.content,
+                &f.target.id,
+                "body",
+                &[],
+                &[],
+                &[child_move(&child, &f.target_branch.id)],
+                &no_media_retargeted,
+            )
+            .unwrap();
+
+        let marks = feed.drain();
+        assert_eq!(marks.keys().collect::<Vec<_>>(), vec![&session.id]);
+        assert!(marks[&session.id].session);
     }
 }

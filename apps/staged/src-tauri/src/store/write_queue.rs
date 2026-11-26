@@ -20,9 +20,16 @@
 //!   thread fills with the row id when it inserts the row. The session
 //!   never needs the id itself.
 //! - **Streaming text.** A [`RowWrite`] replaces the row's whole content, so
-//!   one queued right behind another for the same row replaces it in the
-//!   queue instead of joining it: a session streaming faster than the
-//!   writer can store sees its flushes collapse to the latest.
+//!   one queued while another for the same row is still waiting is folded
+//!   into that one, wherever it sits in the queue, instead of joining it. A
+//!   session streaming faster than the writer can store has one write
+//!   waiting per row, carrying the latest text. The waiting write keeps its
+//!   place, so the row is still inserted where its first write was queued
+//!   and row ids keep their order. The folded text is stored at that
+//!   place, ahead of whatever was queued between the two writes; nothing
+//!   queued reads a streamed row's content, and each write is the whole
+//!   text. A write already running takes no fold: the next one for its row
+//!   joins the queue.
 //! - **Answers.** A write whose result the caller needs ([`Store::queued`])
 //!   gets it through a oneshot the caller awaits, which leaves its runtime
 //!   free while it waits. A request whose caller has stopped waiting (a
@@ -32,6 +39,11 @@
 //!   before it is stored, and [`Store::flush_writes_blocking`] does the same
 //!   for a thread that is not on a runtime (the quit path). Dropping the
 //!   store drains the queue before the connection closes.
+//! - **Backlog.** The queue has no limit, since a limit would make a
+//!   session thread wait. Writes that cannot fold (tool-call metadata,
+//!   event rows, delivered messages) still pile up while the writer thread
+//!   is held up, so a deep queue or an old write at its front is reported
+//!   in the log (see [`backlog`]).
 //!
 //! Writes from anywhere else (UI commands, the session runner between
 //! turns) still go straight to the store. They are not ordered against
@@ -39,7 +51,7 @@
 //! anything that reads the transcript afterwards, or writes to it from
 //! another thread, sees it complete.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -48,7 +60,12 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
+use self::backlog::{Backlog, QueueSnapshot, Report};
 use super::{AcpMessageMetadata, MessageRole, Store, StoreError};
+
+mod backlog;
+#[cfg(test)]
+mod tests;
 
 /// A queued write, run on the writer thread against the store.
 type WriteJob = Box<dyn FnOnce(&Store) + Send>;
@@ -80,9 +97,36 @@ impl RowSlot {
         self.0.get().copied()
     }
 
-    fn is(&self, other: &RowSlot) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+    /// The key a waiting write for this row is found under while the row
+    /// has not been inserted.
+    fn unwritten_key(&self) -> RowKey {
+        RowKey::Unwritten(Arc::as_ptr(&self.0) as usize)
     }
+
+    /// The key a waiting write for this row is found under once the row is
+    /// in the store.
+    fn stored_key(&self) -> Option<RowKey> {
+        self.id().map(RowKey::Stored)
+    }
+}
+
+/// What the queue knows a transcript row by, to find the write waiting for
+/// it.
+///
+/// A row in the store goes by its id, not by its slot: two slots can name
+/// one stored row ([`RowSlot::known`], which a writer catching up a
+/// transcript makes for rows another writer added), and their writes must
+/// fold into each other, so that the last one queued is the last one
+/// stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RowKey {
+    /// A row in the store, by id.
+    Stored(i64),
+    /// A row whose slot was empty when its write was queued, by the slot's
+    /// address. The waiting write holds the slot, so the address names no
+    /// other row for as long as the key is in the queue's index. Nothing
+    /// else can name the row yet: it has no id.
+    Unwritten(usize),
 }
 
 impl std::fmt::Debug for RowSlot {
@@ -158,13 +202,115 @@ enum Job {
     Row(Box<RowWrite>),
 }
 
+/// A job waiting in the queue.
+struct Queued {
+    job: Job,
+    /// When it joined the queue. A row write folded into it does not move
+    /// this: the row has had something to store since then.
+    queued_at: Instant,
+    /// The key a row write is indexed under, for as long as it waits.
+    row: Option<RowKey>,
+}
+
 #[derive(Default)]
 struct State {
-    jobs: VecDeque<Job>,
+    jobs: VecDeque<Queued>,
+    /// How many jobs have been taken off the front so far. Jobs are
+    /// numbered in the order they joined, and only ever leave from the
+    /// front, so a waiting job's place in `jobs` is its number less this.
+    taken: u64,
+    /// The waiting write for each row, by job number: where a later write
+    /// for the row is folded in. A job is in here from when it joins the
+    /// queue until the writer thread takes it, so the index is never larger
+    /// than the queue.
+    rows: HashMap<RowKey, u64>,
     /// The store is going away: drain what is queued, then stop.
     closed: bool,
-    /// A job is off the queue and running.
-    busy: bool,
+    /// When the writer thread took the job it is running. `None` between
+    /// jobs.
+    running_since: Option<Instant>,
+    /// What the log has been told about the queue falling behind.
+    backlog: Backlog,
+}
+
+impl State {
+    /// Add `job` at the back of the queue.
+    fn push(&mut self, job: Job, row: Option<RowKey>, now: Instant) {
+        if let Some(row) = row {
+            let number = self.taken + self.jobs.len() as u64;
+            let replaced = self.rows.insert(row, number);
+            debug_assert!(replaced.is_none(), "{row:?} already had a waiting write");
+        }
+        self.jobs.push_back(Queued {
+            job,
+            queued_at: now,
+            row,
+        });
+    }
+
+    /// Queue `write`: fold it into the write waiting for the same row if
+    /// there is one, wherever that sits, otherwise add it at the back.
+    /// Whether it was folded.
+    fn push_row(&mut self, write: RowWrite, now: Instant) -> bool {
+        // By id first. A write waiting under the row's id was queued after
+        // any still waiting under its slot (the row had no id then), and
+        // the later of the two is the one that must end up with this
+        // content.
+        let stored = write.slot.stored_key();
+        let unwritten = write.slot.unwritten_key();
+        let waiting = stored
+            .and_then(|key| self.rows.get(&key))
+            .or_else(|| self.rows.get(&unwritten))
+            .copied();
+        if let Some(number) = waiting {
+            let place = usize::try_from(number - self.taken).ok();
+            if let Some(Queued {
+                job: Job::Row(waiting),
+                ..
+            }) = place.and_then(|place| self.jobs.get_mut(place))
+            {
+                waiting.content = write.content;
+                if write.on_insert.is_some() {
+                    waiting.on_insert = write.on_insert;
+                }
+                self.backlog.folded();
+                return true;
+            }
+            debug_assert!(false, "the row index named a job that is not a row write");
+        }
+        self.push(
+            Job::Row(Box::new(write)),
+            Some(stored.unwrap_or(unwritten)),
+            now,
+        );
+        false
+    }
+
+    /// Take the job at the front for the writer thread to run. Its row
+    /// leaves the index with it: a write queued for the row from here on
+    /// joins the queue, since this one's content is already on its way to
+    /// the store.
+    fn take(&mut self, now: Instant) -> Option<Job> {
+        let queued = self.jobs.pop_front()?;
+        self.taken += 1;
+        if let Some(row) = queued.row {
+            self.rows.remove(&row);
+        }
+        self.running_since = Some(now);
+        Some(queued.job)
+    }
+
+    /// Show the queue as it is now to the backlog report.
+    fn observe(&mut self, now: Instant) -> Option<Report> {
+        let queue = QueueSnapshot {
+            now,
+            waiting: self.jobs.len(),
+            row_writes: self.rows.len(),
+            oldest_queued_at: self.jobs.front().map(|queued| queued.queued_at),
+            running_since: self.running_since,
+        };
+        self.backlog.observe(&queue)
+    }
 }
 
 #[derive(Default)]
@@ -205,28 +351,31 @@ impl WriteQueue {
     }
 
     fn push(&self, job: Job) {
+        let now = Instant::now();
         let mut state = self.shared.state.lock().unwrap();
-        state.jobs.push_back(job);
+        state.push(job, None, now);
+        let report = state.observe(now);
         drop(state);
         self.shared.work.notify_one();
+        if let Some(report) = report {
+            report.log();
+        }
     }
 
-    /// Queue `write`, folding it into the job at the back of the queue when
-    /// that one sets the same row.
+    /// Queue `write`, folding it into the write already waiting for the
+    /// same row, if there is one.
     fn push_row(&self, write: RowWrite) {
+        let now = Instant::now();
         let mut state = self.shared.state.lock().unwrap();
-        if let Some(Job::Row(last)) = state.jobs.back_mut() {
-            if last.slot.is(&write.slot) {
-                last.content = write.content;
-                if write.on_insert.is_some() {
-                    last.on_insert = write.on_insert;
-                }
-                return;
-            }
-        }
-        state.jobs.push_back(Job::Row(Box::new(write)));
+        let folded = state.push_row(write, now);
+        let report = state.observe(now);
         drop(state);
-        self.shared.work.notify_one();
+        if !folded {
+            self.shared.work.notify_one();
+        }
+        if let Some(report) = report {
+            report.log();
+        }
     }
 
     /// Jobs waiting, not counting one running.
@@ -235,10 +384,16 @@ impl WriteQueue {
         self.shared.state.lock().unwrap().jobs.len()
     }
 
+    /// Rows with a write waiting that a later one would fold into.
+    #[cfg(test)]
+    fn indexed_rows(&self) -> usize {
+        self.shared.state.lock().unwrap().rows.len()
+    }
+
     /// Whether nothing is queued or running.
     fn idle(&self) -> bool {
         let state = self.shared.state.lock().unwrap();
-        state.jobs.is_empty() && !state.busy
+        state.jobs.is_empty() && state.running_since.is_none()
     }
 }
 
@@ -259,19 +414,33 @@ impl Drop for WriteQueue {
 /// The writer thread: run jobs in order until the queue closes and is empty.
 fn drain(shared: &Shared, store: &Store) {
     loop {
-        let job = {
+        let (job, report) = {
             let mut state = shared.state.lock().unwrap();
-            state.busy = false;
+            state.running_since = None;
             loop {
-                if let Some(job) = state.jobs.pop_front() {
-                    state.busy = true;
-                    break job;
+                let now = Instant::now();
+                // Before taking the job, so the one about to run counts as
+                // waiting: it is the oldest.
+                let report = state.observe(now);
+                if let Some(job) = state.take(now) {
+                    break (Some(job), report);
+                }
+                // Nothing is waiting. Say so if a backlog was reported, and
+                // come back round: the lock is not held while logging.
+                if let Some(caught_up) = state.backlog.drained(now) {
+                    break (None, Some(caught_up));
                 }
                 if state.closed {
                     return;
                 }
                 state = shared.work.wait(state).unwrap();
             }
+        };
+        if let Some(report) = report {
+            report.log();
+        }
+        let Some(job) = job else {
+            continue;
         };
         let ran = catch_unwind(AssertUnwindSafe(|| match job {
             Job::Run(job) => job(store),
@@ -326,8 +495,9 @@ impl Store {
         }
     }
 
-    /// Queue `write`. Consecutive writes to the same row collapse to the
-    /// latest (see the module docs).
+    /// Queue `write`. If a write for the same row is still waiting, this
+    /// one is folded into it: the row's writes collapse to the latest (see
+    /// the module docs).
     pub fn queue_row_write(&self, write: RowWrite) {
         match self.write_queue() {
             Some(queue) => queue.push_row(write),
@@ -408,269 +578,11 @@ impl Store {
     pub(crate) fn pending_writes(&self) -> usize {
         self.started_write_queue().map_or(0, WriteQueue::pending)
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::{Project, Session};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    fn store_with_session() -> (Arc<Store>, String) {
-        let store = Arc::new(Store::in_memory().unwrap());
-        let project = Project::new("owner/repo");
-        store.create_project(&project).unwrap();
-        let session = Session::new_running("prompt", std::path::Path::new("/tmp"));
-        store.create_session(&session).unwrap();
-        (store, session.id)
-    }
-
-    fn row(slot: &RowSlot, session_id: &str, content: &str) -> RowWrite {
-        RowWrite {
-            slot: slot.clone(),
-            session_id: session_id.to_string(),
-            role: MessageRole::Assistant,
-            content: content.to_string(),
-            on_insert: None,
-        }
-    }
-
-    fn contents(store: &Store, session_id: &str) -> Vec<(MessageRole, String)> {
-        store
-            .get_session_messages(session_id)
-            .unwrap()
-            .into_iter()
-            .map(|m| (m.role, m.content))
-            .collect()
-    }
-
-    /// Writes land in the order they were queued, row writes and other jobs
-    /// interleaved, and a request queued after them sees all of them.
-    #[tokio::test]
-    async fn queued_writes_land_in_order() {
-        let (store, session_id) = store_with_session();
-        let first = RowSlot::new();
-        store.queue_row_write(row(&first, &session_id, "one"));
-        let sid = session_id.clone();
-        store.queue_write(move |store| {
-            store
-                .add_session_message(&sid, MessageRole::ToolCall, "two")
-                .unwrap();
-        });
-        let second = RowSlot::new();
-        store.queue_row_write(row(&second, &session_id, "three"));
-        store.queue_row_write(row(&first, &session_id, "one, edited"));
-
-        let sid = session_id.clone();
-        let seen = store
-            .queued(move |store| contents(store, &sid))
-            .await
-            .unwrap();
-        assert_eq!(
-            seen,
-            vec![
-                (MessageRole::Assistant, "one, edited".to_string()),
-                (MessageRole::ToolCall, "two".to_string()),
-                (MessageRole::Assistant, "three".to_string()),
-            ]
-        );
-        assert!(first.id().is_some() && second.id().is_some());
-        assert!(first.id() < second.id());
-    }
-
-    /// Writes to the same row queued back to back while the writer is held
-    /// up collapse to one job carrying the latest content. One for another
-    /// row in between keeps them apart.
-    #[tokio::test]
-    async fn consecutive_writes_to_a_row_collapse() {
-        let (store, session_id) = store_with_session();
-        let streaming = RowSlot::new();
-        let other = RowSlot::new();
-
-        let held = store.hold_connection();
-        // Whichever way the writer thread is caught (blocked on the first
-        // write, or not yet started on it), what is queued behind it
-        // collapses the same way.
-        store.queue_row_write(row(&other, &session_id, "other"));
-        for text in ["H", "He", "Hel", "Hello"] {
-            store.queue_row_write(row(&streaming, &session_id, text));
-        }
-        assert!(store.pending_writes() <= 2, "{}", store.pending_writes());
-        store.queue_row_write(row(&other, &session_id, "other, edited"));
-        store.queue_row_write(row(&streaming, &session_id, "Hello there"));
-        assert!(store.pending_writes() <= 4, "{}", store.pending_writes());
-        drop(held);
-
-        store.flush_writes().await;
-        assert_eq!(
-            contents(&store, &session_id),
-            vec![
-                (MessageRole::Assistant, "other, edited".to_string()),
-                (MessageRole::Assistant, "Hello there".to_string()),
-            ]
-        );
-        assert!(store.writes_idle());
-    }
-
-    /// A collapsed write keeps the insert metadata the first one carried.
-    #[tokio::test]
-    async fn a_collapsed_insert_keeps_its_metadata() {
-        let (store, session_id) = store_with_session();
-        let slot = RowSlot::new();
-        let held = store.hold_connection();
-        let blocker = RowSlot::new();
-        store.queue_row_write(row(&blocker, &session_id, "blocker"));
-        store.queue_row_write(RowWrite {
-            on_insert: Some(AcpMessageMetadata {
-                acp_tool_call_id: Some("call-1".to_string()),
-                ..Default::default()
-            }),
-            role: MessageRole::ToolResult,
-            ..row(&slot, &session_id, "partial")
-        });
-        store.queue_row_write(RowWrite {
-            role: MessageRole::ToolResult,
-            ..row(&slot, &session_id, "complete")
-        });
-        drop(held);
-        store.flush_writes().await;
-
-        let messages = store.get_session_messages(&session_id).unwrap();
-        let result = messages.last().unwrap();
-        assert_eq!(result.content, "complete");
-        assert_eq!(result.acp.acp_tool_call_id.as_deref(), Some("call-1"));
-    }
-
-    /// Dropping the store stores everything still queued first.
-    #[test]
-    fn dropping_the_store_drains_the_queue() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data.db");
-        let session_id = {
-            let store = Store::new(&path).unwrap();
-            let project = Project::new("owner/repo");
-            store.create_project(&project).unwrap();
-            let session = Session::new_running("prompt", std::path::Path::new("/tmp"));
-            store.create_session(&session).unwrap();
-            let held = store.hold_connection();
-            let slot = RowSlot::new();
-            for text in ["a", "ab", "abc"] {
-                store.queue_row_write(row(&slot, &session.id, text));
-            }
-            let sid = session.id.clone();
-            store.queue_write(move |store| {
-                store
-                    .add_session_message(&sid, MessageRole::ToolCall, "last")
-                    .unwrap();
-            });
-            drop(held);
-            session.id
-        };
-        let store = Store::new(&path).unwrap();
-        assert_eq!(
-            contents(&store, &session_id),
-            vec![
-                (MessageRole::Assistant, "abc".to_string()),
-                (MessageRole::ToolCall, "last".to_string()),
-            ]
-        );
-    }
-
-    /// The blocking flush waits for queued writes, and gives up at its
-    /// timeout while the lock is held.
-    #[test]
-    fn blocking_flush_waits_for_queued_writes() {
-        let (store, session_id) = store_with_session();
-        assert!(store.flush_writes_blocking(Duration::from_millis(10)));
-
-        let held = store.hold_connection();
-        store.queue_row_write(row(&RowSlot::new(), &session_id, "queued"));
-        assert!(!store.flush_writes_blocking(Duration::from_millis(50)));
-        drop(held);
-        assert!(store.flush_writes_blocking(Duration::from_secs(10)));
-        assert_eq!(contents(&store, &session_id).len(), 1);
-    }
-
-    /// A request whose caller stopped waiting before it ran is dropped, not
-    /// run late.
-    #[tokio::test]
-    async fn an_abandoned_request_does_not_run() {
-        let (store, _session_id) = store_with_session();
-        let ran = Arc::new(AtomicBool::new(false));
-        let held = store.hold_connection();
-        let request = {
-            let ran = Arc::clone(&ran);
-            store.queued(move |_| ran.store(true, Ordering::SeqCst))
-        };
-        drop(request);
-        drop(held);
-        store.flush_writes().await;
-        assert!(!ran.load(Ordering::SeqCst));
-    }
-
-    /// The point of the queue: a session thread (a current-thread runtime)
-    /// that queues writes and awaits a queued request keeps running its
-    /// other tasks, a timer here, while another thread holds the connection
-    /// lock. The request completes once the lock is free.
-    #[test]
-    fn a_session_thread_keeps_running_while_the_lock_is_held() {
-        let (store, session_id) = store_with_session();
-        let held = store.hold_connection();
-        let (ticked_tx, ticked_rx) = std::sync::mpsc::channel::<usize>();
-
-        let session_store = Arc::clone(&store);
-        let sid_for_session = session_id.clone();
-        let session = std::thread::spawn(move || {
-            let session_id = sid_for_session;
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .unwrap();
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, async move {
-                let slot = RowSlot::new();
-                for text in ["s", "st", "str"] {
-                    session_store.queue_row_write(row(&slot, &session_id, text));
-                }
-                let sid = session_id.clone();
-                let saved = session_store
-                    .queued(move |store| store.set_agent_session_id(&sid, "agent-1").is_ok());
-                let ticker = tokio::task::spawn_local(async move {
-                    for tick in 1..=5 {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        let _ = ticked_tx.send(tick);
-                    }
-                });
-                ticker.await.unwrap();
-                saved.await.unwrap()
-            })
-        });
-
-        // Every tick arrives with the lock still held here.
-        for expected in 1..=5 {
-            let tick = ticked_rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect("the session thread's timer fires while the lock is held");
-            assert_eq!(tick, expected);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(
-            !session.is_finished(),
-            "the queued request cannot finish while the lock is held"
-        );
-        drop(held);
-        assert!(session.join().unwrap());
-        assert_eq!(
-            store
-                .get_session(&session_id)
-                .unwrap()
-                .and_then(|s| s.agent_id)
-                .as_deref(),
-            Some("agent-1")
-        );
-        assert_eq!(
-            contents(&store, &session_id),
-            vec![(MessageRole::Assistant, "str".to_string())]
-        );
+    /// Rows the queue has a waiting write indexed for.
+    #[cfg(test)]
+    pub(crate) fn indexed_row_writes(&self) -> usize {
+        self.started_write_queue()
+            .map_or(0, WriteQueue::indexed_rows)
     }
 }
